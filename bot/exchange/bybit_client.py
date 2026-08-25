@@ -13,8 +13,8 @@ class BybitClient:
     """Клиент Bybit API v5 (testnet / mainnet)."""
 
     def __init__(self):
-        self.api_key = os.getenv("BYBIT_API_KEY", "")
-        self.api_secret = os.getenv("BYBIT_API_SECRET", "")
+        self.api_key = os.getenv("BYBIT_API_KEY", "").strip()
+        self.api_secret = os.getenv("BYBIT_API_SECRET", "").strip()
         testnet = os.getenv("BYBIT_TESTNET", "true").lower() == "true"
         self.base_url = "https://api-testnet.bybit.com" if testnet else "https://api.bybit.com"
         self.recv_window = "5000"
@@ -49,7 +49,13 @@ class BybitClient:
             else:
                 resp = await client.post(self.base_url + path, json=params, headers=headers)
 
-        data = resp.json()
+        # Защита от не-JSON ответов (например 401 с пустым телом)
+        try:
+            data = resp.json()
+        except Exception:
+            logger.error(f"Bybit не-JSON ответ: status={resp.status_code}, body={resp.text[:200]}")
+            return {"retCode": resp.status_code, "retMsg": f"HTTP {resp.status_code}"}
+
         if data.get("retCode") != 0:
             logger.error(f"Bybit API error: {data}")
         return data
