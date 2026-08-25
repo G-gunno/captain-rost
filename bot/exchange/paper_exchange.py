@@ -14,12 +14,13 @@ class PaperExchange:
         self.start_usdt = start_usdt
         self.usdt = start_usdt
         self.funding = 0.0
-        self.positions = {}
-        self.orders = []
-        self.trades = []
-        self.realized = []
+        self.positions = {}  # symbol -> {"qty", "avg", "tp", "sl", "max_sl", "score", "entry_time"}
+        self.orders = []     # активные лимитные ордера
+        self.trades = []     # история всех сделок
+        self.realized = []   # закрытые сделки с PnL
         self._load()
 
+    # ---------- персистентность ----------
     def _load(self):
         try:
             if self.state_file.exists():
@@ -30,7 +31,7 @@ class PaperExchange:
                 self.orders = data.get("orders", [])
                 self.trades = data.get("trades", [])
                 self.realized = data.get("realized", [])
-                logger.info(f"Paper state загружен: USDT={self.usdt:.2f}")
+                logger.info(f"Paper state загружен: USDT={self.usdt:.2f}, позиций={len(self.positions)}")
         except Exception as e:
             logger.error(f"Paper load error: {e}")
 
@@ -38,17 +39,30 @@ class PaperExchange:
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             self.state_file.write_text(json.dumps({
-                "usdt": self.usdt, "funding": self.funding,
-                "positions": self.positions, "orders": self.orders,
-                "trades": self.trades, "realized": self.realized,
+                "usdt": self.usdt,
+                "funding": self.funding,
+                "positions": self.positions,
+                "orders": self.orders,
+                "trades": self.trades,
+                "realized": self.realized,
             }, ensure_ascii=False))
         except Exception as e:
             logger.error(f"Paper save error: {e}")
 
-    def place_limit_buy(self, symbol, qty, price, tp, sl):
-        order = {"id": f"paper-{int(time.time() * 1000)}", "side": "Buy",
-                 "symbol": symbol, "qty": qty, "price": price,
-                 "tp": tp, "sl": sl, "created": int(time.time())}
+    # ---------- ордера ----------
+    def place_limit_buy(self, symbol, qty, price, tp, sl, score=0):
+        order = {
+            "id": f"paper-{int(time.time() * 1000)}",
+            "side": "Buy",
+            "symbol": symbol,
+            "qty": qty,
+            "price": price,
+            "tp": tp,
+            "sl": sl,
+            "score": score,
+            "requotes": 0,
+            "created": int(time.time()),
+        }
         self.orders.append(order)
         self.save()
         return order
@@ -58,6 +72,7 @@ class PaperExchange:
         self.save()
 
     def check_fills(self, prices):
+        """Лимитный ордер на покупку исполняется, если рынок опустился до цены ордера."""
         fills = []
         for order in list(self.orders):
             last = prices.get(order["symbol"], {}).get("last")
@@ -74,17 +89,24 @@ class PaperExchange:
                     pos["tp"] = order["tp"]
                     pos["sl"] = order["sl"]
                     pos["max_sl"] = order["sl"]
+                    pos["score"] = order.get("score", 0)
                     pos["entry_time"] = int(time.time())
-                    self.trades.append({"side": "Buy", "symbol": order["symbol"],
-                                        "qty": order["qty"], "price": order["price"],
-                                        "time": int(time.time())})
+                    self.trades.append({
+                        "side": "Buy",
+                        "symbol": order["symbol"],
+                        "qty": order["qty"],
+                        "price": order["price"],
+                        "time": int(time.time()),
+                    })
                     self.orders.remove(order)
                     fills.append(order)
-                    logger.info(f"PAPER FILL BUY {order['symbol']} @ {order['price']}")
+                    logger.info(f"PAPER FILL BUY {order['symbol']} {order['qty']} @ {order['price']}")
         self.save()
         return fills
 
+    # ---------- выходы ----------
     def check_exits(self, prices):
+        """Продажа по TP или SL."""
         results = []
         for sym in list(self.positions):
             last = prices.get(sym, {}).get("last")
@@ -109,15 +131,42 @@ class PaperExchange:
             transferred = round(pnl * 0.62, 4)   # 60-65% прибыли -> Funding
             self.usdt -= transferred
             self.funding += transferred
-        self.realized.append({"symbol": sym, "pnl": round(pnl, 4),
-                              "pnl_pct": round(pnl_pct, 2), "reason": reason,
-                              "time": int(time.time())})
-        self.trades.append({"side": "Sell", "symbol": sym, "qty": pos["qty"],
-                            "price": price, "time": int(time.time())})
+        self.realized.append({
+            "symbol": sym,
+            "pnl": round(pnl, 4),
+            "pnl_pct": round(pnl_pct, 2),
+            "reason": reason,
+            "time": int(time.time()),
+        })
+        self.trades.append({
+            "side": "Sell",
+            "symbol": sym,
+            "qty": pos["qty"],
+            "price": price,
+            "time": int(time.time()),
+        })
         self.save()
-        return {"symbol": sym, "price": price, "pnl": pnl,
-                "pnl_pct": pnl_pct, "reason": reason, "transferred": transferred}
+        return {
+            "symbol": sym,
+            "price": price,
+            "pnl": pnl,
+            "pnl_pct": pnl_pct,
+            "reason": reason,
+            "transferred": transferred,
+        }
 
+    def sell_all(self, prices):
+        """Продать все позиции по рынку и снять все ордера."""
+        results = []
+        for sym in list(self.positions):
+            last = prices.get(sym, {}).get("last")
+            if last:
+                results.append(self._sell(sym, last, "EXITALL 🛑"))
+        self.orders = []
+        self.save()
+        return results
+
+    # ---------- метрики ----------
     def equity(self, prices):
         eq = self.usdt + self.funding
         for sym, pos in self.positions.items():
