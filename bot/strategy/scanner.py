@@ -1,5 +1,7 @@
 import time
 
+from loguru import logger
+
 from bot.exchange.market_data import market_data
 from bot.strategy.indicators import ema, rsi, atr
 from bot.news.cmc import get_coin_name
@@ -85,7 +87,7 @@ async def scan(regime, tickers, limit=5):
             continue
         a = atr(candles)
         if a <= 0 or (a / tickers[sym]["last"]) * 100 < 0.25:
-            continue  # слишком низкая волатильность
+            continue  # слишком низкая волатильность — комиссии съедят прибыль
         score, reasons = score_symbol(candles, tickers[sym], regime)
         scored.append({"symbol": sym, "score": score, "reasons": reasons,
                        "atr": a, "last": tickers[sym]["last"],
