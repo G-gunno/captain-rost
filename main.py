@@ -1,4 +1,5 @@
 import os
+import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -29,25 +30,11 @@ def start_health_server():
 
 
 bybit = BybitClient()
+
 logger.info(
     f"Bybit fingerprint: key={bybit.api_key[:4]}...{bybit.api_key[-4:]} "
     f"len={len(bybit.api_key)} | secret_len={len(bybit.api_secret)} | {bybit.base_url}"
 )
-
-def format_wallet(wallet, name):
-    lines = [f"💼 {name}:"]
-    if not wallet:
-        lines.append("   нет данных")
-        return lines
-    shown = False
-    for c in wallet.get("coin", []):
-        equity = float(c.get("equity") or c.get("walletBalance") or 0)
-        if equity > 0.000001:
-            lines.append(f"   {c['coin']}: {equity:.4f}")
-            shown = True
-    if not shown:
-        lines.append("   пусто")
-    return lines
 
 
 async def cmd_start(update, context):
@@ -56,40 +43,16 @@ async def cmd_start(update, context):
 
 async def cmd_status(update, context):
     try:
-        # Сначала проверяем связь с Bybit
-        server_time = await bybit.get_server_time()
-        if server_time.get("retCode") != 0:
-            await update.message.reply_text(f"⚠️ Нет связи с Bybit: {server_time}")
-            return
-
-        bybit_time = server_time["result"]["timeSecond"]
-        local_time = int(time.time())
-        time_diff = abs(bybit_time - local_time)
-
-        msg = ["📊 ДИАГНОСТИКА BYBIT", ""]
-        msg.append(f"✅ Связь с Bybit: OK")
-        msg.append(f"🕐 Время Bybit: {bybit_time}")
-        msg.append(f"🕐 Время сервера: {local_time}")
-        msg.append(f"⏱️ Разница: {time_diff} сек")
+        msg = ["🔎 ПРОВЕРКА КЛЮЧА НА СЕРВЕРАХ BYBIT", ""]
+        for base in [
+            "https://api-testnet.bybit.com",
+            "https://api-demo.bybit.com",
+            "https://api.bybit.com",
+        ]:
+            res = await bybit.check_key_on(base)
+            msg.append(f"{base.replace('https://', '')}:\n   {res}")
         msg.append("")
-
-        if time_diff > 3:
-            msg.append(f"⚠️ Время расходится на {time_diff} сек — может быть проблема с подписью!")
-            msg.append("")
-
-        # Теперь получаем балансы
-        unified = await bybit.get_wallet_balance("UNIFIED")
-        funding = await bybit.get_wallet_balance("FUND")
-
-        if unified:
-            total = unified.get("totalEquityValue", "0")
-            msg.append(f"💰 Total Equity: {float(total):.2f} $")
-            msg.append("")
-
-        msg += format_wallet(unified, "Unified trading")
-        msg.append("")
-        msg += format_wallet(funding, "Funding")
-
+        msg.append(f"🔑 {bybit.api_key[:4]}...{bybit.api_key[-4:]} len={len(bybit.api_key)}")
         await update.message.reply_text("\n".join(msg))
     except Exception as e:
         logger.exception("Ошибка в /status")
