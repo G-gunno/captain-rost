@@ -10,13 +10,15 @@ from loguru import logger
 
 
 class BybitClient:
-    """Клиент Bybit API v5 (testnet / mainnet)."""
+    """Клиент Bybit API v5 (testnet / demo / mainnet)."""
 
     def __init__(self):
         self.api_key = os.getenv("BYBIT_API_KEY", "").strip()
         self.api_secret = os.getenv("BYBIT_API_SECRET", "").strip()
         testnet = os.getenv("BYBIT_TESTNET", "true").lower() == "true"
-        self.base_url = "https://api-testnet.bybit.com" if testnet else "https://api.bybit.com"
+        self.base_url = os.getenv("BYBIT_BASE_URL", "").strip() or (
+            "https://api-testnet.bybit.com" if testnet else "https://api.bybit.com"
+        )
         self.recv_window = "5000"
 
     def _sign(self, params_str: str, timestamp: str) -> str:
@@ -27,27 +29,25 @@ class BybitClient:
             hashlib.sha256,
         ).hexdigest()
 
-    async def _request(self, method: str, path: str, params: dict = None, auth: bool = True):
-        params = params or {}
+    def _headers(self, params_str: str) -> dict:
         timestamp = str(int(time.time() * 1000))
-
-        if method == "GET":
-            params_str = urlencode(params)
-        else:
-            params_str = json.dumps(params)
-
-        headers = {
+        return {
             "X-BAPI-API-KEY": self.api_key,
             "X-BAPI-TIMESTAMP": timestamp,
             "X-BAPI-RECV-WINDOW": self.recv_window,
             "X-BAPI-SIGN": self._sign(params_str, timestamp),
         }
 
+    async def _request(self, method: str, path: str, params: dict = None):
+        params = params or {}
+        params_str = urlencode(params) if method == "GET" else json.dumps(params)
+        headers = self._headers(params_str)
+
         async with httpx.AsyncClient(timeout=15) as client:
             if method == "GET":
-                resp = await client.get(self.base_url + path, params=params, headers=headers if auth else {})
+                resp = await client.get(self.base_url + path, params=params, headers=headers)
             else:
-                resp = await client.post(self.base_url + path, json=params, headers=headers if auth else {})
+                resp = await client.post(self.base_url + path, json=params, headers=headers)
 
         try:
             data = resp.json()
@@ -59,20 +59,22 @@ class BybitClient:
             logger.error(f"Bybit API error: {data}")
         return data
 
-    async def get_server_time(self):
-        """Публичный запрос для проверки связи (без подписи)."""
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(self.base_url + "/v5/market/time")
+    async def check_key_on(self, base_url: str) -> str:
+        """Проверяет, принимает ли данный сервер наш ключ."""
+        params = {"accountType": "UNIFIED"}
+        headers = self._headers(urlencode(params))
         try:
-            return resp.json()
-        except:
-            return {"retCode": resp.status_code, "retMsg": f"HTTP {resp.status_code}"}
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    base_url + "/v5/account/wallet-balance", params=params, headers=headers
+                )
+            data = resp.json()
+            return f"retCode={data.get('retCode')}, retMsg={data.get('retMsg')}"
+        except Exception as e:
+            return f"ошибка сети: {e}"
 
     async def get_wallet_balance(self, account_type: str):
-        """account_type: UNIFIED или FUND"""
-        data = await self._request(
-            "GET", "/v5/account/wallet-balance", {"accountType": account_type}
-        )
+        data = await self._request("GET", "/v5/account/wallet-balance", {"accountType": account_type})
         if data.get("retCode") == 0:
             return data["result"]["list"][0]
         return None
