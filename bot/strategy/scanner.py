@@ -4,6 +4,7 @@ from loguru import logger
 
 from bot.exchange.market_data import market_data
 from bot.strategy.indicators import ema, rsi, atr
+from bot.strategy.learner import learner
 from bot.news.cmc import get_coin_name
 from bot.news.rss_news import fetch_news_cache, check_sentiment
 
@@ -27,7 +28,8 @@ def is_tradable(symbol):
 
 
 def threshold(regime):
-    return {"bull": 5, "neutral": 6, "bear": 8}.get(regime, 6)
+    base = {"bull": 5, "neutral": 6, "bear": 8}.get(regime, 6)
+    return base + learner.threshold_adj
 
 
 async def get_regime():
@@ -55,24 +57,23 @@ def score_symbol(candles, t, regime):
     base_vol = sum(vols[-21:-1]) / 20 if len(vols) > 21 else (sum(vols) / max(1, len(vols)))
     vol_ratio = vols[-1] / base_vol if base_vol else 1.0
 
-    score, reasons = 0, []
-    if last > e50: score += 1; reasons.append("цена выше EMA50")
-    if e21 > e50: score += 1; reasons.append("EMA21>EMA50")
-    if e12 > e26: score += 1; reasons.append("импульс роста")
-    if 40 <= r <= 65: score += 1; reasons.append(f"RSI {r:.0f}")
-    if vol_ratio > 1.3: score += 1; reasons.append(f"объём x{vol_ratio:.1f}")
-    if 0 < t["change_pct"] < 12: score += 1; reasons.append(f"24ч +{t['change_pct']:.1f}%")
+    score, reasons, keys = 0.0, [], []
+    if last > e50: score += learner.weight("ema50"); reasons.append("цена выше EMA50"); keys.append("ema50")
+    if e21 > e50: score += learner.weight("ema21"); reasons.append("EMA21>EMA50"); keys.append("ema21")
+    if e12 > e26: score += learner.weight("impulse"); reasons.append("импульс роста"); keys.append("impulse")
+    if 40 <= r <= 65: score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
+    if vol_ratio > 1.3: score += learner.weight("volume"); reasons.append(f"объём x{vol_ratio:.1f}"); keys.append("volume")
+    if 0 < t["change_pct"] < 12: score += learner.weight("chg24h"); reasons.append(f"24ч +{t['change_pct']:.1f}%"); keys.append("chg24h")
     if regime == "bull": score += 1
     if regime == "bear": score -= 2
     if t["quote_volume"] < 500_000: score -= 1
-    return score, reasons
+    return score, reasons, keys
 
 
 async def scan(regime, tickers, limit=5):
     tradable = [s for s, t in tickers.items()
                 if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
 
-    # Пул: ликвидные + растущие за сутки (следим за "муверами")
     by_vol = sorted(tradable, key=lambda s: tickers[s]["quote_volume"], reverse=True)[:40]
     by_chg = sorted([s for s in tradable if 0 < tickers[s]["change_pct"] < 25],
                     key=lambda s: tickers[s]["change_pct"], reverse=True)[:20]
@@ -87,18 +88,17 @@ async def scan(regime, tickers, limit=5):
             continue
         a = atr(candles)
         if a <= 0 or (a / tickers[sym]["last"]) * 100 < 0.25:
-            continue  # слишком низкая волатильность — комиссии съедят прибыль
-        score, reasons = score_symbol(candles, tickers[sym], regime)
+            continue
+        score, reasons, keys = score_symbol(candles, tickers[sym], regime)
         scored.append({"symbol": sym, "score": score, "reasons": reasons,
-                       "atr": a, "last": tickers[sym]["last"],
+                       "reason_keys": keys, "atr": a, "last": tickers[sym]["last"],
                        "liquidity": tickers[sym]["quote_volume"]})
 
     scored.sort(key=lambda c: c["score"], reverse=True)
 
-    # Диагностика: лучшие сигналы цикла
     thr = threshold(regime)
     SCAN_SUMMARY["text"] = " · ".join(
-        f"{c['symbol']} {c['score']}/{thr}" for c in scored[:3]
+        f"{c['symbol']} {c['score']:.1f}/{thr}" for c in scored[:3]
     ) or "сигналов нет"
     SCAN_SUMMARY["thr"] = thr
     SCAN_SUMMARY["ts"] = time.time()
@@ -109,7 +109,6 @@ async def scan(regime, tickers, limit=5):
         if c["score"] < thr:
             continue
 
-        # --- НОВОСТНАЯ АНАЛИТИКА (RSS + справка CMC) ---
         base = c["symbol"][:-4]
         name = await get_coin_name(base)
         neg, pos, mentions, heads = check_sentiment(news_items, [base, name])
@@ -117,10 +116,12 @@ async def scan(regime, tickers, limit=5):
             logger.info(f"{c['symbol']}: пропущен из-за негативного новостного фона ({neg})")
             continue
         if pos > neg:
-            c["score"] += 1
+            c["score"] += learner.weight("news_pos")
+            c["reason_keys"].append("news_pos")
             c["reasons"].append(f"позитивный новостной фон ({pos})")
         elif mentions >= 2:
-            c["score"] += 1
+            c["score"] += learner.weight("hype")
+            c["reason_keys"].append("hype")
             c["reasons"].append(f"медиа-хайп ({mentions} упом.)")
         candidates.append(c)
 
