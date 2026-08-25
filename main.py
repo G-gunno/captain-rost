@@ -16,11 +16,13 @@ from bot.exchange.paper_exchange import paper
 from bot.core.orchestrator import run_cycle, set_notifier, CYCLE_SECONDS
 from bot.core.state import bot_state
 from bot.services.reports import build_report
+from bot.strategy.scanner import SCAN_SUMMARY
 from bot.utils.format import fmt_price, fmt_usdt, fmt_pct, fmt_sym
 
 _app = None
 
 
+# --- Мини веб-сервер "пульс" для Render (чтобы бесплатный тариф не засыпал) ---
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -94,6 +96,7 @@ async def post_init(application):
     logger.info("Цикл торговли и отчёты запущены")
 
 
+# --- Команды Telegram ---
 async def cmd_start(update, context):
     bot_state.fresh_start()
     await update.message.reply_text(
@@ -228,6 +231,8 @@ async def cmd_status(update, context):
         btc = prices.get("BTCUSDT", {}).get("last", 0)
         msg.append("")
         msg.append(f"₿ BTC: {fmt_price(btc)} $")
+        if SCAN_SUMMARY.get("text"):
+            msg.append(f"🔎 Сканирование: {SCAN_SUMMARY['text']}")
 
         await update.message.reply_text("\n".join(msg))
     except Exception as e:
