@@ -52,14 +52,15 @@ async def fetch_news_cache():
 
 
 def check_sentiment(items, keys):
-    """Новостной фон по монете: (негатив, позитив, заголовки)."""
-    neg = pos = 0
+    """Новостной фон по монете: (негатив, позитив, упоминания, заголовки)."""
+    neg = pos = mentions = 0
     heads = []
     keys_low = [k.lower() for k in keys if k]
     for it in items:
         text = (it["title"] + " " + it["desc"]).lower()
         if not any(k in text for k in keys_low):
             continue
+        mentions += 1
         n = sum(w in text for w in NEG_WORDS)
         p = sum(w in text for w in POS_WORDS)
         if n > p:
@@ -68,4 +69,4 @@ def check_sentiment(items, keys):
         elif p > n:
             pos += 1
             heads.append("✅ " + it["title"])
-    return neg, pos, heads[:2]
+    return neg, pos, mentions, heads[:2]
