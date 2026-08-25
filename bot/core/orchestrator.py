@@ -8,6 +8,7 @@ from bot.strategy.scanner import get_regime, scan
 from bot.strategy.sizing import buy_size
 from bot.strategy.indicators import atr
 from bot.core.state import bot_state
+from bot.utils.format import fmt_price, fmt_usdt, fmt_pct, fmt_sym
 
 CYCLE_SECONDS = 300
 _notify_cb = None
@@ -39,19 +40,29 @@ async def run_cycle():
 
     # 1. Исполнения и выходы по TP/SL
     for f in paper.check_fills(tickers):
-        await notify(f"📥 ИСПОЛНЕНА ПОКУПКА {f['symbol']}: {f['qty']:.6f} @ {f['price']:.8f}\nTP {f['tp']:.8f} | SL {f['sl']:.8f}")
+        tp_pct = (f["tp"] - f["price"]) / f["price"] * 100
+        sl_pct = (f["sl"] - f["price"]) / f["price"] * 100
+        await notify(
+            f"📥 ИСПОЛНЕНА ПОКУПКА · {fmt_sym(f['symbol'])}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"💵 {fmt_usdt(f['qty'] * f['price'])} USDT @ {fmt_price(f['price'])}\n"
+            f"🎯 TP: {fmt_price(f['tp'])} ({fmt_pct(tp_pct)})\n"
+            f"🛡 SL: {fmt_price(f['sl'])} ({fmt_pct(sl_pct)})"
+        )
     for ex in paper.check_exits(tickers):
         await notify(
-            f"📤 ПРОДАЖА {ex['symbol']} @ {ex['price']:.8f} | {ex['reason']}\n"
-            f"PnL: {ex['pnl']:+.2f} USDT ({ex['pnl_pct']:+.1f}%)\n"
-            f"🏦 В Funding: {ex['transferred']:.2f} USDT"
+            f"📤 ПРОДАЖА · {fmt_sym(ex['symbol'])} · {ex['reason']}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"💰 Цена: {fmt_price(ex['price'])} ({fmt_pct(ex['pnl_pct'])})\n"
+            f"💵 PnL: {ex['pnl']:+.2f} USDT\n"
+            f"🏦 В Funding: {fmt_usdt(ex['transferred'])} USDT"
         )
 
     # 2. Оценка рынка
     regime, info = await get_regime()
     logger.info(f"Regime: {regime} | {info}")
 
-    # 3. ЭКСТРЕННЫЙ РИСК-МЕНЕДЖМЕНТ (грядущий дамп)
+    # 3. ЭКСТРЕННЫЙ РИСК-МЕНЕДЖМЕНТ
     btc_t = tickers.get("BTCUSDT", {})
     btc_c = await market_data.get_kline("BTCUSDT", "60", 3)
     drop_1h = 0.0
@@ -60,7 +71,10 @@ async def run_cycle():
     if drop_1h <= -3 or btc_t.get("change_pct", 0) <= -6:
         if paper.positions or paper.orders:
             for ex in paper.sell_all(tickers):
-                await notify(f"🚨 ЭКСТРЕННЫЙ ВЫХОД {ex['symbol']} @ {ex['price']:.8f} | PnL {ex['pnl']:+.2f} USDT")
+                await notify(
+                    f"🚨 ЭКСТРЕННЫЙ ВЫХОД · {fmt_sym(ex['symbol'])}\n"
+                    f"💰 {fmt_price(ex['price'])} | PnL: {ex['pnl']:+.2f} USDT"
+                )
             await notify("🚨 Риск-менеджмент: резкий дамп рынка. Все позиции закрыты в USDT.")
         return
 
@@ -86,7 +100,7 @@ async def run_cycle():
             paper.save()
             logger.info(f"SL поднят {sym} -> {pos['sl']}")
 
-    # 5. Неисполненные ордера: перевыставление (до 3 попыток)
+    # 5. Неисполненные ордера: перевыставление
     now = int(time.time())
     for order in list(paper.orders):
         if (now - order["created"]) < 900:
@@ -96,7 +110,7 @@ async def run_cycle():
             continue
         if order.get("requotes", 0) >= 2:
             paper.cancel_order(order["id"])
-            await notify(f"❌ {order['symbol']}: ордер снят после 3 попыток без исполнения.")
+            await notify(f"❌ ОРДЕР СНЯТ · {fmt_sym(order['symbol'])}\nБез исполнения после 3 попыток.")
             continue
         candles = await market_data.get_kline(order["symbol"], "15", 60)
         a = atr(candles) if candles else 0
@@ -110,7 +124,10 @@ async def run_cycle():
         order["requotes"] = order.get("requotes", 0) + 1
         paper.orders.append(order)
         paper.save()
-        await notify(f"🔁 {order['symbol']}: ордер перевыставлен @ {order['price']:.8f} (попытка {order['requotes'] + 1})")
+        await notify(
+            f"🔁 ОРДЕР ПЕРВЫСТАВЛЕН · {fmt_sym(order['symbol'])}\n"
+            f"📥 Новая цена: {fmt_price(order['price'])} (попытка {order['requotes'] + 1})"
+        )
 
     # 6. Сканирование и покупки / ротация
     candidates = []
@@ -121,7 +138,6 @@ async def run_cycle():
 
     equity = paper.equity(tickers)
 
-    # Ротация: нет свободных USDT, но сигнал сильнее текущих позиций
     if paper.usdt < 10 and candidates and paper.positions:
         best = candidates[0]
         weakest_sym, weakest_pos = min(paper.positions.items(), key=lambda kv: kv[1].get("score", 0))
@@ -131,11 +147,10 @@ async def run_cycle():
             if pnl_pct >= 1.0 and best["score"] >= weakest_pos.get("score", 0) + 1:
                 paper._sell(weakest_sym, t["last"], "РОТАЦИЯ 🔄")
                 await notify(
-                    f"🔄 РОТАЦИЯ: продал {weakest_sym} ({pnl_pct:+.1f}%) — "
-                    f"сигнал {best['symbol']} сильнее (score {best['score']})"
+                    f"🔄 РОТАЦИЯ · продан {fmt_sym(weakest_sym)} ({fmt_pct(pnl_pct)})\n"
+                    f"Сигнал {fmt_sym(best['symbol'])} сильнее (⭐ {best['score']})"
                 )
 
-    # Покупки
     for cand in candidates:
         if paper.usdt < 10:
             break
@@ -154,11 +169,17 @@ async def run_cycle():
             continue
         qty = size / entry
         paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl, score=cand["score"])
+        tp_pct = (tp - entry) / entry * 100
+        sl_pct = (sl - entry) / entry * 100
         await notify(
-            f"🎯 ВЫСТАВЛЕНА ПОКУПКА {sym}\n"
-            f"Сумма: {size:.2f} USDT @ {entry:.8f}\n"
-            f"Score: {cand['score']} | TP {tp:.8f} | SL {sl:.8f}\n"
-            f"Причина: {'; '.join(cand['reasons'][:4])}"
+            f"🎯 ВЫСТАВЛЕНА ПОКУПКА · {fmt_sym(sym)}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"💵 Сумма: {fmt_usdt(size)} USDT\n"
+            f"📥 Вход: {fmt_price(entry)}\n"
+            f"🎯 TP: {fmt_price(tp)} ({fmt_pct(tp_pct)})\n"
+            f"🛡 SL: {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
+            f"⭐ Сигнал: {cand['score']}\n"
+            f"🧠 Причина: {'; '.join(cand['reasons'][:4])}"
         )
 
     logger.info("=== CYCLE END ===")
