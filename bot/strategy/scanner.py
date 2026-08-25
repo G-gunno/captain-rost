@@ -1,7 +1,11 @@
+import time
+
 from bot.exchange.market_data import market_data
 from bot.strategy.indicators import ema, rsi, atr
 from bot.news.cmc import get_coin_name
 from bot.news.rss_news import fetch_news_cache, check_sentiment
+
+SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
 
 STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
                 "USD1", "USDD", "EUR", "EURT", "AEUR", "USDT",
@@ -63,14 +67,19 @@ def score_symbol(candles, t, regime):
 
 
 async def scan(regime, tickers, limit=5):
-    pre = [s for s, t in tickers.items()
-           if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
-    pre.sort(key=lambda s: tickers[s]["quote_volume"], reverse=True)
+    tradable = [s for s, t in tickers.items()
+                if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
+
+    # Пул: ликвидные + растущие за сутки (следим за "муверами")
+    by_vol = sorted(tradable, key=lambda s: tickers[s]["quote_volume"], reverse=True)[:40]
+    by_chg = sorted([s for s in tradable if 0 < tickers[s]["change_pct"] < 25],
+                    key=lambda s: tickers[s]["change_pct"], reverse=True)[:20]
+    pool = list(dict.fromkeys(by_vol + by_chg))
 
     news_items = await fetch_news_cache()
 
-    candidates = []
-    for sym in pre[:40]:
+    scored = []
+    for sym in pool:
         candles = await market_data.get_kline(sym, "15", 120)
         if len(candles) < 60:
             continue
@@ -78,27 +87,40 @@ async def scan(regime, tickers, limit=5):
         if a <= 0 or (a / tickers[sym]["last"]) * 100 < 0.25:
             continue  # слишком низкая волатильность
         score, reasons = score_symbol(candles, tickers[sym], regime)
-        if score < threshold(regime):
+        scored.append({"symbol": sym, "score": score, "reasons": reasons,
+                       "atr": a, "last": tickers[sym]["last"],
+                       "liquidity": tickers[sym]["quote_volume"]})
+
+    scored.sort(key=lambda c: c["score"], reverse=True)
+
+    # Диагностика: лучшие сигналы цикла
+    thr = threshold(regime)
+    SCAN_SUMMARY["text"] = " · ".join(
+        f"{c['symbol']} {c['score']}/{thr}" for c in scored[:3]
+    ) or "сигналов нет"
+    SCAN_SUMMARY["thr"] = thr
+    SCAN_SUMMARY["ts"] = time.time()
+    logger.info(f"Scan top: {SCAN_SUMMARY['text']}")
+
+    candidates = []
+    for c in scored:
+        if c["score"] < thr:
             continue
 
         # --- НОВОСТНАЯ АНАЛИТИКА (RSS + справка CMC) ---
-        base = sym[:-4]
+        base = c["symbol"][:-4]
         name = await get_coin_name(base)
         neg, pos, mentions, heads = check_sentiment(news_items, [base, name])
         if neg > 0 and neg > pos:
-            logger.info(f"{sym}: пропущен из-за негативного новостного фона ({neg})")
+            logger.info(f"{c['symbol']}: пропущен из-за негативного новостного фона ({neg})")
             continue
         if pos > neg:
-            score += 1
-            reasons.append(f"позитивный новостной фон ({pos})")
+            c["score"] += 1
+            c["reasons"].append(f"позитивный новостной фон ({pos})")
         elif mentions >= 2:
-            score += 1
-            reasons.append(f"медиа-хайп ({mentions} упом.)")
+            c["score"] += 1
+            c["reasons"].append(f"медиа-хайп ({mentions} упом.)")
+        candidates.append(c)
 
-        candidates.append({
-            "symbol": sym, "score": score, "reasons": reasons,
-            "atr": a, "last": tickers[sym]["last"],
-            "liquidity": tickers[sym]["quote_volume"],
-        })
     candidates.sort(key=lambda c: c["score"], reverse=True)
     return candidates[:limit]
