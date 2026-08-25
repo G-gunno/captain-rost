@@ -5,6 +5,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from bot.strategy.learner import learner
+
 
 class PaperExchange:
     """Виртуальная биржа: реальные цены, виртуальные деньги."""
@@ -14,7 +16,7 @@ class PaperExchange:
         self.start_usdt = start_usdt
         self.usdt = start_usdt
         self.funding = 0.0
-        self.positions = {}  # symbol -> {"qty", "avg", "tp", "sl", "max_sl", "score", "entry_time"}
+        self.positions = {}  # symbol -> {"qty","avg","tp","sl","max_sl","score","reason_keys","entry_time"}
         self.orders = []     # активные лимитные ордера
         self.trades = []     # история всех сделок
         self.realized = []   # закрытые сделки с PnL
@@ -50,7 +52,7 @@ class PaperExchange:
             logger.error(f"Paper save error: {e}")
 
     # ---------- ордера ----------
-    def place_limit_buy(self, symbol, qty, price, tp, sl, score=0):
+    def place_limit_buy(self, symbol, qty, price, tp, sl, score=0, reason_keys=None):
         order = {
             "id": f"paper-{int(time.time() * 1000)}",
             "side": "Buy",
@@ -60,6 +62,7 @@ class PaperExchange:
             "tp": tp,
             "sl": sl,
             "score": score,
+            "reason_keys": reason_keys or [],
             "requotes": 0,
             "created": int(time.time()),
         }
@@ -90,6 +93,7 @@ class PaperExchange:
                     pos["sl"] = order["sl"]
                     pos["max_sl"] = order["sl"]
                     pos["score"] = order.get("score", 0)
+                    pos["reason_keys"] = order.get("reason_keys", [])
                     pos["entry_time"] = int(time.time())
                     self.trades.append({
                         "side": "Buy",
@@ -125,6 +129,13 @@ class PaperExchange:
         cost = pos["qty"] * pos["avg"]
         pnl = proceeds - cost
         pnl_pct = (pnl / cost * 100) if cost else 0.0
+
+        # --- самообучение: фиксируем исход и причины ---
+        try:
+            learner.record(pos.get("reason_keys", []), pnl > 0)
+        except Exception as e:
+            logger.error(f"learner record error: {e}")
+
         self.usdt += proceeds
         transferred = 0.0
         if pnl > 0:
