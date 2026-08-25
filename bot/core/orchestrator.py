@@ -11,6 +11,10 @@ from bot.core.state import bot_state
 from bot.utils.format import fmt_price, fmt_usdt, fmt_pct, fmt_sym
 
 CYCLE_SECONDS = 300
+FEE_PCT = 0.10      # комиссия Bybit за сторону, %
+MIN_TP_PCT = 0.60   # минимальный TP (двойная комиссия + прибыль)
+MIN_SL_PCT = 0.35   # минимальный SL (защита от рыночного шума)
+MIN_RR = 1.5        # минимальное соотношение прибыль/риск
 _notify_cb = None
 
 
@@ -118,8 +122,8 @@ async def run_cycle():
             continue
         paper.cancel_order(order["id"])
         order["price"] = t["last"] * 0.998
-        order["tp"] = order["price"] + 2.0 * a
-        order["sl"] = order["price"] - 1.2 * a
+        order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
+        order["sl"] = min(order["price"] - 1.2 * a, order["price"] * (1 - MIN_SL_PCT / 100))
         order["created"] = now
         order["requotes"] = order.get("requotes", 0) + 1
         paper.orders.append(order)
@@ -165,7 +169,10 @@ async def run_cycle():
         if a <= 0:
             continue
         sl, tp = entry - 1.2 * a, entry + 2.0 * a
-        if tp <= entry or sl >= entry:
+        tp = max(tp, entry * (1 + MIN_TP_PCT / 100))
+        sl = min(sl, entry * (1 - MIN_SL_PCT / 100))
+        rr = (tp - entry) / (entry - sl) if entry > sl else 0
+        if tp <= entry or sl >= entry or rr < MIN_RR:
             continue
         qty = size / entry
         paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl, score=cand["score"])
