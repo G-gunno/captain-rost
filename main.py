@@ -17,6 +17,7 @@ from bot.core.orchestrator import run_cycle, set_notifier, CYCLE_SECONDS
 from bot.core.state import bot_state
 from bot.services.reports import build_report
 from bot.strategy.scanner import SCAN_SUMMARY
+from bot.strategy.learner import learner
 from bot.utils.format import fmt_price, fmt_usdt, fmt_pct, fmt_sym
 
 _app = None
@@ -108,7 +109,7 @@ async def cmd_help(update, context):
     await update.message.reply_text(
         "📖 МОИ КОМАНДЫ:\n"
         "/start — запустить торговлю, новый цикл\n"
-        "/status — балансы, позиции с весами, активные ордера, статистика\n"
+        "/status — балансы, позиции с весами, активные ордера, статистика, обучение\n"
         "/pause — пауза (ордера запомнить и снять)\n"
         "/resume — возобновить (ордера вернуть)\n"
         "/exitall — остановить и продать всё\n"
@@ -233,6 +234,7 @@ async def cmd_status(update, context):
         msg.append(f"₿ BTC: {fmt_price(btc)} $")
         if SCAN_SUMMARY.get("text"):
             msg.append(f"🔎 Сканирование: {SCAN_SUMMARY['text']}")
+        msg.append(f"🧠 Обучение: {learner.summary()}")
 
         await update.message.reply_text("\n".join(msg))
     except Exception as e:
