@@ -29,7 +29,10 @@ def start_health_server():
 
 
 bybit = BybitClient()
-
+logger.info(
+    f"Bybit fingerprint: key={bybit.api_key[:4]}...{bybit.api_key[-4:]} "
+    f"len={len(bybit.api_key)} | secret_len={len(bybit.api_secret)} | {bybit.base_url}"
+)
 
 def format_wallet(wallet, name):
     lines = [f"💼 {name}:"]
