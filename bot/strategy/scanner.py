@@ -2,7 +2,9 @@ from bot.exchange.market_data import market_data
 from bot.strategy.indicators import ema, rsi, atr
 
 STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
-                "USD1", "USDD", "EUR", "EURT", "AEUR", "USDT"}
+                "USD1", "USDD", "EUR", "EURT", "AEUR", "USDT",
+                "RLUSD", "PYUSD", "EURI", "USDS", "USD0", "FRAX",
+                "LUSD", "GUSD", "XUSD", "USDX", "CUSD", "SUSD"}
 
 
 def is_tradable(symbol):
@@ -68,11 +70,14 @@ async def scan(regime, tickers, limit=5):
         candles = await market_data.get_kline(sym, "15", 120)
         if len(candles) < 60:
             continue
+        a = atr(candles)
+        if a <= 0 or (a / tickers[sym]["last"]) * 100 < 0.25:
+            continue  # слишком низкая волатильность — комиссии съедят прибыль
         score, reasons = score_symbol(candles, tickers[sym], regime)
         if score >= threshold(regime):
             candidates.append({
                 "symbol": sym, "score": score, "reasons": reasons,
-                "atr": atr(candles), "last": tickers[sym]["last"],
+                "atr": a, "last": tickers[sym]["last"],
                 "liquidity": tickers[sym]["quote_volume"],
             })
     candidates.sort(key=lambda c: c["score"], reverse=True)
