@@ -152,7 +152,7 @@ async def run_cycle():
                 paper._sell(weakest_sym, t["last"], "РОТАЦИЯ 🔄")
                 await notify(
                     f"🔄 РОТАЦИЯ · продан {fmt_sym(weakest_sym)} ({fmt_pct(pnl_pct)})\n"
-                    f"Сигнал {fmt_sym(best['symbol'])} сильнее (⭐ {best['score']})"
+                    f"Сигнал {fmt_sym(best['symbol'])} сильнее (⭐ {best['score']:.1f})"
                 )
 
     for cand in candidates:
@@ -175,7 +175,8 @@ async def run_cycle():
         if tp <= entry or sl >= entry or rr < MIN_RR:
             continue
         qty = size / entry
-        paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl, score=cand["score"])
+        paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl,
+                              score=cand["score"], reason_keys=cand.get("reason_keys", []))
         tp_pct = (tp - entry) / entry * 100
         sl_pct = (sl - entry) / entry * 100
         await notify(
@@ -185,7 +186,7 @@ async def run_cycle():
             f"📥 Вход: {fmt_price(entry)}\n"
             f"🎯 TP: {fmt_price(tp)} ({fmt_pct(tp_pct)})\n"
             f"🛡 SL: {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
-            f"⭐ Сигнал: {cand['score']}\n"
+            f"⭐ Сигнал: {cand['score']:.1f}\n"
             f"🧠 Причина: {'; '.join(cand['reasons'][:4])}"
         )
 
