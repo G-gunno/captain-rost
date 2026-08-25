@@ -105,7 +105,7 @@ async def cmd_help(update, context):
     await update.message.reply_text(
         "📖 МОИ КОМАНДЫ:\n"
         "/start — запустить торговлю, новый цикл\n"
-        "/status — балансы, позиции, активные ордера, статистика\n"
+        "/status — балансы, позиции с весами, активные ордера, статистика\n"
         "/pause — пауза (ордера запомнить и снять)\n"
         "/resume — возобновить (ордера вернуть)\n"
         "/exitall — остановить и продать всё\n"
@@ -166,31 +166,55 @@ async def cmd_status(update, context):
         eq = paper.equity(prices)
 
         msg = ["📊 СТАТУС (РЕЖИМ: ТРЕНИРОВКА 🎓)", ""]
-        msg.append(f"💰 Свободно: {fmt_usdt(paper.usdt)} USDT")
+        free_pct = paper.usdt / eq * 100 if eq else 0
+        msg.append(f"💰 Свободно: {fmt_usdt(paper.usdt)} USDT ({free_pct:.0f}%)")
         msg.append(f"🏦 Funding: {fmt_usdt(paper.funding)} USDT")
         msg.append(f"📈 Total Equity: {fmt_usdt(eq)} $")
 
+        # --- ПОЗИЦИИ С ВЕСОМ ---
         msg.append("")
         if paper.positions:
-            msg.append(f"📦 ПОЗИЦИИ ({len(paper.positions)}):")
+            invested = sum(
+                p["qty"] * prices.get(s, {}).get("last", 0)
+                for s, p in paper.positions.items()
+            )
+            inv_pct = invested / eq * 100 if eq else 0
+            msg.append(
+                f"📦 ПОЗИЦИИ ({len(paper.positions)}) · "
+                f"занято {fmt_usdt(invested)} USDT ({inv_pct:.0f}% портфеля):"
+            )
             for sym, pos in paper.positions.items():
                 last = prices.get(sym, {}).get("last", 0)
+                val = pos["qty"] * last
+                w = val / eq * 100 if eq else 0
                 pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
-                msg.append(f"   • {fmt_sym(sym)}: {fmt_pct(pnl_pct)}")
+                msg.append(f"   • {fmt_sym(sym)} · {fmt_pct(pnl_pct)}")
+                msg.append(f"      💼 Вес: {fmt_usdt(val)} USDT ({w:.1f}% портфеля)")
                 msg.append(f"      📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)}")
                 msg.append(f"      🎯 {fmt_price(pos['tp'])} | 🛡 {fmt_price(pos['sl'])}")
         else:
             msg.append("📦 ПОЗИЦИИ: нет")
 
+        # --- АКТИВНЫЕ ОРДЕРА С ВЕСОМ ---
         msg.append("")
         if paper.orders:
-            msg.append(f"📋 АКТИВНЫЕ ОРДЕРА ({len(paper.orders)}):")
+            orders_sum = sum(o["qty"] * o["price"] for o in paper.orders)
+            msg.append(
+                f"📋 АКТИВНЫЕ ОРДЕРА ({len(paper.orders)}) · "
+                f"на {fmt_usdt(orders_sum)} USDT:"
+            )
             for o in paper.orders:
-                msg.append(f"   • {fmt_sym(o['symbol'])}: покупка {fmt_usdt(o['qty'] * o['price'])} USDT @ {fmt_price(o['price'])}")
+                val = o["qty"] * o["price"]
+                w = val / eq * 100 if eq else 0
+                msg.append(
+                    f"   • {fmt_sym(o['symbol'])}: {fmt_usdt(val)} USDT "
+                    f"({w:.1f}%) @ {fmt_price(o['price'])}"
+                )
                 msg.append(f"      🎯 {fmt_price(o['tp'])} | 🛡 {fmt_price(o['sl'])}")
         else:
             msg.append("📋 АКТИВНЫЕ ОРДЕРА: нет")
 
+        # --- СТАТИСТИКА ---
         msg.append("")
         wins = [r for r in paper.realized if r["pnl"] > 0]
         losses = [r for r in paper.realized if r["pnl"] <= 0]
