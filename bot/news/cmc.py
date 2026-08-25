@@ -6,7 +6,7 @@ from loguru import logger
 
 CMC_BASE = "https://pro-api.coinmarketcap.com"
 
-_cache = {"hype": None, "hype_ts": 0, "info": {}}
+_cache = {"info": {}}
 
 
 async def _get(path, params):
@@ -27,29 +27,8 @@ async def _get(path, params):
         return None
 
 
-async def get_hype_symbols() -> set:
-    """Монеты из трендов CMC (кэш 30 минут)."""
-    now = time.time()
-    if _cache["hype"] is not None and now - _cache["hype_ts"] < 1800:
-        return _cache["hype"]
-    hype = set()
-    for path in ["/v1/cryptocurrency/trending/latest",
-                 "/v1/cryptocurrency/trending/most-visited"]:
-        data = await _get(path, {"limit": 30})
-        if data:
-            arr = data.get("data")
-            if isinstance(arr, dict):
-                arr = arr.get("items") or []
-            for item in arr or []:
-                sym = (item.get("symbol") or "").upper()
-                if sym:
-                    hype.add(sym)
-    _cache["hype"], _cache["hype_ts"] = hype, now
-    return hype
-
-
 async def get_coin_name(symbol: str) -> str:
-    """Название монеты по тику (кэш 24 часа)."""
+    """Название монеты по тикеру (кэш 24 часа)."""
     info = _cache["info"].get(symbol)
     if info and time.time() - info["ts"] < 86400:
         return info["name"]
