@@ -27,7 +27,7 @@ class BybitClient:
             hashlib.sha256,
         ).hexdigest()
 
-    async def _request(self, method: str, path: str, params: dict = None):
+    async def _request(self, method: str, path: str, params: dict = None, auth: bool = True):
         params = params or {}
         timestamp = str(int(time.time() * 1000))
 
@@ -45,11 +45,10 @@ class BybitClient:
 
         async with httpx.AsyncClient(timeout=15) as client:
             if method == "GET":
-                resp = await client.get(self.base_url + path, params=params, headers=headers)
+                resp = await client.get(self.base_url + path, params=params, headers=headers if auth else {})
             else:
-                resp = await client.post(self.base_url + path, json=params, headers=headers)
+                resp = await client.post(self.base_url + path, json=params, headers=headers if auth else {})
 
-        # Защита от не-JSON ответов (например 401 с пустым телом)
         try:
             data = resp.json()
         except Exception:
@@ -59,6 +58,15 @@ class BybitClient:
         if data.get("retCode") != 0:
             logger.error(f"Bybit API error: {data}")
         return data
+
+    async def get_server_time(self):
+        """Публичный запрос для проверки связи (без подписи)."""
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(self.base_url + "/v5/market/time")
+        try:
+            return resp.json()
+        except:
+            return {"retCode": resp.status_code, "retMsg": f"HTTP {resp.status_code}"}
 
     async def get_wallet_balance(self, account_type: str):
         """account_type: UNIFIED или FUND"""
