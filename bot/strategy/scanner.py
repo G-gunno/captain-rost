@@ -1,6 +1,6 @@
 from bot.exchange.market_data import market_data
 from bot.strategy.indicators import ema, rsi, atr
-from bot.news.cmc import get_hype_symbols, get_coin_name
+from bot.news.cmc import get_coin_name
 from bot.news.rss_news import fetch_news_cache, check_sentiment
 
 STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
@@ -67,7 +67,6 @@ async def scan(regime, tickers, limit=5):
            if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
     pre.sort(key=lambda s: tickers[s]["quote_volume"], reverse=True)
 
-    hype = await get_hype_symbols()
     news_items = await fetch_news_cache()
 
     candidates = []
@@ -82,19 +81,19 @@ async def scan(regime, tickers, limit=5):
         if score < threshold(regime):
             continue
 
-        # --- НОВОСТНАЯ АНАЛИТИКА (CMC + RSS) ---
+        # --- НОВОСТНАЯ АНАЛИТИКА (RSS + справка CMC) ---
         base = sym[:-4]
         name = await get_coin_name(base)
-        neg, pos, heads = check_sentiment(news_items, [base, name])
+        neg, pos, mentions, heads = check_sentiment(news_items, [base, name])
         if neg > 0 and neg > pos:
             logger.info(f"{sym}: пропущен из-за негативного новостного фона ({neg})")
             continue
         if pos > neg:
             score += 1
             reasons.append(f"позитивный новостной фон ({pos})")
-        if base in hype:
+        elif mentions >= 2:
             score += 1
-            reasons.append("в трендах CMC")
+            reasons.append(f"медиа-хайп ({mentions} упом.)")
 
         candidates.append({
             "symbol": sym, "score": score, "reasons": reasons,
