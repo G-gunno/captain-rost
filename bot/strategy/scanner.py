@@ -1,5 +1,7 @@
 from bot.exchange.market_data import market_data
 from bot.strategy.indicators import ema, rsi, atr
+from bot.news.cmc import get_hype_symbols, get_coin_name
+from bot.news.rss_news import fetch_news_cache, check_sentiment
 
 STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
                 "USD1", "USDD", "EUR", "EURT", "AEUR", "USDT",
@@ -65,6 +67,9 @@ async def scan(regime, tickers, limit=5):
            if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
     pre.sort(key=lambda s: tickers[s]["quote_volume"], reverse=True)
 
+    hype = await get_hype_symbols()
+    news_items = await fetch_news_cache()
+
     candidates = []
     for sym in pre[:40]:
         candles = await market_data.get_kline(sym, "15", 120)
@@ -72,13 +77,29 @@ async def scan(regime, tickers, limit=5):
             continue
         a = atr(candles)
         if a <= 0 or (a / tickers[sym]["last"]) * 100 < 0.25:
-            continue  # слишком низкая волатильность — комиссии съедят прибыль
+            continue  # слишком низкая волатильность
         score, reasons = score_symbol(candles, tickers[sym], regime)
-        if score >= threshold(regime):
-            candidates.append({
-                "symbol": sym, "score": score, "reasons": reasons,
-                "atr": a, "last": tickers[sym]["last"],
-                "liquidity": tickers[sym]["quote_volume"],
-            })
+        if score < threshold(regime):
+            continue
+
+        # --- НОВОСТНАЯ АНАЛИТИКА (CMC + RSS) ---
+        base = sym[:-4]
+        name = await get_coin_name(base)
+        neg, pos, heads = check_sentiment(news_items, [base, name])
+        if neg > 0 and neg > pos:
+            logger.info(f"{sym}: пропущен из-за негативного новостного фона ({neg})")
+            continue
+        if pos > neg:
+            score += 1
+            reasons.append(f"позитивный новостной фон ({pos})")
+        if base in hype:
+            score += 1
+            reasons.append("в трендах CMC")
+
+        candidates.append({
+            "symbol": sym, "score": score, "reasons": reasons,
+            "atr": a, "last": tickers[sym]["last"],
+            "liquidity": tickers[sym]["quote_volume"],
+        })
     candidates.sort(key=lambda c: c["score"], reverse=True)
     return candidates[:limit]
