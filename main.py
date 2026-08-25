@@ -16,11 +16,11 @@ from bot.exchange.paper_exchange import paper
 from bot.core.orchestrator import run_cycle, set_notifier, CYCLE_SECONDS
 from bot.core.state import bot_state
 from bot.services.reports import build_report
+from bot.utils.format import fmt_price, fmt_usdt, fmt_pct, fmt_sym
 
 _app = None
 
 
-# --- Мини веб-сервер "пульс" для Render (чтобы бесплатный тариф не засыпал) ---
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -79,7 +79,6 @@ async def post_init(application):
     _app = application
     set_notifier(send_chat)
 
-    # Регистрируем меню команд в Telegram
     await application.bot.set_my_commands([
         BotCommand("start", "🚀 Запустить торговлю"),
         BotCommand("status", "📊 Статус: балансы и позиции"),
@@ -95,7 +94,6 @@ async def post_init(application):
     logger.info("Цикл торговли и отчёты запущены")
 
 
-# --- Команды Telegram ---
 async def cmd_start(update, context):
     bot_state.fresh_start()
     await update.message.reply_text(
@@ -107,7 +105,7 @@ async def cmd_help(update, context):
     await update.message.reply_text(
         "📖 МОИ КОМАНДЫ:\n"
         "/start — запустить торговлю, новый цикл\n"
-        "/status — балансы, позиции, статистика сделок\n"
+        "/status — балансы, позиции, активные ордера, статистика\n"
         "/pause — пауза (ордера запомнить и снять)\n"
         "/resume — возобновить (ордера вернуть)\n"
         "/exitall — остановить и продать всё\n"
@@ -146,7 +144,7 @@ async def cmd_exitall(update, context):
     total = sum(r["pnl"] for r in results)
     await update.message.reply_text(
         f"🛑 ТОРГОВЛЯ ОСТАНОВЛЕНА.\nПозиций закрыто: {len(results)}\n"
-        f"Суммарный PnL: {total:+.2f} USDT\nБаланс: {paper.usdt:.2f} USDT"
+        f"Суммарный PnL: {total:+.2f} USDT\nБаланс: {fmt_usdt(paper.usdt)} USDT"
     )
 
 
@@ -168,31 +166,44 @@ async def cmd_status(update, context):
         eq = paper.equity(prices)
 
         msg = ["📊 СТАТУС (РЕЖИМ: ТРЕНИРОВКА 🎓)", ""]
-        msg.append(f"💰 Свободно: {paper.usdt:.2f} USDT")
-        msg.append(f"🏦 Funding: {paper.funding:.2f} USDT")
-        msg.append(f"📈 Total Equity: {eq:.2f} $")
-        msg.append(f"📦 Позиций: {len(paper.positions)} | Ордеров: {len(paper.orders)}")
+        msg.append(f"💰 Свободно: {fmt_usdt(paper.usdt)} USDT")
+        msg.append(f"🏦 Funding: {fmt_usdt(paper.funding)} USDT")
+        msg.append(f"📈 Total Equity: {fmt_usdt(eq)} $")
+
         msg.append("")
-
-        for sym, pos in paper.positions.items():
-            last = prices.get(sym, {}).get("last", 0)
-            pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
-            msg.append(f"   {sym}: {pnl_pct:+.1f}% (вход {pos['avg']:.6f})")
         if paper.positions:
-            msg.append("")
+            msg.append(f"📦 ПОЗИЦИИ ({len(paper.positions)}):")
+            for sym, pos in paper.positions.items():
+                last = prices.get(sym, {}).get("last", 0)
+                pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
+                msg.append(f"   • {fmt_sym(sym)}: {fmt_pct(pnl_pct)}")
+                msg.append(f"      📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)}")
+                msg.append(f"      🎯 {fmt_price(pos['tp'])} | 🛡 {fmt_price(pos['sl'])}")
+        else:
+            msg.append("📦 ПОЗИЦИИ: нет")
 
+        msg.append("")
+        if paper.orders:
+            msg.append(f"📋 АКТИВНЫЕ ОРДЕРА ({len(paper.orders)}):")
+            for o in paper.orders:
+                msg.append(f"   • {fmt_sym(o['symbol'])}: покупка {fmt_usdt(o['qty'] * o['price'])} USDT @ {fmt_price(o['price'])}")
+                msg.append(f"      🎯 {fmt_price(o['tp'])} | 🛡 {fmt_price(o['sl'])}")
+        else:
+            msg.append("📋 АКТИВНЫЕ ОРДЕРА: нет")
+
+        msg.append("")
         wins = [r for r in paper.realized if r["pnl"] > 0]
         losses = [r for r in paper.realized if r["pnl"] <= 0]
         msg.append(f"🧾 Сделок: {len(paper.realized)} (✅ {len(wins)} / ❌ {len(losses)})")
         if paper.realized:
             best = max(paper.realized, key=lambda r: r["pnl_pct"])
             worst = min(paper.realized, key=lambda r: r["pnl_pct"])
-            msg.append(f"🏆 Лучшая: {best['symbol']} {best['pnl_pct']:+.1f}%")
-            msg.append(f"📉 Худшая: {worst['symbol']} {worst['pnl_pct']:+.1f}%")
+            msg.append(f"🏆 Лучшая: {fmt_sym(best['symbol'])} {fmt_pct(best['pnl_pct'])}")
+            msg.append(f"📉 Худшая: {fmt_sym(worst['symbol'])} {fmt_pct(worst['pnl_pct'])}")
 
         btc = prices.get("BTCUSDT", {}).get("last", 0)
         msg.append("")
-        msg.append(f"₿ BTC: {btc:,.0f} $")
+        msg.append(f"₿ BTC: {fmt_price(btc)} $")
 
         await update.message.reply_text("\n".join(msg))
     except Exception as e:
