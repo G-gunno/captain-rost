@@ -8,6 +8,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from zoneinfo import ZoneInfo
 
 from loguru import logger
+from telegram import BotCommand
 from telegram.ext import Application, CommandHandler
 
 from bot.exchange.market_data import market_data
@@ -19,6 +20,7 @@ from bot.services.reports import build_report
 _app = None
 
 
+# --- Мини веб-сервер "пульс" для Render (чтобы бесплатный тариф не засыпал) ---
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -76,14 +78,42 @@ async def post_init(application):
     global _app
     _app = application
     set_notifier(send_chat)
+
+    # Регистрируем меню команд в Telegram
+    await application.bot.set_my_commands([
+        BotCommand("start", "🚀 Запустить торговлю"),
+        BotCommand("status", "📊 Статус: балансы и позиции"),
+        BotCommand("pause", "⏸ Пауза"),
+        BotCommand("resume", "▶️ Возобновить"),
+        BotCommand("exitall", "🛑 Продать всё и остановить"),
+        BotCommand("log", "📄 Файл лога"),
+        BotCommand("help", "📖 Справка"),
+    ])
+
     asyncio.create_task(cycle_loop())
     asyncio.create_task(report_loop())
     logger.info("Цикл торговли и отчёты запущены")
 
 
+# --- Команды Telegram ---
 async def cmd_start(update, context):
     bot_state.fresh_start()
-    await update.message.reply_text("🤖 Капитан Рост на связи! Торговля запущена, цикл начат заново, временный файл ордеров удалён.")
+    await update.message.reply_text(
+        "🤖 Капитан Рост на связи! Торговля запущена, цикл начат заново, временный файл ордеров удалён."
+    )
+
+
+async def cmd_help(update, context):
+    await update.message.reply_text(
+        "📖 МОИ КОМАНДЫ:\n"
+        "/start — запустить торговлю, новый цикл\n"
+        "/status — балансы, позиции, статистика сделок\n"
+        "/pause — пауза (ордера запомнить и снять)\n"
+        "/resume — возобновить (ордера вернуть)\n"
+        "/exitall — остановить и продать всё\n"
+        "/log — прислать файл лога\n"
+        "/help — эта справка"
+    )
 
 
 async def cmd_pause(update, context):
@@ -94,7 +124,9 @@ async def cmd_pause(update, context):
     paper.orders = []
     paper.save()
     bot_state.pause(orders)
-    await update.message.reply_text(f"⏸ ПАУЗА. Ордеров запомнено и снято: {len(orders)}. Открытые позиции остались.")
+    await update.message.reply_text(
+        f"⏸ ПАУЗА. Ордеров запомнено и снято: {len(orders)}. Открытые позиции остались."
+    )
 
 
 async def cmd_resume(update, context):
@@ -179,13 +211,17 @@ def main():
         logger.error("Ошибка! TELEGRAM_BOT_TOKEN не найден.")
         return
 
-    app = (Application.builder().token(token).post_init(post_init).build())
+    app = (Application.builder()
+           .token(token)
+           .post_init(post_init)
+           .build())
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("exitall", cmd_exitall))
     app.add_handler(CommandHandler("log", cmd_log))
+    app.add_handler(CommandHandler("help", cmd_help))
 
     logger.info("Бот успешно стартовал и слушает Telegram...")
     app.run_polling()
