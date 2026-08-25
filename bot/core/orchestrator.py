@@ -1,3 +1,5 @@
+import time
+
 from loguru import logger
 
 from bot.exchange.market_data import market_data
@@ -5,6 +7,7 @@ from bot.exchange.paper_exchange import paper
 from bot.strategy.scanner import get_regime, scan
 from bot.strategy.sizing import buy_size
 from bot.strategy.indicators import atr
+from bot.core.state import bot_state
 
 CYCLE_SECONDS = 300
 _notify_cb = None
@@ -24,25 +27,44 @@ async def notify(text):
 
 
 async def run_cycle():
+    if bot_state.paused or not bot_state.trading_enabled:
+        logger.info("Цикл пропущен: торговля на паузе или остановлена")
+        return
+
     logger.info("=== CYCLE START ===")
     tickers = await market_data.get_tickers()
     if not tickers:
         logger.error("Нет тикеров — цикл пропущен")
         return
 
-    # 1. Исполнение ордеров и выходы по TP/SL
-    fills = paper.check_fills(tickers)
-    for f in fills:
-        await notify(f"📥 ИСПОЛНЕНА ПОКУПКА {f['symbol']}: {f['qty']:.6f} @ {f['price']:.6f}\nTP {f['tp']:.6f} | SL {f['sl']:.6f}")
-    exits = paper.check_exits(tickers)
-    for ex in exits:
-        await notify(f"📤 ПРОДАЖА {ex['symbol']} @ {ex['price']:.6f} | {ex['reason']}\nPnL: {ex['pnl']:+.2f} USDT ({ex['pnl_pct']:+.1f}%)\n🏦 В Funding: {ex['transferred']:.2f} USDT")
+    # 1. Исполнения и выходы по TP/SL
+    for f in paper.check_fills(tickers):
+        await notify(f"📥 ИСПОЛНЕНА ПОКУПКА {f['symbol']}: {f['qty']:.6f} @ {f['price']:.8f}\nTP {f['tp']:.8f} | SL {f['sl']:.8f}")
+    for ex in paper.check_exits(tickers):
+        await notify(
+            f"📤 ПРОДАЖА {ex['symbol']} @ {ex['price']:.8f} | {ex['reason']}\n"
+            f"PnL: {ex['pnl']:+.2f} USDT ({ex['pnl_pct']:+.1f}%)\n"
+            f"🏦 В Funding: {ex['transferred']:.2f} USDT"
+        )
 
     # 2. Оценка рынка
     regime, info = await get_regime()
     logger.info(f"Regime: {regime} | {info}")
 
-    # 3. Трейлинг SL — только вверх
+    # 3. ЭКСТРЕННЫЙ РИСК-МЕНЕДЖМЕНТ (грядущий дамп)
+    btc_t = tickers.get("BTCUSDT", {})
+    btc_c = await market_data.get_kline("BTCUSDT", "60", 3)
+    drop_1h = 0.0
+    if len(btc_c) >= 2 and btc_c[-2]["close"] > 0:
+        drop_1h = (btc_c[-1]["close"] - btc_c[-2]["close"]) / btc_c[-2]["close"] * 100
+    if drop_1h <= -3 or btc_t.get("change_pct", 0) <= -6:
+        if paper.positions or paper.orders:
+            for ex in paper.sell_all(tickers):
+                await notify(f"🚨 ЭКСТРЕННЫЙ ВЫХОД {ex['symbol']} @ {ex['price']:.8f} | PnL {ex['pnl']:+.2f} USDT")
+            await notify("🚨 Риск-менеджмент: резкий дамп рынка. Все позиции закрыты в USDT.")
+        return
+
+    # 4. Трейлинг SL — только вверх
     for sym, pos in list(paper.positions.items()):
         t = tickers.get(sym)
         if not t:
@@ -64,38 +86,79 @@ async def run_cycle():
             paper.save()
             logger.info(f"SL поднят {sym} -> {pos['sl']}")
 
-    # 4. Поиск и покупки
-    if regime == "bear":
-        logger.info("Медвежий рынок — новые покупки отключены (умный риск)")
+    # 5. Неисполненные ордера: перевыставление (до 3 попыток)
+    now = int(time.time())
+    for order in list(paper.orders):
+        if (now - order["created"]) < 900:
+            continue
+        t = tickers.get(order["symbol"])
+        if not t:
+            continue
+        if order.get("requotes", 0) >= 2:
+            paper.cancel_order(order["id"])
+            await notify(f"❌ {order['symbol']}: ордер снят после 3 попыток без исполнения.")
+            continue
+        candles = await market_data.get_kline(order["symbol"], "15", 60)
+        a = atr(candles) if candles else 0
+        if a <= 0:
+            continue
+        paper.cancel_order(order["id"])
+        order["price"] = t["last"] * 0.998
+        order["tp"] = order["price"] + 2.0 * a
+        order["sl"] = order["price"] - 1.2 * a
+        order["created"] = now
+        order["requotes"] = order.get("requotes", 0) + 1
+        paper.orders.append(order)
+        paper.save()
+        await notify(f"🔁 {order['symbol']}: ордер перевыставлен @ {order['price']:.8f} (попытка {order['requotes'] + 1})")
+
+    # 6. Сканирование и покупки / ротация
+    candidates = []
+    if regime != "bear":
+        candidates = await scan(regime, tickers)
     else:
-        equity = paper.equity(tickers)
-        if paper.usdt >= 10:
-            candidates = await scan(regime, tickers)
-            for cand in candidates:
-                sym = cand["symbol"]
-                if sym in paper.positions:
-                    continue  # не покупаем повторно, пока не продано
-                if any(o["symbol"] == sym for o in paper.orders):
-                    continue
-                size = buy_size(equity, cand["score"], cand["liquidity"], paper.usdt)
-                if size < 5:
-                    continue
-                entry = cand["last"] * 0.998
-                a = cand["atr"]
-                if a <= 0:
-                    continue
-                sl, tp = entry - 1.2 * a, entry + 2.0 * a
-                if tp <= entry or sl >= entry:
-                    continue
-                qty = size / entry
-                paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl)
+        logger.info("Медвежий рынок — новые покупки отключены (умный риск)")
+
+    equity = paper.equity(tickers)
+
+    # Ротация: нет свободных USDT, но сигнал сильнее текущих позиций
+    if paper.usdt < 10 and candidates and paper.positions:
+        best = candidates[0]
+        weakest_sym, weakest_pos = min(paper.positions.items(), key=lambda kv: kv[1].get("score", 0))
+        t = tickers.get(weakest_sym)
+        if t:
+            pnl_pct = (t["last"] - weakest_pos["avg"]) / weakest_pos["avg"] * 100 if weakest_pos["avg"] else 0
+            if pnl_pct >= 1.0 and best["score"] >= weakest_pos.get("score", 0) + 1:
+                paper._sell(weakest_sym, t["last"], "РОТАЦИЯ 🔄")
                 await notify(
-                    f"🎯 ВЫСТАВЛЕНА ПОКУПКА {sym}\n"
-                    f"Сумма: {size:.2f} USDT @ {entry:.8f}\n"
-                    f"Score: {cand['score']} | TP {tp:.8f} | SL {sl:.8f}\n"
-                    f"Причина: {'; '.join(cand['reasons'][:4])}"
+                    f"🔄 РОТАЦИЯ: продал {weakest_sym} ({pnl_pct:+.1f}%) — "
+                    f"сигнал {best['symbol']} сильнее (score {best['score']})"
                 )
-                if paper.usdt < 10:
-                    break
+
+    # Покупки
+    for cand in candidates:
+        if paper.usdt < 10:
+            break
+        sym = cand["symbol"]
+        if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
+            continue
+        size = buy_size(equity, cand["score"], cand["liquidity"], paper.usdt)
+        if size < 5:
+            continue
+        entry = cand["last"] * 0.998
+        a = cand["atr"]
+        if a <= 0:
+            continue
+        sl, tp = entry - 1.2 * a, entry + 2.0 * a
+        if tp <= entry or sl >= entry:
+            continue
+        qty = size / entry
+        paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl, score=cand["score"])
+        await notify(
+            f"🎯 ВЫСТАВЛЕНА ПОКУПКА {sym}\n"
+            f"Сумма: {size:.2f} USDT @ {entry:.8f}\n"
+            f"Score: {cand['score']} | TP {tp:.8f} | SL {sl:.8f}\n"
+            f"Причина: {'; '.join(cand['reasons'][:4])}"
+        )
 
     logger.info("=== CYCLE END ===")
