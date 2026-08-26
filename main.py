@@ -25,11 +25,14 @@ _app = None
 WEBHOOK_PATH = "/telegram-webhook"
 
 
+# ==================== HTTP handlers ====================
 async def health_handler(request):
+    """Ответ для Render health check (GET /)."""
     return web.Response(text="OK")
 
 
 async def webhook_handler(request):
+    """Принимаем апдейты от Telegram (POST /telegram-webhook)."""
     try:
         data = await request.json()
         update = Update.de_json(data, bot=_app.bot)
@@ -39,6 +42,7 @@ async def webhook_handler(request):
     return web.Response(text="OK")
 
 
+# ==================== Уведомления и циклы ====================
 async def send_chat(text):
     chat = os.getenv("TELEGRAM_CHAT_ID")
     if chat and _app:
@@ -84,7 +88,9 @@ async def error_handler(update, context):
     logger.exception(f"Unhandled error: {err}")
 
 
+# ==================== Главный запуск ====================
 async def run_all(application):
+    """Запускает aiohttp-сервер + регистрирует webhook + стартует циклы."""
     global _app
     _app = application
 
@@ -116,6 +122,7 @@ async def run_all(application):
         BotCommand("exitall", "🛑 Продать всё и остановить"),
         BotCommand("learn", "🧠 Обучение: веса и winrate"),
         BotCommand("resetlearn", "🧠♻️ Сбросить опыт обучения"),
+        BotCommand("resetstats", "📊 Сбросить торговую статистику"),
         BotCommand("news", "📰 Статус новостной аналитики"),
         BotCommand("log", "📄 Файл лога"),
         BotCommand("help", "📖 Справка"),
@@ -152,6 +159,7 @@ async def run_all(application):
         await runner.cleanup()
 
 
+# ==================== Команды Telegram ====================
 async def cmd_start(update, context):
     bot_state.fresh_start()
     await update.message.reply_text(
@@ -169,6 +177,7 @@ async def cmd_help(update, context):
         "/exitall — остановить и продать всё (опыт обучения сохраняется)\n"
         "/learn — показать обучение: веса сигналов и winrate\n"
         "/resetlearn — сбросить опыт обучения в ноль\n"
+        "/resetstats — сбросить только торговую статистику (веса сохранены)\n"
         "/news — статус новостной аналитики (CMC + RSS)\n"
         "/log — прислать файл лога\n"
         "/help — эта справка"
@@ -228,7 +237,21 @@ async def cmd_resetlearn(update, context):
     await update.message.reply_text("🧠♻️ Опыт обучения сброшен: все веса = 1.0, история очищена.")
 
 
+async def cmd_resetstats(update, context):
+    """Сброс торговой статистики (PF/DD/Expectancy), веса сохранены."""
+    paper.reset_stats()
+    learner.reset_stats()
+    await update.message.reply_text(
+        "📊 СТАТИСТИКА СБРОШЕНА.\n"
+        "История сделок очищена, PF / DD / Expectancy считаются с нуля.\n"
+        "🧠 Веса обучения сохранены (знания не потеряны).\n"
+        "Режим STRICT снят, порог вернулся к базовому.\n\n"
+        "Полный сброс включая веса — /resetlearn."
+    )
+
+
 async def cmd_news(update, context):
+    """Статус новостной аналитики: CMC + RSS."""
     from bot.news.cmc import get_stats as cmc_stats
     from bot.news.rss_news import get_stats as rss_stats
 
@@ -329,6 +352,7 @@ async def cmd_status(update, context):
         else:
             msg.append("📋 АКТИВНЫЕ ОРДЕРА: нет")
 
+        # --- МЕТРИКИ КАЧЕСТВА И АДАПТИВНЫЙ РЕЖИМ ---
         msg.append("")
         metrics = paper.get_metrics(prices)
         mode, _ = learner.risk_mode(metrics["profit_factor"], metrics["max_drawdown_pct"])
@@ -423,6 +447,7 @@ def main():
     app.add_handler(CommandHandler("exitall", cmd_exitall))
     app.add_handler(CommandHandler("learn", cmd_learn))
     app.add_handler(CommandHandler("resetlearn", cmd_resetlearn))
+    app.add_handler(CommandHandler("resetstats", cmd_resetstats))
     app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("log", cmd_log))
     app.add_handler(CommandHandler("help", cmd_help))
