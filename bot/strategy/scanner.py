@@ -34,6 +34,8 @@ SECTORS = {
     "LTC": "L1", "BCH": "L1", "ETC": "L1", "XMR": "L1", "DASH": "L1",
     "ZIL": "L1", "RVN": "L1", "ERG": "L1", "CFX": "L1", "FLR": "L1",
     "KDA": "L1", "ROSE": "L1", "GLMR": "L1", "ASTR": "L1", "METIS": "L1",
+    "MERL": "L1", "OBT": "L1", "BR": "L1", "XAN": "L1", "CAP": "L1",
+    "TAC": "L1", "FF": "L1", "BLIFE": "L1", "ASTR": "L1", "ASTER": "L1",
     # ===== L2 =====
     "ARB": "L2", "OP": "L2", "STRK": "L2", "ZK": "L2", "MANTA": "L2",
     "SCROLL": "L2", "BLAST": "L2", "POL": "L2", "MATIC": "L2", "ZRO": "L2",
@@ -47,14 +49,15 @@ SECTORS = {
     "EIGEN": "DeFi", "ETHFI": "DeFi", "RSR": "DeFi", "YFI": "DeFi",
     "BAL": "DeFi", "BNT": "DeFi", "1INCH": "DeFi", "BIFI": "DeFi",
     "KP3R": "DeFi", "RPL": "DeFi", "SSV": "DeFi", "BLUR": "DeFi",
-    "MAGIC": "DeFi", "TORN": "DeFi", "AZERO": "DeFi",
+    "MAGIC": "DeFi", "TORN": "DeFi", "AZERO": "DeFi", "BICO": "DeFi",
+    "TWT": "DeFi",
     # ===== AI =====
     "FET": "AI", "OCEAN": "AI", "RNDR": "AI", "RENDER": "AI",
     "GRT": "AI", "TAO": "AI", "ARKM": "AI", "WLD": "AI", "VIRTUAL": "AI",
     "FLOCK": "AI", "GRASS": "AI", "SQD": "AI", "AI16Z": "AI",
     "ZEREBRO": "AI", "AGIX": "AI", "AKT": "AI", "NMR": "AI", "PHB": "AI",
     "OLAS": "AI", "PAAL": "AI", "AIOZ": "AI", "CTXC": "AI", "ALCH": "AI",
-    "AI": "AI", "COOKIE": "AI",
+    "AI": "AI", "COOKIE": "AI", "METAX": "AI",
     # ===== Meme =====
     "DOGE": "Meme", "SHIB": "Meme", "PEPE": "Meme", "BONK": "Meme",
     "FLOKI": "Meme", "WIF": "Meme", "BRETT": "Meme", "POPCAT": "Meme",
@@ -73,33 +76,22 @@ SECTORS = {
     "YGG": "Gaming", "BEAM": "Gaming", "GHST": "Gaming",
     "PRIME": "Gaming", "ALT": "Gaming", "ALICE": "Gaming", "BIGTIME": "Gaming",
     # ===== Infra =====
-    "FIL": "Infra", "AR": "Infra", "LPT": "Infra", "TWT": "Infra",
-    "IOTA": "Infra", "BICO": "Infra", "API3": "Infra", "BAND": "Infra",
+    "FIL": "Infra", "AR": "Infra", "LPT": "Infra",
+    "IOTA": "Infra", "API3": "Infra", "BAND": "Infra",
     "TRB": "Infra", "HNT": "Infra", "IOTX": "Infra", "XDB": "Infra",
     "WAXP": "Infra", "STORJ": "Infra", "GTC": "Infra", "ANKR": "Infra",
     "HONEY": "Infra", "RAD": "Infra", "MOBILE": "Infra",
+    "MNT": "Infra",
     # ===== RWA =====
-    "ONDO": "RWA", "PENDLE": "RWA", "ENA": "RWA", "ETHFI": "RWA",
     "MPL": "RWA", "CFG": "RWA", "TOKEN": "RWA", "POLYX": "RWA",
     "CHEX": "RWA", "TRADE": "RWA", "IXT": "RWA", "LPOOL": "RWA",
     # ===== Privacy =====
-    "XMR": "Privacy", "ZEC": "Privacy", "DASH": "Privacy", "FIRO": "Privacy",
-    "SCRT": "Privacy", "NYM": "Privacy", "TORN": "Privacy", "OASIS": "Privacy",
+    "FIRO": "Privacy", "SCRT": "Privacy", "NYM": "Privacy", "OASIS": "Privacy",
     # ===== Storage =====
-    "FIL": "Storage", "AR": "Storage", "STORJ": "Storage", "SIA": "Storage",
-    # ===== DEX =====
-    "UNI": "DEX", "CAKE": "DEX", "SUSHI": "DEX", "1INCH": "DEX",
-    "DYDX": "DEX", "GMX": "DEX", "JUP": "DEX", "RAY": "DEX",
-    "ORCA": "DEX", "OSMO": "DEX",
-    # ===== Launchpad =====
-    "DAO": "Launchpad", "BOND": "Launchpad",
+    "SIA": "Storage",
     # ===== Exchange tokens =====
-    "BNB": "Exchange", "KCS": "Exchange", "OKB": "Exchange", "HT": "Exchange",
+    "KCS": "Exchange", "OKB": "Exchange", "HT": "Exchange",
     "CRO": "Exchange", "GT": "Exchange", "MX": "Exchange", "BGB": "Exchange",
-    # ===== Прочее популярное =====
-    "BR": "Infra", "XAN": "AI", "OBT": "DeFi", "METAX": "Gaming",
-    "ASTER": "L1", "CAP": "DeFi", "TAC": "L1",
-    "FF": "Gaming", "BLIFE": "Gaming",
 }
 
 SECTOR_LIMITS = {
@@ -177,13 +169,25 @@ async def fetch_new_listings():
         try:
             async with httpx.AsyncClient(timeout=15) as c:
                 cursor = ""
-                for _ in range(5):  # максимум 5 страниц по 1000
+                for page in range(5):  # максимум 5 страниц по 1000
                     params = {"category": "spot", "limit": 1000}
                     if cursor:
                         params["cursor"] = cursor
-                    r = await c.get("https://api.bybit.com/v5/market/instruments", params=params)
-                    result = r.json().get("result", {})
-                    raw += result.get("list", [])
+                    url = "https://api.bybit.com/v5/market/instruments-info"
+                    r = await c.get(url, params=params)
+                    if r.status_code != 200:
+                        logger.error(f"Bybit API returned status {r.status_code}")
+                        break
+                    try:
+                        data = r.json()
+                    except Exception as e:
+                        logger.error(f"Bybit API non-JSON response: {e}")
+                        break
+                    result = data.get("result", {})
+                    items = result.get("list", [])
+                    if not items:
+                        break
+                    raw += items
                     cursor = result.get("nextPageCursor", "") or ""
                     if not cursor:
                         break
@@ -191,11 +195,16 @@ async def fetch_new_listings():
             logger.info(f"Instruments loaded: {len(raw)} spot symbols")
         except Exception as e:
             logger.error(f"Bybit instruments error: {e}")
+            raw = []
+
     now_ms = int(now * 1000)
     out = []
     for ins in raw:
         sym = ins.get("symbol", "")
-        if not sym.endswith("USDT") or ins.get("status") != "Trading":
+        if not sym.endswith("USDT"):
+            continue
+        status = ins.get("status", "")
+        if status != "Trading":
             continue
         try:
             launch = int(ins.get("launchTime", 0) or 0)
