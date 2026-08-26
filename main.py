@@ -170,7 +170,7 @@ async def cmd_help(update, context):
     await update.message.reply_text(
         "📖 МОИ КОМАНДЫ:\n"
         "/start — запустить торговлю, новый цикл\n"
-        "/status — балансы, позиции с весами, активные ордера, статистика\n"
+        "/status — балансы, позиции с весами, активные ордера, метрики, статистика\n"
         "/pause — пауза (ордера запомнить и снять)\n"
         "/resume — возобновить (ордера вернуть)\n"
         "/exitall — остановить и продать всё (опыт обучения сохраняется)\n"
@@ -337,15 +337,43 @@ async def cmd_status(update, context):
         else:
             msg.append("📋 АКТИВНЫЕ ОРДЕРА: нет")
 
+        # --- МЕТРИКИ КАЧЕСТВА И АДАПТИВНЫЙ РЕЖИМ ---
         msg.append("")
-        wins = [r for r in paper.realized if r["pnl"] > 0]
-        losses = [r for r in paper.realized if r["pnl"] <= 0]
-        msg.append(f"🧾 Сделок: {len(paper.realized)} (✅ {len(wins)} / ❌ {len(losses)})")
+        metrics = paper.get_metrics(prices)
+        mode, _ = learner.risk_mode(metrics["profit_factor"], metrics["max_drawdown_pct"])
+        mode_emoji = {"NORMAL": "🟢", "CAUTIOUS": "🟡", "STRICT": "🔴", "AGGRESSIVE": "🚀"}.get(mode, "⚪")
+
+        msg.append(f"📊 МЕТРИКИ · режим {mode_emoji} {mode}")
+        msg.append(f"   🧾 Сделок: {metrics['total_trades']} (✅ {metrics['win_count']} / ❌ {metrics['loss_count']})")
+        pf = metrics["profit_factor"]
+        if pf is None:
+            pf_text = "—"
+        elif pf == float("inf"):
+            pf_text = "∞"
+        else:
+            pf_text = f"{pf:.2f}"
+            if pf < 1.0:
+                pf_text += " ❌"
+            elif pf < 1.3:
+                pf_text += " ⚠️"
+            else:
+                pf_text += " 🎯"
+        msg.append(f"   📈 Profit Factor: {pf_text}  (цель ≥ 1.3)")
+        dd = metrics["max_drawdown_pct"]
+        if dd < 5:
+            dd_text = f"{dd:.1f}% ✅"
+        elif dd < 15:
+            dd_text = f"{dd:.1f}% ⚠️"
+        else:
+            dd_text = f"{dd:.1f}% 🔴"
+        msg.append(f"   📉 Max Drawdown: {dd_text}  (лимит 15%)")
+        msg.append(f"   💵 Суммарный PnL: {metrics['total_pnl']:+.2f} USDT")
+
         if paper.realized:
             best = max(paper.realized, key=lambda r: r["pnl_pct"])
             worst = min(paper.realized, key=lambda r: r["pnl_pct"])
-            msg.append(f"🏆 Лучшая: {fmt_sym(best['symbol'])} {fmt_pct(best['pnl_pct'])}")
-            msg.append(f"📉 Худшая: {fmt_sym(worst['symbol'])} {fmt_pct(worst['pnl_pct'])}")
+            msg.append(f"   🏆 Лучшая: {fmt_sym(best['symbol'])} {fmt_pct(best['pnl_pct'])}")
+            msg.append(f"   📉 Худшая: {fmt_sym(worst['symbol'])} {fmt_pct(worst['pnl_pct'])}")
 
         regime, _ = await get_regime()
         regime_emoji = {"bull": "🟢", "neutral": "🟡", "bear": "🔴"}.get(regime, "⚪")
