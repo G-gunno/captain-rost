@@ -4,7 +4,7 @@ from loguru import logger
 
 from bot.exchange.market_data import market_data
 from bot.exchange.paper_exchange import paper
-from bot.strategy.scanner import get_regime, scan, score_symbol, threshold
+from bot.strategy.scanner import get_regime, scan, score_symbol, threshold, sector_of
 from bot.strategy.sizing import buy_size
 from bot.strategy.indicators import atr, ema
 from bot.core.state import bot_state
@@ -17,8 +17,12 @@ CYCLE_SECONDS = 300
 FEE_PCT = 0.10
 MIN_TP_PCT = 0.60
 MIN_SL_PCT = 0.35
-MAX_SL_PCT = 3.0
-MIN_RR = 1.5
+MAX_SL_PCT = 3.0          # максимум SL для Core
+MIN_RR = 1.5              # мин. R:R для Core
+SAT_MAX_SL_PCT = 5.0      # максимум SL для сателлитов
+MIN_RR_SAT = 2.0          # мин. R:R для сателлитов
+SAT_MAX_TOTAL_PCT = 20.0  # лимит всех сателлитов: 20% equity
+MAX_SECTOR_POSITIONS = 3  # не более 3 позиций/ордеров в одном секторе
 MIN_EARLY_EXIT_PCT = 1.0
 _notify_cb = None
 _reconciled = False
@@ -65,8 +69,9 @@ async def startup_reconciliation():
             pos["tp"] = round(entry * (1 + d / 100), 10)
             fixed.append(f"TP {fmt_price(pos['tp'])}")
         sl_dist = (entry - pos.get("sl", 0)) / entry * 100 if pos.get("sl") else 0
-        if not pos.get("sl") or pos["sl"] >= entry or sl_dist > MAX_SL_PCT or sl_dist < MIN_SL_PCT:
-            d = max(min(1.2 * a / entry * 100, MAX_SL_PCT), MIN_SL_PCT)
+        max_sl = SAT_MAX_SL_PCT if pos.get("kind") == "satellite" else MAX_SL_PCT
+        if not pos.get("sl") or pos["sl"] >= entry or sl_dist > max_sl or sl_dist < MIN_SL_PCT:
+            d = max(min(1.2 * a / entry * 100, max_sl), MIN_SL_PCT)
             pos["sl"] = round(entry * (1 - d / 100), 10)
             fixed.append(f"SL {fmt_price(pos['sl'])}")
         if fixed:
@@ -145,6 +150,10 @@ async def run_cycle():
 
     # 1. Исполнения покупок
     for f in paper.check_fills(tickers):
+        pos = paper.positions.get(f["symbol"])
+        if pos is not None:
+            pos["kind"] = f.get("kind", "core")
+            paper.save()
         tp_pct = (f["tp"] - f["price"]) / f["price"] * 100
         sl_pct = (f["sl"] - f["price"]) / f["price"] * 100
         await notify(
@@ -290,7 +299,6 @@ async def run_cycle():
         if not t:
             continue
 
-        # НОВОСТНАЯ ПРОВЕРКА ОРДЕРА
         base = order["symbol"][:-4]
         name = await get_coin_name(base)
         neg, pos_news, _, _ = check_sentiment(news_items, [base, name])
@@ -353,28 +361,73 @@ async def run_cycle():
         sym = cand["symbol"]
         if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
             continue
+
+        kind = cand.get("kind", "core")
+        sector = cand.get("sector", "Other")
+
+        # СЕКТОРНАЯ ДИВЕРСИФИКАЦИЯ: не более 3 в одном секторе
+        sector_count = sum(
+            1 for s in paper.positions if sector_of(s[:-4]) == sector
+        ) + sum(1 for o in paper.orders if sector_of(o["symbol"][:-4]) == sector)
+        if sector_count >= MAX_SECTOR_POSITIONS:
+            logger.info(f"{sym}: пропущен — сектор {sector} переполнен ({sector_count})")
+            continue
+
+        # ЛИМИТ САТЕЛЛИТОВ: суммарно не более 20% equity
+        if kind == "satellite":
+            sat_exposure = sum(
+                p["qty"] * tickers.get(s, {}).get("last", 0)
+                for s, p in paper.positions.items() if p.get("kind") == "satellite"
+            ) + sum(
+                o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite"
+            )
+            if sat_exposure >= equity * SAT_MAX_TOTAL_PCT / 100:
+                logger.info(f"{sym}: пропущен — лимит сателлитов исчерпан")
+                continue
+
         entry = cand["last"] * 0.998
         a = cand["atr"]
         if a <= 0:
             continue
-        sl, tp = entry - 1.2 * a, entry + 2.0 * a
-        tp = max(tp, entry * (1 + MIN_TP_PCT / 100))
-        sl = min(sl, entry * (1 - MIN_SL_PCT / 100))
+
+        if kind == "satellite":
+            # Широкий SL (даём "дышать"), дальний TP, R:R >= 2
+            sl_dist_pct = max(min(1.5 * a / entry * 100, SAT_MAX_SL_PCT), 2.0)
+            tp_dist_pct = max(min(2.5 * a / entry * 100, 12.0), sl_dist_pct * MIN_RR_SAT)
+            sl = entry * (1 - sl_dist_pct / 100)
+            tp = entry * (1 + tp_dist_pct / 100)
+            min_rr = MIN_RR_SAT
+        else:
+            sl = entry - 1.2 * a
+            tp = entry + 2.0 * a
+            tp = max(tp, entry * (1 + MIN_TP_PCT / 100))
+            sl = min(sl, entry * (1 - MIN_SL_PCT / 100))
+            sl_dist_pct = (entry - sl) / entry * 100
+            min_rr = MIN_RR
+            if sl_dist_pct > MAX_SL_PCT:
+                logger.info(f"{sym}: пропущен — SL слишком далеко ({sl_dist_pct:.1f}%)")
+                continue
+
         sl_dist = (entry - sl) / entry * 100
-        if sl_dist > MAX_SL_PCT:
-            logger.info(f"{sym}: пропущен — SL слишком далеко ({sl_dist:.1f}%)")
-            continue
         rr = (tp - entry) / (entry - sl) if entry > sl else 0
-        if tp <= entry or sl >= entry or rr < MIN_RR:
+        if tp <= entry or sl >= entry or rr < min_rr:
             continue
-        size = buy_size(equity, cand["score"], cand["liquidity"], paper.usdt, sl_dist)
+
+        size = buy_size(equity, cand["score"], cand["liquidity"], paper.usdt,
+                        sl_dist, kind=kind, realized=paper.realized)
         if size < 5:
             continue
         qty = size / entry
-        paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl,
-                              score=cand["score"], reason_keys=cand.get("reason_keys", []))
+        order = paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl,
+                                      score=cand["score"],
+                                      reason_keys=cand.get("reason_keys", []))
+        order["kind"] = kind
+        order["sector"] = sector
+        paper.save()
         tp_pct = (tp - entry) / entry * 100
         sl_pct = (sl - entry) / entry * 100
+        kind_line = ("🛰 Сателлит (высокая волатильность)" if kind == "satellite"
+                     else "🏛 Core (базовая стратегия)")
         await notify(
             f"🎯 ВЫСТАВЛЕНА ПОКУПКА · {fmt_sym(sym)}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
@@ -383,6 +436,7 @@ async def run_cycle():
             f"🎯 TP: {fmt_price(tp)} ({fmt_pct(tp_pct)})\n"
             f"🛡 SL: {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
             f"⭐ Сигнал: {cand['score']:.1f} | 🔗 BTC: {cand.get('corr', 0):.2f}\n"
+            f"🧭 {kind_line} · сектор {sector}\n"
             f"🧠 Причина: {'; '.join(cand['reasons'][:4])}"
         )
 
