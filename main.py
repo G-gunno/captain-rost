@@ -1,14 +1,13 @@
 import os
 import asyncio
 import calendar
-import threading
 from datetime import datetime
 from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from zoneinfo import ZoneInfo
 
+import aiohttp.web as web
 from loguru import logger
-from telegram import BotCommand
+from telegram import BotCommand, Update
 from telegram.error import Conflict as TelegramConflict
 from telegram.ext import Application, CommandHandler
 
@@ -23,27 +22,27 @@ from bot.strategy.learner import learner
 from bot.utils.format import fmt_price, fmt_usdt, fmt_pct, fmt_sym
 
 _app = None
+WEBHOOK_PATH = "/telegram-webhook"
 
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-    def log_message(self, *args, **kwargs):
-        pass
+# ==================== HTTP handlers ====================
+async def health_handler(request):
+    """Ответ для Render health check (GET /)."""
+    return web.Response(text="OK")
 
 
-def start_health_server():
-    port = int(os.getenv("PORT", "10000"))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    logger.info(f"Health-сервер запущен на порту {port}")
+async def webhook_handler(request):
+    """Принимаем апдейты от Telegram (POST /telegram-webhook)."""
+    try:
+        data = await request.json()
+        update = Update.de_json(data, bot=_app.bot)
+        await _app.process_update(update)
+    except Exception as e:
+        logger.error(f"webhook process_update error: {e}")
+    return web.Response(text="OK")
 
 
+# ==================== Уведомления и циклы ====================
 async def send_chat(text):
     chat = os.getenv("TELEGRAM_CHAT_ID")
     if chat and _app:
@@ -82,28 +81,41 @@ async def report_loop():
 
 
 async def error_handler(update, context):
-    """Глушим Conflict, чтобы не спамить в логи — Telegram polling продолжит работать."""
     err = context.error
     if isinstance(err, TelegramConflict):
-        logger.warning("Telegram Conflict: другой процесс держит polling, ждём и пробуем снова")
+        logger.warning("Telegram Conflict (вебхук-режим, игнорируем)")
         return
     logger.exception(f"Unhandled error: {err}")
 
 
-async def post_init(application):
+# ==================== Главный запуск ====================
+async def run_all(application):
+    """Запускает aiohttp-сервер + регистрирует webhook + стартует циклы."""
     global _app
     _app = application
 
-    # ЖЁСТКАЯ ОЧИСТКА: удаляем любой webhook и сбрасываем очередь — это убирает Conflict
+    # --- Инициализация PTB Application ---
+    await application.initialize()
+    await application.start()
+
+    # --- Очистка и установка webhook ---
     try:
         await application.bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Webhook удалён, очередь обновлений сброшена")
     except Exception as e:
         logger.error(f"delete_webhook error: {e}")
 
-    set_notifier(send_chat)
-    await asyncio.to_thread(ensure_branch)
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
+    webhook_url = f"{public_url}{WEBHOOK_PATH}"
 
+    await application.bot.set_webhook(
+        url=webhook_url,
+        drop_pending_updates=True,
+        allowed_updates=["message", "edited_message", "callback_query"],
+    )
+    logger.info(f"✅ Webhook установлен: {webhook_url}")
+
+    # --- Меню команд ---
     await application.bot.set_my_commands([
         BotCommand("start", "🚀 Запустить торговлю"),
         BotCommand("status", "📊 Статус: балансы и позиции"),
@@ -116,12 +128,42 @@ async def post_init(application):
         BotCommand("help", "📖 Справка"),
     ])
 
+    # --- Резервное хранилище опыта ---
+    await asyncio.to_thread(ensure_branch)
+
+    # --- Уведомления и циклы ---
+    set_notifier(send_chat)
     asyncio.create_task(cycle_loop())
     asyncio.create_task(report_loop())
-    logger.info("Цикл торговли и отчёты запущены")
+    logger.info("Цикл торговли и отчёты запущены (WEBHOOK MODE)")
+
+    # --- HTTP-сервер: health check + webhook ---
+    web_app = web.Application()
+    web_app.router.add_get("/", health_handler)
+    web_app.router.add_post(WEBHOOK_PATH, webhook_handler)
+
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 10000"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"HTTP-сервер запущен на порту {port} (GET / + POST {WEBHOOK_PATH})")
+
+    # --- Держим процесс живым ---
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        logger.info("Остановка...")
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        await application.stop()
+        await application.shutdown()
+        await runner.cleanup()
 
 
-# --- Команды Telegram ---
+# ==================== Команды Telegram ====================
 async def cmd_start(update, context):
     bot_state.fresh_start()
     await update.message.reply_text(
@@ -288,21 +330,15 @@ async def cmd_status(update, context):
 def main():
     os.makedirs("logs", exist_ok=True)
     logger.add("logs/bot.log", rotation="5 MB", retention="7 days", enqueue=True, level="INFO")
-    logger.info("Запуск бота CaptainRost (PAPER MODE)...")
-    start_health_server()
+    logger.info("Запуск бота CaptainRost (PAPER MODE, WEBHOOK)...")
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         logger.error("Ошибка! TELEGRAM_BOT_TOKEN не найден.")
         return
 
-    app = (Application.builder()
-           .token(token)
-           .post_init(post_init)
-           .build())
-
-    app.add_error_handler(error_handler)  # глушим Conflict в логах
-
+    app = Application.builder().token(token).build()
+    app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("pause", cmd_pause))
@@ -313,9 +349,8 @@ def main():
     app.add_handler(CommandHandler("log", cmd_log))
     app.add_handler(CommandHandler("help", cmd_help))
 
-    logger.info("Бот успешно стартовал и слушает Telegram...")
-    # drop_pending_updates + delete_webhook в post_init = финальная защита от Conflict
-    app.run_polling(drop_pending_updates=True)
+    logger.info("Бот собран, запускаем webhook-сервер...")
+    asyncio.run(run_all(app))
 
 
 if __name__ == '__main__':
