@@ -6,7 +6,7 @@ from bot.exchange.market_data import market_data
 from bot.strategy.indicators import ema, rsi, atr
 from bot.strategy.learner import learner
 from bot.news.cmc import get_coin_name
-from bot.news.rss_news import fetch_news_cache, check_sentiment
+from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sentiment
 
 SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
 FILTERED_BY_NEWS = []
@@ -76,7 +76,7 @@ SECTORS = {
     "WAXP": "Infra", "STORJ": "Infra", "GTC": "Infra", "ANKR": "Infra",
     "OCEAN": "Infra", "RNDR": "Infra", "AKT": "Infra", "TAO": "Infra",
     "HONEY": "Infra", "RAD": "Infra", "MOBILE": "Infra", "IOTX": "Infra",
-    # ===== RWA (Real World Assets) =====
+    # ===== RWA =====
     "ONDO": "RWA", "PENDLE": "RWA", "ENA": "RWA", "ETHFI": "RWA",
     "MPL": "RWA", "CFG": "RWA", "TOKEN": "RWA", "POLYX": "RWA",
     "CHEX": "RWA", "TRADE": "RWA", "IXT": "RWA", "LPOOL": "RWA",
@@ -100,12 +100,11 @@ SECTORS = {
     "FF": "Gaming", "BLIFE": "Gaming",
 }
 
-# Лимиты по секторам (Other — больше, потому что туда попадают неизвестные монеты)
 SECTOR_LIMITS = {
     "L1": 3, "L2": 3, "DeFi": 3, "AI": 3, "Meme": 3,
     "Gaming": 3, "Infra": 3, "RWA": 2, "Privacy": 2,
     "Storage": 2, "DEX": 3, "Launchpad": 2, "Exchange": 2,
-    "Other": 5,  # для неизвестных монет — больше
+    "Other": 5,
 }
 
 
@@ -193,10 +192,12 @@ async def scan(regime, tickers, limit=5):
     tradable = [s for s, t in tickers.items()
                 if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
 
+    # Базовый пул: ликвидные + растущие за сутки
     by_vol = sorted(tradable, key=lambda s: tickers[s]["quote_volume"], reverse=True)[:40]
     by_chg = sorted([s for s in tradable if 0 < tickers[s]["change_pct"] < 25],
                     key=lambda s: tickers[s]["change_pct"], reverse=True)[:20]
 
+    # Momentum: сильный тренд за неделю
     by_momentum = []
     for sym in tradable[:50]:
         candles = await market_data.get_kline(sym, "60", 168)
@@ -206,6 +207,7 @@ async def scan(regime, tickers, limit=5):
                 by_momentum.append((sym, chg_7d))
     by_momentum = [s for s, _ in sorted(by_momentum, key=lambda x: x[1], reverse=True)][:15]
 
+    # Volatility: высоковолатильные для сателлитов
     by_volatility = []
     for sym in tradable[:50]:
         candles = await market_data.get_kline(sym, "15", 60)
@@ -217,7 +219,26 @@ async def scan(regime, tickers, limit=5):
                 by_volatility.append((sym, atr_pct))
     by_volatility = [s for s, _ in sorted(by_volatility, key=lambda x: x[1], reverse=True)][:10]
 
-    pool = list(dict.fromkeys(by_vol + by_chg + by_momentum + by_volatility))
+    # NEW LISTINGS: монеты из листингов Bybit (24h - 14 дней)
+    by_listings = []
+    try:
+        listings = await fetch_listings_cache()
+        now_ts = int(time.time())
+        for l in listings:
+            sym = l['symbol']
+            age_hours = (now_ts - l['ts']) / 3600
+            # Умный фильтр: 24h - 14 дней
+            if 24 <= age_hours <= 336 and sym in tickers and is_tradable(sym):
+                t = tickers[sym]
+                if t["quote_volume"] >= 500_000:  # минимальная ликвидность
+                    by_listings.append((sym, age_hours))
+                    logger.info(f"NEW LISTING: {sym} ({age_hours:.1f}h old)")
+    except Exception as e:
+        logger.error(f"Listings scan error: {e}")
+    by_listings = [s for s, _ in sorted(by_listings, key=lambda x: x[1])][:10]
+
+    # Объединяем пул
+    pool = list(dict.fromkeys(by_vol + by_chg + by_momentum + by_volatility + by_listings))
 
     news_items = await fetch_news_cache()
     btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
@@ -235,6 +256,7 @@ async def scan(regime, tickers, limit=5):
             continue
         score, reasons, keys = score_symbol(candles, tickers[sym], regime)
 
+        # Корреляция с BTC
         corr = _corr(_returns([c["close"] for c in candles]), btc_ret)
         if corr > 0.85 and regime == "neutral":
             score -= 1
@@ -244,14 +266,16 @@ async def scan(regime, tickers, limit=5):
             reasons.append(f"независима от BTC (corr {corr:.2f})")
             keys.append("indep")
 
+        # Тип позиции и сектор
         kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
         sector = sector_of(sym[:-4])
+        is_new = sym in [s for s, _ in by_listings]
 
         scored.append({"symbol": sym, "score": score, "reasons": reasons,
                        "reason_keys": keys, "atr": a, "last": last_price,
                        "liquidity": tickers[sym]["quote_volume"],
                        "corr": round(corr, 2), "atr_pct": round(atr_pct, 2),
-                       "kind": kind, "sector": sector})
+                       "kind": kind, "sector": sector, "is_new": is_new})
 
     scored.sort(key=lambda c: c["score"], reverse=True)
 
