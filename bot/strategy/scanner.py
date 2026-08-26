@@ -9,6 +9,7 @@ from bot.news.cmc import get_coin_name
 from bot.news.rss_news import fetch_news_cache, check_sentiment
 
 SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
+FILTERED_BY_NEWS = []  # последние монеты, отфильтрованные из-за негативных новостей
 
 STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
                 "USD1", "USDD", "EUR", "EURT", "AEUR", "USDT",
@@ -92,6 +93,7 @@ async def scan(regime, tickers, limit=5):
     tradable = [s for s, t in tickers.items()
                 if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
 
+    # Пул: ликвидные + растущие за сутки (следим за "муверами")
     by_vol = sorted(tradable, key=lambda s: tickers[s]["quote_volume"], reverse=True)[:40]
     by_chg = sorted([s for s in tradable if 0 < tickers[s]["change_pct"] < 25],
                     key=lambda s: tickers[s]["change_pct"], reverse=True)[:20]
@@ -108,7 +110,7 @@ async def scan(regime, tickers, limit=5):
             continue
         a = atr(candles)
         if a <= 0 or (a / tickers[sym]["last"]) * 100 < 0.25:
-            continue
+            continue  # слишком низкая волатильность
         score, reasons, keys = score_symbol(candles, tickers[sym], regime)
 
         # --- Корреляция с BTC/USDT ---
@@ -127,6 +129,7 @@ async def scan(regime, tickers, limit=5):
 
     scored.sort(key=lambda c: c["score"], reverse=True)
 
+    # Диагностика: лучшие сигналы цикла
     thr = threshold(regime)
     SCAN_SUMMARY["text"] = " · ".join(
         f"{c['symbol']} {c['score']:.1f}/{thr}" for c in scored[:3]
@@ -140,11 +143,18 @@ async def scan(regime, tickers, limit=5):
         if c["score"] < thr:
             continue
 
+        # --- НОВОСТНАЯ АНАЛИТИКА (RSS + справка CMC) ---
         base = c["symbol"][:-4]
         name = await get_coin_name(base)
         neg, pos, mentions, heads = check_sentiment(news_items, [base, name])
         if neg > 0 and neg > pos:
             logger.info(f"{c['symbol']}: пропущен из-за негативного новостного фона ({neg})")
+            FILTERED_BY_NEWS.append({
+                "symbol": c['symbol'],
+                "neg_count": neg,
+                "time": int(time.time()),
+            })
+            FILTERED_BY_NEWS[:] = FILTERED_BY_NEWS[-10:]
             continue
         if pos > neg:
             c["score"] += learner.weight("news_pos")
