@@ -73,11 +73,19 @@ class Learner:
         logger.info(f"learner: win={win} pnl={pnl_pct:+.2f}% delta={delta:+.2f} keys={keys}")
 
     def reset(self):
+        """Полный сброс: веса + статистика + порог."""
         self.weights = {k: 1.0 for k in KEYS}
         self.results = []
         self.threshold_adj = 0
         self.save()
         logger.info("learner: опыт сброшен")
+
+    def reset_stats(self):
+        """Сбросить только статистику (results, порог), веса-знания сохранить."""
+        self.results = []
+        self.threshold_adj = 0
+        self.save()
+        logger.info("learner: статистика сброшена (веса сохранены)")
 
     def winrate(self):
         last = self.results[-20:]
