@@ -394,6 +394,7 @@ async def run_cycle():
             continue
 
         if kind == "satellite":
+            # Широкий SL (даём "дышать"), дальний TP, R:R >= 2
             sl_dist_pct = max(min(1.5 * a / entry * 100, SAT_MAX_SL_PCT), 2.0)
             tp_dist_pct = max(min(2.5 * a / entry * 100, 12.0), sl_dist_pct * MIN_RR_SAT)
             sl = entry * (1 - sl_dist_pct / 100)
@@ -430,8 +431,9 @@ async def run_cycle():
         sl_pct = (sl - entry) / entry * 100
         kind_line = ("🛰 Сателлит (высокая волатильность)" if kind == "satellite"
                      else "🏛 Core (базовая стратегия)")
+        new_tag = " 🆕 NEW LISTING" if cand.get("is_new") else ""
         await notify(
-            f"🎯 ВЫСТАВЛЕНА ПОКУПКА · {fmt_sym(sym)}\n"
+            f"🎯 ВЫСТАВЛЕНА ПОКУПКА · {fmt_sym(sym)}{new_tag}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"💵 Сумма: {fmt_usdt(size)} USDT\n"
             f"📥 Вход: {fmt_price(entry)}\n"
