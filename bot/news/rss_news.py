@@ -7,7 +7,6 @@ from loguru import logger
 
 _cache = {"items": None, "ts": 0, "listings": None, "listings_ts": 0}
 
-# Новости (RSS-ленты)
 NEWS_FEEDS = [
     "https://cointelegraph.com/rss",
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
@@ -59,68 +58,68 @@ def _parse(xml_text):
 def _parse_listings(xml_text):
     """Извлекает новые листинги из RSS Bybit — устойчиво к невалидному XML."""
     listings = []
-    
-    # Пытаемся через стандартный ET
+
+    # Попытка 1: стандартный XML-парсер
     try:
         root = ET.fromstring(xml_text)
         for item in root.iter('item'):
             title = item.findtext('title') or ''
             link = item.findtext('link') or ''
-            match = re.search(r'New Listing:?\s+([A-Z0-9]+)USDT', title, re.IGNORECASE)
-            if not match:
-                match = re.search(r'([A-Z0-9]+)USDT\s+(?:Now\s+)?Listed', title, re.IGNORECASE)
-            if match:
-                symbol = match.group(1).upper() + 'USDT'
-                pub_date = item.findtext('pubDate')
-                ts = int(time.time())
-                if pub_date:
-                    try:
-                        from email.utils import parsedate_to_datetime
-                        dt = parsedate_to_datetime(pub_date)
-                        ts = int(dt.timestamp())
-                    except:
-                        pass
-                listings.append({'symbol': symbol, 'title': title, 'link': link, 'ts': ts})
+            pub_date = item.findtext('pubDate')
+            entry = _extract_listing(title, link, pub_date)
+            if entry:
+                listings.append(entry)
         return listings
     except ET.ParseError:
-        pass  # переходим к fallback
+        pass  # невалидный XML — идём в fallback
     except Exception as e:
         logger.debug(f"Listings ET parse failed, trying regex fallback: {e}")
-    
-    # FALLBACK: парсинг через regex — работает с невалидным XML
+
+    # Попытка 2: regex-fallback — работает с битым XML/HTML
     try:
         item_pattern = re.compile(
-            r'<item[^>]*>\s*'
-            r'<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>\s*'
-            r'(?:<link[^>]*>(.*?)</link>\s*)?'
-            r'(?:<pubDate[^>]*>(.*?)</pubDate>\s*)?',
+            r'<item[^>]*>(.*?)</item>',
             re.IGNORECASE | re.DOTALL
         )
-        for m in item_pattern.finditer(xml_text):
-            title = m.group(1) or ''
-            link = m.group(2) or ''
-            pub_date = m.group(3)
-            
-            match = re.search(r'New Listing:?\s+([A-Z0-9]+)USDT', title, re.IGNORECASE)
-            if not match:
-                match = re.search(r'([A-Z0-9]+)USDT\s+(?:Now\s+)?Listed', title, re.IGNORECASE)
-            if match:
-                symbol = match.group(1).upper() + 'USDT'
-                ts = int(time.time())
-                if pub_date:
-                    try:
-                        from email.utils import parsedate_to_datetime
-                        dt = parsedate_to_datetime(pub_date.strip())
-                        ts = int(dt.timestamp())
-                    except:
-                        pass
-                listings.append({'symbol': symbol, 'title': title.strip(), 'link': link.strip(), 'ts': ts})
+        for block in item_pattern.finditer(xml_text):
+            chunk = block.group(1)
+            title_m = re.search(r'<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>',
+                                chunk, re.IGNORECASE | re.DOTALL)
+            link_m = re.search(r'<link[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>',
+                               chunk, re.IGNORECASE | re.DOTALL)
+            date_m = re.search(r'<pubDate[^>]*>(.*?)</pubDate>',
+                               chunk, re.IGNORECASE | re.DOTALL)
+            title = title_m.group(1).strip() if title_m else ''
+            link = link_m.group(1).strip() if link_m else ''
+            pub_date = date_m.group(1).strip() if date_m else None
+            entry = _extract_listing(title, link, pub_date)
+            if entry:
+                listings.append(entry)
         if listings:
             logger.info(f"Listings parsed via regex fallback: {len(listings)} items")
     except Exception as e:
         logger.error(f"Listings regex fallback also failed: {e}")
-    
+
     return listings
+
+
+def _extract_listing(title, link, pub_date):
+    """Если заголовок про новый листинг — возвращает запись, иначе None."""
+    match = re.search(r'New Listing:?\s+([A-Z0-9]+)\s*USDT', title, re.IGNORECASE)
+    if not match:
+        match = re.search(r'\b([A-Z0-9]{2,10})\s*USDT\s+(?:Now\s+)?Listed', title, re.IGNORECASE)
+    if not match:
+        return None
+    symbol = match.group(1).upper() + 'USDT'
+    ts = int(time.time())
+    if pub_date:
+        try:
+            from email.utils import parsedate_to_datetime
+            dt = parsedate_to_datetime(pub_date)
+            ts = int(dt.timestamp())
+        except Exception:
+            pass
+    return {'symbol': symbol, 'title': title.strip(), 'link': (link or '').strip(), 'ts': ts}
 
 
 async def fetch_news_cache():
@@ -146,12 +145,19 @@ async def fetch_listings_cache():
     if _cache["listings"] is not None and now - _cache["listings_ts"] < 3600:
         return _cache["listings"]
     listings = []
-    try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
-            r = await c.get("https://announcements.bybit.com/en/rss")
-            listings = _parse_listings(r.text)
-    except Exception as e:
-        logger.error(f"Listings fetch error: {e}")
+    for url in [
+        "https://announcements.bybit.com/en/rss",
+        "https://announcements.bybit.com/rss",
+    ]:
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+                r = await c.get(url)
+            found = _parse_listings(r.text)
+            if found:
+                listings = found
+                break
+        except Exception as e:
+            logger.error(f"Listings fetch error {url}: {e}")
     _cache["listings"], _cache["listings_ts"] = listings, now
     return listings
 
@@ -183,7 +189,7 @@ def get_stats():
     cache_age = now - _cache["ts"] if _cache["ts"] else None
     items = _cache["items"] or []
     listings = _cache["listings"] or []
-    
+
     neg_examples = []
     pos_examples = []
     for item in items[:20]:
@@ -198,7 +204,7 @@ def get_stats():
     now_ts = int(time.time())
     fresh_listings = [
         l for l in listings
-        if 86400 <= now_ts - l['ts'] <= 1209600
+        if 86400 <= now_ts - l['ts'] <= 1209600  # 24ч – 14 дней
     ]
 
     return {
