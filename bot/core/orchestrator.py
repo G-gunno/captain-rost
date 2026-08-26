@@ -11,12 +11,12 @@ from bot.core.state import bot_state
 from bot.utils.format import fmt_price, fmt_usdt, fmt_pct, fmt_sym
 
 CYCLE_SECONDS = 300
-FEE_PCT = 0.10           # комиссия за сторону, %
-MIN_TP_PCT = 0.60        # минимальный TP
-MIN_SL_PCT = 0.35        # минимальный SL
-MAX_SL_PCT = 3.0         # максимальный SL — дальше монета слишком шумная
-MIN_RR = 1.5             # минимальная прибыль/риск
-MIN_EARLY_EXIT_PCT = 1.0 # ранний выход только при плюсе >= 1% (учёт комиссий)
+FEE_PCT = 0.10
+MIN_TP_PCT = 0.60
+MIN_SL_PCT = 0.35
+MAX_SL_PCT = 3.0
+MIN_RR = 1.5
+MIN_EARLY_EXIT_PCT = 1.0
 _notify_cb = None
 
 
@@ -76,7 +76,7 @@ async def run_cycle():
             await notify("🚨 Риск-менеджмент: резкий дамп рынка. Все позиции закрыты в USDT.")
         return
 
-    # 4. УПРАВЛЕНИЕ ПОЗИЦИЯМИ: перескоринг, ранний выход, трейлинг TP/SL
+    # 4. УПРАВЛЕНИЕ ПОЗИЦИЯМИ
     for sym, pos in list(paper.positions.items()):
         t = tickers.get(sym)
         if not t:
@@ -93,32 +93,55 @@ async def run_cycle():
         e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
         score_pos, _, _ = score_symbol(candles, t, regime)
         thr = threshold(regime)
-
-        # 4а. Сигнал иссяк: score обрушился или тренд сломан, а мы в осмысленном плюсе
         trend_broken = last < e50 and e21 < e50
-        if (score_pos <= thr - 2 or trend_broken) and pnl_pct >= MIN_EARLY_EXIT_PCT:
-            ex = paper._sell(sym, last, "СИГНАЛ ИСЯК 📉")
+
+        # 4а. ЧАСТИЧНЫЙ TP: первый таргет -> продаём 50%, остаток бежит
+        if not pos.get("tp1_done") and last >= pos["tp"]:
+            half = pos["qty"] / 2
+            ex = paper.sell_partial(sym, half, pos["tp"], "TP1 🎯")
+            pos["tp1_done"] = True
+            pos["sl"] = max(pos["sl"], pos["avg"])          # остаток в безубытке
+            pos["tp"] = round(pos["tp"] + 1.5 * a, 10)      # новый таргет раннера
+            paper.save()
             await notify(
-                f"📉 РАННИЙ ВЫХОД · {fmt_sym(sym)}\n"
-                f"Сигнал ослаб (score {score_pos:.1f} при пороге {thr}) — "
-                f"фиксируем {fmt_pct(ex['pnl_pct'])} ({ex['pnl']:+.2f} USDT)"
+                f"🎯 ЧАСТИЧНЫЙ TP · {fmt_sym(sym)}\n"
+                f"Продано 50% по {fmt_price(ex['price'])} ({fmt_pct(ex['pnl_pct'])}, {ex['pnl']:+.2f} USDT)\n"
+                f"Остаток бежит дальше: 🎯 {fmt_price(pos['tp'])} | 🛡 {fmt_price(pos['sl'])}"
             )
             continue
 
-        # 4б. Тренд и сигнал сильны у самого TP — даём прибыли бежать: TP и SL вверх
+        # 4б. ИНВАЛИДАЦИЯ: тренд сломан / сигнал умер
+        if trend_broken or score_pos <= thr - 2:
+            if pnl_pct >= MIN_EARLY_EXIT_PCT:
+                ex = paper._sell(sym, last, "СИГНАЛ ИСЯК 📉")
+                await notify(
+                    f"📉 РАННИЙ ВЫХОД · {fmt_sym(sym)}\n"
+                    f"Сигнал ослаб (score {score_pos:.1f} при пороге {thr}) — "
+                    f"фиксируем {fmt_pct(ex['pnl_pct'])} ({ex['pnl']:+.2f} USDT)"
+                )
+                continue
+            if trend_broken and score_pos <= thr - 1 and pnl_pct <= -0.5:
+                ex = paper._sell(sym, last, "ИНВАЛИДАЦИЯ 🛑")
+                await notify(
+                    f"🛑 РЕЗКА УБЫТКА · {fmt_sym(sym)}\n"
+                    f"Тренд сломан, сигнал мёртв (score {score_pos:.1f}) — "
+                    f"режем {fmt_pct(ex['pnl_pct'])} ({ex['pnl']:+.2f} USDT), не ждём SL"
+                )
+                continue
+
+        # 4в. РАННЕР: тренд силён у нового TP -> двигаем TP вверх
         new_sl = None
-        if last > e21 > e50 and score_pos >= thr and last >= pos["tp"] - 0.3 * a:
+        if pos.get("tp1_done") and last > e21 > e50 and score_pos >= thr and last >= pos["tp"] - 0.3 * a:
             new_tp = max(pos["tp"], last + 1.5 * a)
             if new_tp > pos["tp"]:
                 pos["tp"] = round(new_tp, 10)
                 new_sl = max(new_sl or pos["sl"], pos["avg"] + 0.5 * a)
                 await notify(
-                    f"🎯 TP ПОДНЯТ · {fmt_sym(sym)}\n"
-                    f"Тренд и сигнал сильны (score {score_pos:.1f}) — пусть прибыль бежит\n"
-                    f"🎯 TP: {fmt_price(pos['tp'])} | 🛡 SL: {fmt_price(pos['sl'])}"
+                    f"🎯 TP ПОДНЯТ (раннер) · {fmt_sym(sym)}\n"
+                    f"🎯 {fmt_price(pos['tp'])} | 🛡 {fmt_price(pos['sl'])}"
                 )
 
-        # 4в. Трейлинг SL — только вверх
+        # 4г. Трейлинг SL — только вверх
         if last >= pos["avg"] + 1.0 * a:
             new_sl = max(new_sl or pos["sl"], pos["avg"])
         if last >= pos["avg"] + 2.0 * a:
@@ -129,7 +152,7 @@ async def run_cycle():
             logger.info(f"SL поднят {sym} -> {pos['sl']}")
         paper.save()
 
-    # 5. Выходы по TP/SL (после корректировок)
+    # 5. Выходы остатка по TP/SL
     for ex in paper.check_exits(tickers):
         await notify(
             f"📤 ПРОДАЖА · {fmt_sym(ex['symbol'])} · {ex['reason']}\n"
