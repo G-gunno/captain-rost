@@ -6,10 +6,14 @@ from pathlib import Path
 from loguru import logger
 
 from bot.strategy.learner import learner
+from bot.core.remote_state import download_state, upload_state
+
+REMOTE_PATH = "paper_state.json"
 
 
 class PaperExchange:
-    """Виртуальная биржа: реальные цены, виртуальные деньги, честные комиссии."""
+    """Виртуальная биржа: реальные цены, виртуальные деньги, честные комиссии.
+    Состояние резервируется в GitHub и переживает деплои."""
 
     FEE_PCT = 0.10  # комиссия за сторону, %
 
@@ -22,35 +26,46 @@ class PaperExchange:
         self.orders = []
         self.trades = []
         self.realized = []
+        self._last_upload = 0.0
         self._load()
 
     def _load(self):
+        data = None
         try:
             if self.state_file.exists():
                 data = json.loads(self.state_file.read_text())
-                self.usdt = data.get("usdt", self.start_usdt)
-                self.funding = data.get("funding", 0.0)
-                self.positions = data.get("positions", {})
-                self.orders = data.get("orders", [])
-                self.trades = data.get("trades", [])
-                self.realized = data.get("realized", [])
-                logger.info(f"Paper state загружен: USDT={self.usdt:.2f}, позиций={len(self.positions)}")
         except Exception as e:
             logger.error(f"Paper load error: {e}")
+        if data is None:
+            data = download_state(REMOTE_PATH)
+            if data:
+                logger.info("Paper state восстановлен из GitHub (пережил деплой)")
+        if data:
+            self.usdt = data.get("usdt", self.start_usdt)
+            self.funding = data.get("funding", 0.0)
+            self.positions = data.get("positions", {})
+            self.orders = data.get("orders", [])
+            self.trades = data.get("trades", [])
+            self.realized = data.get("realized", [])
+            logger.info(f"Paper state загружен: USDT={self.usdt:.2f}, позиций={len(self.positions)}")
 
     def save(self):
+        payload = {
+            "usdt": self.usdt,
+            "funding": self.funding,
+            "positions": self.positions,
+            "orders": self.orders,
+            "trades": self.trades,
+            "realized": self.realized,
+        }
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
-            self.state_file.write_text(json.dumps({
-                "usdt": self.usdt,
-                "funding": self.funding,
-                "positions": self.positions,
-                "orders": self.orders,
-                "trades": self.trades,
-                "realized": self.realized,
-            }, ensure_ascii=False))
+            self.state_file.write_text(json.dumps(payload, ensure_ascii=False))
         except Exception as e:
             logger.error(f"Paper save error: {e}")
+        if time.time() - self._last_upload > 60:
+            self._last_upload = time.time()
+            upload_state(REMOTE_PATH, payload)
 
     def place_limit_buy(self, symbol, qty, price, tp, sl, score=0, reason_keys=None):
         order = {
@@ -109,7 +124,6 @@ class PaperExchange:
         return fills
 
     def check_exits(self, prices):
-        """Полная продажа остатка по TP или SL."""
         results = []
         for sym in list(self.positions):
             last = prices.get(sym, {}).get("last")
@@ -123,7 +137,6 @@ class PaperExchange:
         return results
 
     def sell_partial(self, sym, qty_part, price, reason):
-        """Продажа ЧАСТИ позиции (частичный TP)."""
         pos = self.positions.get(sym)
         if not pos:
             return None
