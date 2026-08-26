@@ -18,6 +18,7 @@ MAX_SL_PCT = 3.0
 MIN_RR = 1.5
 MIN_EARLY_EXIT_PCT = 1.0
 _notify_cb = None
+_reconciled = False
 
 
 def set_notifier(cb):
@@ -33,7 +34,92 @@ async def notify(text):
             logger.error(f"notify error: {e}")
 
 
+# ==================== СВЕРКА СОСТОЯНИЯ ПРИ СТАРТЕ ====================
+async def startup_reconciliation():
+    """После деплоя/рестарта: привести позиции и ордера к ТЕКУЩЕЙ логике.
+    Для реальной биржи сюда добавится сканирование балансов/ордеров на бирже."""
+    logger.info("=== RECONCILE START ===")
+    prices = await market_data.get_tickers()
+    if not prices:
+        logger.error("Reconcile: нет цен, пропуск")
+        return
+    actions = []
+
+    # 1. Позиции: пересчитать TP/SL по актуальным правилам (если они пропали или устарели)
+    for sym, pos in list(paper.positions.items()):
+        entry = pos.get("avg", 0)
+        if not entry:
+            continue
+        candles = await market_data.get_kline(sym, "15", 120)
+        if len(candles) < 60:
+            continue
+        a = atr(candles)
+        if a <= 0:
+            continue
+        fixed = []
+        tp_dist = (pos.get("tp", 0) - entry) / entry * 100 if pos.get("tp") else 0
+        if not pos.get("tp1_done") and (not pos.get("tp") or pos["tp"] <= entry or tp_dist < MIN_TP_PCT):
+            d = max(min(2.0 * a / entry * 100, MAX_SL_PCT * 2), MIN_TP_PCT)
+            pos["tp"] = round(entry * (1 + d / 100), 10)
+            fixed.append(f"TP {fmt_price(pos['tp'])}")
+        sl_dist = (entry - pos.get("sl", 0)) / entry * 100 if pos.get("sl") else 0
+        if not pos.get("sl") or pos["sl"] >= entry or sl_dist > MAX_SL_PCT or sl_dist < MIN_SL_PCT:
+            d = max(min(1.2 * a / entry * 100, MAX_SL_PCT), MIN_SL_PCT)
+            pos["sl"] = round(entry * (1 - d / 100), 10)
+            fixed.append(f"SL {fmt_price(pos['sl'])}")
+        if fixed:
+            actions.append(f"{sym}: {' и '.join(fixed)} пересчитаны по новой логике")
+    paper.save()
+
+    # 2. Ордера: проверить сигнал текущим скорингом; протухшие — снять, живые — освежить
+    regime, _ = await get_regime()
+    thr = threshold(regime)
+    for order in list(paper.orders):
+        sym = order["symbol"]
+        t = prices.get(sym)
+        if not t:
+            paper.cancel_order(order["id"])
+            actions.append(f"{sym}: ордер снят (нет данных)")
+            continue
+        candles = await market_data.get_kline(sym, "15", 120)
+        if len(candles) < 60:
+            continue
+        a = atr(candles)
+        score, _, _ = score_symbol(candles, t, regime)
+        if score < thr - 1:
+            paper.cancel_order(order["id"])
+            actions.append(f"{sym}: ордер снят (score {score:.1f} ниже порога {thr})")
+        elif a > 0:
+            order["price"] = t["last"] * 0.998
+            order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
+            order["sl"] = min(order["price"] - 1.2 * a, order["price"] * (1 - MIN_SL_PCT / 100))
+            order["created"] = int(time.time())
+            order["requotes"] = 0
+            actions.append(f"{sym}: ордер перевыставлен по новой логике (score {score:.1f})")
+    paper.save()
+
+    for line in actions:
+        logger.info(f"RECONCILE: {line}")
+    logger.info(f"=== RECONCILE END ({len(actions)} действий) ===")
+    if actions:
+        await notify("🧩 ПЕРЕОЦЕНКА ПОСЛЕ СТАРТА:\n" + "\n".join(actions[:10]))
+
+
+async def maybe_reconcile():
+    global _reconciled
+    if _reconciled:
+        return
+    _reconciled = True
+    try:
+        await startup_reconciliation()
+    except Exception as e:
+        logger.exception(f"Reconcile error: {e}")
+
+
+# ==================== ТОРГОВЫЙ ЦИКЛ ====================
 async def run_cycle():
+    await maybe_reconcile()
+
     if bot_state.paused or not bot_state.trading_enabled:
         logger.info("Цикл пропущен: торговля на паузе или остановлена")
         return
@@ -100,8 +186,8 @@ async def run_cycle():
             half = pos["qty"] / 2
             ex = paper.sell_partial(sym, half, pos["tp"], "TP1 🎯")
             pos["tp1_done"] = True
-            pos["sl"] = max(pos["sl"], pos["avg"])          # остаток в безубытке
-            pos["tp"] = round(pos["tp"] + 1.5 * a, 10)      # новый таргет раннера
+            pos["sl"] = max(pos["sl"], pos["avg"])
+            pos["tp"] = round(pos["tp"] + 1.5 * a, 10)
             paper.save()
             await notify(
                 f"🎯 ЧАСТИЧНЫЙ TP · {fmt_sym(sym)}\n"
