@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from loguru import logger
 from telegram import BotCommand
+from telegram.error import Conflict as TelegramConflict
 from telegram.ext import Application, CommandHandler
 
 from bot.exchange.market_data import market_data
@@ -46,7 +47,10 @@ def start_health_server():
 async def send_chat(text):
     chat = os.getenv("TELEGRAM_CHAT_ID")
     if chat and _app:
-        await _app.bot.send_message(chat_id=chat, text=text)
+        try:
+            await _app.bot.send_message(chat_id=chat, text=text)
+        except Exception as e:
+            logger.error(f"send_chat error: {e}")
 
 
 async def cycle_loop():
@@ -77,12 +81,28 @@ async def report_loop():
         await asyncio.sleep(30)
 
 
+async def error_handler(update, context):
+    """Глушим Conflict, чтобы не спамить в логи — Telegram polling продолжит работать."""
+    err = context.error
+    if isinstance(err, TelegramConflict):
+        logger.warning("Telegram Conflict: другой процесс держит polling, ждём и пробуем снова")
+        return
+    logger.exception(f"Unhandled error: {err}")
+
+
 async def post_init(application):
     global _app
     _app = application
-    set_notifier(send_chat)
 
-    await asyncio.to_thread(ensure_branch)  # ветка для резервного опыта (если настроен токен)
+    # ЖЁСТКАЯ ОЧИСТКА: удаляем любой webhook и сбрасываем очередь — это убирает Conflict
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook удалён, очередь обновлений сброшена")
+    except Exception as e:
+        logger.error(f"delete_webhook error: {e}")
+
+    set_notifier(send_chat)
+    await asyncio.to_thread(ensure_branch)
 
     await application.bot.set_my_commands([
         BotCommand("start", "🚀 Запустить торговлю"),
@@ -174,7 +194,7 @@ async def cmd_learn(update, context):
 
 async def cmd_resetlearn(update, context):
     learner.reset()
-    await update.message.reply_text("🧠️ Опыт обучения сброшен: все веса = 1.0, история очищена.")
+    await update.message.reply_text("🧠♻️ Опыт обучения сброшен: все веса = 1.0, история очищена.")
 
 
 async def cmd_log(update, context):
@@ -280,6 +300,9 @@ def main():
            .token(token)
            .post_init(post_init)
            .build())
+
+    app.add_error_handler(error_handler)  # глушим Conflict в логах
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("pause", cmd_pause))
@@ -291,6 +314,7 @@ def main():
     app.add_handler(CommandHandler("help", cmd_help))
 
     logger.info("Бот успешно стартовал и слушает Telegram...")
+    # drop_pending_updates + delete_webhook в post_init = финальная защита от Conflict
     app.run_polling(drop_pending_updates=True)
 
 
