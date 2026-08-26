@@ -7,9 +7,9 @@ from zoneinfo import ZoneInfo
 
 import aiohttp.web as web
 from loguru import logger
-from telegram import BotCommand, Update
+from telegram import BotCommand, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import Conflict as TelegramConflict
-from telegram.ext import Application, CommandHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
 from bot.exchange.market_data import market_data
 from bot.exchange.paper_exchange import paper
@@ -88,6 +88,102 @@ async def error_handler(update, context):
     logger.exception(f"Unhandled error: {err}")
 
 
+# ==================== ДЕЙСТВИЯ С ПОДТВЕРЖДЕНИЕМ ====================
+async def action_pause(context):
+    if bot_state.paused:
+        return "⏸ Уже на паузе."
+    orders = list(paper.orders)
+    paper.orders = []
+    paper.save()
+    bot_state.pause(orders)
+    return f"⏸ ПАУЗА. Ордеров запомнено и снято: {len(orders)}. Открытые позиции остались."
+
+
+async def action_resume(context):
+    if not bot_state.paused:
+        return "▶️ Не на паузе."
+    orders = bot_state.resume()
+    paper.orders.extend(orders)
+    paper.save()
+    return f"▶️ ВОЗОБНОВЛЕНО. Ордеров восстановлено: {len(orders)}."
+
+
+async def action_exitall(context):
+    bot_state.trading_enabled = False
+    prices = await market_data.get_tickers()
+    results = paper.sell_all(prices)
+    total = sum(r["pnl"] for r in results)
+    return (
+        f"🛑 ТОРГОВЛЯ ОСТАНОВЛЕНА.\nПозиций закрыто: {len(results)}\n"
+        f"Суммарный PnL: {total:+.2f} USDT\nБаланс: {fmt_usdt(paper.usdt)} USDT\n"
+        f"🧠 Опыт обучения сохранён."
+    )
+
+
+async def action_resetlearn(context):
+    learner.reset()
+    return "🧠♻️ Опыт обучения сброшен: все веса = 1.0, история очищена."
+
+
+async def action_resetstats(context):
+    paper.reset_stats()
+    learner.reset_stats()
+    return (
+        "📊 СТАТИСТИКА СБРОШЕНА.\n"
+        "История сделок очищена, PF / DD / Expectancy считаются с нуля.\n"
+        "🧠 Веса обучения сохранены (знания не потеряны).\n"
+        "Режим STRICT снят, порог вернулся к базовому.\n\n"
+        "Полный сброс включая веса — /resetlearn."
+    )
+
+
+ACTIONS = {
+    "pause": (action_pause, "⏸ поставить торговлю на паузу?"),
+    "resume": (action_resume, "▶️ возобновить торговлю?"),
+    "exitall": (action_exitall, "🛑 продать ВСЕ позиции и остановить торговлю?"),
+    "resetlearn": (action_resetlearn, "🧠♻️ сбросить опыт обучения (веса и историю)?"),
+    "resetstats": (action_resetstats, "📊 сбросить торговую статистику (историю и метрики)?"),
+}
+
+
+async def ask_confirmation(update, context, key):
+    """Показывает сообщение с кнопками Подтвердить/Отмена."""
+    _, question = ACTIONS[key]
+    keyboard = [[
+        InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm:{key}"),
+        InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
+    ]]
+    await update.message.reply_text(
+        f"⚠️ Требуется подтверждение: {question}",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def confirm_handler(update, context):
+    """Обрабатывает нажатия кнопок подтверждения."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "cancel":
+        await query.edit_message_text("❌ Действие отменено.")
+        return
+
+    if data.startswith("confirm:"):
+        key = data.split(":", 1)[1]
+        entry = ACTIONS.get(key)
+        if not entry:
+            await query.edit_message_text("⚠️ Неизвестное действие.")
+            return
+        fn, _ = entry
+        try:
+            result = await fn(context)
+            await query.edit_message_text(f"✅ Подтверждено.\n\n{result}")
+        except Exception as e:
+            logger.exception(f"confirm action error: {e}")
+            await query.edit_message_text(f"⚠️ Ошибка выполнения: {e}")
+
+
 # ==================== Главный запуск ====================
 async def run_all(application):
     """Запускает aiohttp-сервер + регистрирует webhook + стартует циклы."""
@@ -117,12 +213,12 @@ async def run_all(application):
     await application.bot.set_my_commands([
         BotCommand("start", "🚀 Запустить торговлю"),
         BotCommand("status", "📊 Статус: балансы и позиции"),
-        BotCommand("pause", "⏸ Пауза"),
-        BotCommand("resume", "▶️ Возобновить"),
-        BotCommand("exitall", "🛑 Продать всё и остановить"),
+        BotCommand("pause", "⏸ Пауза (с подтверждением)"),
+        BotCommand("resume", "▶️ Возобновить (с подтверждением)"),
+        BotCommand("exitall", "🛑 Продать всё и остановить (с подтверждением)"),
         BotCommand("learn", "🧠 Обучение: веса и winrate"),
-        BotCommand("resetlearn", "🧠♻️ Сбросить опыт обучения"),
-        BotCommand("resetstats", "📊 Сбросить торговую статистику"),
+        BotCommand("resetlearn", "🧠♻️ Сбросить опыт обучения (с подтверждением)"),
+        BotCommand("resetstats", "📊 Сбросить торговую статистику (с подтверждением)"),
         BotCommand("news", "📰 Статус новостной аналитики"),
         BotCommand("log", "📄 Файл лога"),
         BotCommand("help", "📖 Справка"),
@@ -172,12 +268,12 @@ async def cmd_help(update, context):
         "📖 МОИ КОМАНДЫ:\n"
         "/start — запустить торговлю, новый цикл\n"
         "/status — балансы, позиции с весами, активные ордера, метрики, статистика\n"
-        "/pause — пауза (ордера запомнить и снять)\n"
-        "/resume — возобновить (ордера вернуть)\n"
-        "/exitall — остановить и продать всё (опыт обучения сохраняется)\n"
+        "/pause — пауза (ордера запомнить и снять) · с подтверждением\n"
+        "/resume — возобновить (ордера вернуть) · с подтверждением\n"
+        "/exitall — остановить и продать всё · с подтверждением\n"
         "/learn — показать обучение: веса сигналов и winrate\n"
-        "/resetlearn — сбросить опыт обучения в ноль\n"
-        "/resetstats — сбросить только торговую статистику (веса сохранены)\n"
+        "/resetlearn — сбросить опыт обучения в ноль · с подтверждением\n"
+        "/resetstats — сбросить только торговую статистику (веса сохранены) · с подтверждением\n"
         "/news — статус новостной аналитики (CMC + RSS)\n"
         "/log — прислать файл лога\n"
         "/help — эта справка"
@@ -185,38 +281,23 @@ async def cmd_help(update, context):
 
 
 async def cmd_pause(update, context):
-    if bot_state.paused:
-        await update.message.reply_text("⏸ Уже на паузе.")
-        return
-    orders = list(paper.orders)
-    paper.orders = []
-    paper.save()
-    bot_state.pause(orders)
-    await update.message.reply_text(
-        f"⏸ ПАУЗА. Ордеров запомнено и снято: {len(orders)}. Открытые позиции остались."
-    )
+    await ask_confirmation(update, context, "pause")
 
 
 async def cmd_resume(update, context):
-    if not bot_state.paused:
-        await update.message.reply_text("▶️ Не на паузе.")
-        return
-    orders = bot_state.resume()
-    paper.orders.extend(orders)
-    paper.save()
-    await update.message.reply_text(f"▶️ ВОЗОБНОВЛЕНО. Ордеров восстановлено: {len(orders)}.")
+    await ask_confirmation(update, context, "resume")
 
 
 async def cmd_exitall(update, context):
-    bot_state.trading_enabled = False
-    prices = await market_data.get_tickers()
-    results = paper.sell_all(prices)
-    total = sum(r["pnl"] for r in results)
-    await update.message.reply_text(
-        f"🛑 ТОРГОВЛЯ ОСТАНОВЛЕНА.\nПозиций закрыто: {len(results)}\n"
-        f"Суммарный PnL: {total:+.2f} USDT\nБаланс: {fmt_usdt(paper.usdt)} USDT\n"
-        f"🧠 Опыт обучения сохранён."
-    )
+    await ask_confirmation(update, context, "exitall")
+
+
+async def cmd_resetlearn(update, context):
+    await ask_confirmation(update, context, "resetlearn")
+
+
+async def cmd_resetstats(update, context):
+    await ask_confirmation(update, context, "resetstats")
 
 
 async def cmd_learn(update, context):
@@ -230,24 +311,6 @@ async def cmd_learn(update, context):
         bar = "▮" * max(1, int(round(v * 5)))
         lines.append(f"   {k}: {v:.2f} {bar}")
     await update.message.reply_text("\n".join(lines))
-
-
-async def cmd_resetlearn(update, context):
-    learner.reset()
-    await update.message.reply_text("🧠♻️ Опыт обучения сброшен: все веса = 1.0, история очищена.")
-
-
-async def cmd_resetstats(update, context):
-    """Сброс торговой статистики (PF/DD/Expectancy), веса сохранены."""
-    paper.reset_stats()
-    learner.reset_stats()
-    await update.message.reply_text(
-        "📊 СТАТИСТИКА СБРОШЕНА.\n"
-        "История сделок очищена, PF / DD / Expectancy считаются с нуля.\n"
-        "🧠 Веса обучения сохранены (знания не потеряны).\n"
-        "Режим STRICT снят, порог вернулся к базовому.\n\n"
-        "Полный сброс включая веса — /resetlearn."
-    )
 
 
 async def cmd_news(update, context):
@@ -360,7 +423,7 @@ async def cmd_status(update, context):
 
         msg.append(f"📊 МЕТРИКИ · режим {mode_emoji} {mode}")
         msg.append(f"   🧾 Сделок: {metrics['total_trades']} (✅ {metrics['win_count']} / ❌ {metrics['loss_count']})")
-        
+
         pf = metrics["profit_factor"]
         if pf is None:
             pf_text = "—"
@@ -375,7 +438,7 @@ async def cmd_status(update, context):
             else:
                 pf_text += " 🎯"
         msg.append(f"   📈 Profit Factor: {pf_text}  (цель ≥ 1.3)")
-        
+
         dd = metrics["max_drawdown_pct"]
         if dd < 5:
             dd_text = f"{dd:.1f}% ✅"
@@ -384,16 +447,14 @@ async def cmd_status(update, context):
         else:
             dd_text = f"{dd:.1f}% 🔴"
         msg.append(f"   📉 Max Drawdown: {dd_text}  (лимит 15%)")
-        
-        # Expectancy
+
         exp = metrics["expectancy"]
         if exp > 0:
             exp_text = f"{exp:+.2f} USDT 🎯"
         else:
             exp_text = f"{exp:+.2f} USDT ❌"
         msg.append(f"   💹 Expectancy: {exp_text}  (мат. ожидание на сделку)")
-        
-        # Recovery Factor
+
         rf = metrics["recovery_factor"]
         if rf > 2:
             rf_text = f"{rf:.1f} 🎯"
@@ -402,7 +463,7 @@ async def cmd_status(update, context):
         else:
             rf_text = f"{rf:.1f} ❌"
         msg.append(f"   🔄 Recovery Factor: {rf_text}  (скорость восстановления)")
-        
+
         msg.append(f"   💵 Суммарный PnL: {metrics['total_pnl']:+.2f} USDT")
 
         if paper.realized:
@@ -451,6 +512,7 @@ def main():
     app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("log", cmd_log))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CallbackQueryHandler(confirm_handler))
 
     logger.info("Бот собран, запускаем webhook-сервер...")
     asyncio.run(run_all(app))
