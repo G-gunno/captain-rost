@@ -1,5 +1,6 @@
 import time
 
+import httpx
 from loguru import logger
 
 from bot.exchange.market_data import market_data
@@ -12,6 +13,8 @@ SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
 FILTERED_BY_NEWS = []
 
 SAT_ATR_PCT = 1.2  # порог волатильности: выше — монета идёт в сателлиты
+
+_instruments_cache = {"data": None, "ts": 0}  # кэш инструментов Bybit на 1 час
 
 STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
                 "USD1", "USDD", "EUR", "EURT", "AEUR", "USDT",
@@ -44,21 +47,21 @@ SECTORS = {
     "EIGEN": "DeFi", "ETHFI": "DeFi", "RSR": "DeFi", "YFI": "DeFi",
     "BAL": "DeFi", "BNT": "DeFi", "1INCH": "DeFi", "BIFI": "DeFi",
     "KP3R": "DeFi", "RPL": "DeFi", "SSV": "DeFi", "BLUR": "DeFi",
-    "MAGIC": "DeFi", "TORN": "DeFi", "AZERO": "DeFi", "ZRO": "DeFi",
+    "MAGIC": "DeFi", "TORN": "DeFi", "AZERO": "DeFi",
     # ===== AI =====
     "FET": "AI", "OCEAN": "AI", "RNDR": "AI", "RENDER": "AI",
     "GRT": "AI", "TAO": "AI", "ARKM": "AI", "WLD": "AI", "VIRTUAL": "AI",
     "FLOCK": "AI", "GRASS": "AI", "SQD": "AI", "AI16Z": "AI",
     "ZEREBRO": "AI", "AGIX": "AI", "AKT": "AI", "NMR": "AI", "PHB": "AI",
     "OLAS": "AI", "PAAL": "AI", "AIOZ": "AI", "CTXC": "AI", "ALCH": "AI",
-    "WLD": "AI", "AI": "AI", "COOKIE": "AI",
+    "AI": "AI", "COOKIE": "AI",
     # ===== Meme =====
     "DOGE": "Meme", "SHIB": "Meme", "PEPE": "Meme", "BONK": "Meme",
     "FLOKI": "Meme", "WIF": "Meme", "BRETT": "Meme", "POPCAT": "Meme",
     "MEW": "Meme", "TURBO": "Meme", "PENGU": "Meme", "SPX": "Meme",
     "MOODENG": "Meme", "PUMP": "Meme", "NEIRO": "Meme", "BOME": "Meme",
     "FARTCOIN": "Meme", "PNUT": "Meme", "GOAT": "Meme", "ACT": "Meme",
-    "MOTHER": "Meme", "DADDY": "Meme", "GIGA": "Meme", "POPCAT": "Meme",
+    "MOTHER": "Meme", "DADDY": "Meme", "GIGA": "Meme",
     "MOG": "Meme", "TOSHI": "Meme", "MYRO": "Meme", "SLERF": "Meme",
     "BODEN": "Meme", "TREMP": "Meme", "HARAMBE": "Meme", "MAGA": "Meme",
     "TRUMP": "Meme", "HAT": "Meme",
@@ -67,15 +70,14 @@ SECTORS = {
     "RONIN": "Gaming", "PIXEL": "Gaming", "PORTAL": "Gaming",
     "XAI": "Gaming", "NOT": "Gaming", "HMSTR": "Gaming", "CATI": "Gaming",
     "ENJ": "Gaming", "CHZ": "Gaming", "WEMIX": "Gaming", "SUPER": "Gaming",
-    "YGG": "Gaming", "MAGIC": "Gaming", "BEAM": "Gaming", "GHST": "Gaming",
+    "YGG": "Gaming", "BEAM": "Gaming", "GHST": "Gaming",
     "PRIME": "Gaming", "ALT": "Gaming", "ALICE": "Gaming", "BIGTIME": "Gaming",
     # ===== Infra =====
     "FIL": "Infra", "AR": "Infra", "LPT": "Infra", "TWT": "Infra",
     "IOTA": "Infra", "BICO": "Infra", "API3": "Infra", "BAND": "Infra",
     "TRB": "Infra", "HNT": "Infra", "IOTX": "Infra", "XDB": "Infra",
     "WAXP": "Infra", "STORJ": "Infra", "GTC": "Infra", "ANKR": "Infra",
-    "OCEAN": "Infra", "RNDR": "Infra", "AKT": "Infra", "TAO": "Infra",
-    "HONEY": "Infra", "RAD": "Infra", "MOBILE": "Infra", "IOTX": "Infra",
+    "HONEY": "Infra", "RAD": "Infra", "MOBILE": "Infra",
     # ===== RWA =====
     "ONDO": "RWA", "PENDLE": "RWA", "ENA": "RWA", "ETHFI": "RWA",
     "MPL": "RWA", "CFG": "RWA", "TOKEN": "RWA", "POLYX": "RWA",
@@ -90,13 +92,13 @@ SECTORS = {
     "DYDX": "DEX", "GMX": "DEX", "JUP": "DEX", "RAY": "DEX",
     "ORCA": "DEX", "OSMO": "DEX",
     # ===== Launchpad =====
-    "DAO": "Launchpad", "BOND": "Launchpad", "POL": "Launchpad",
+    "DAO": "Launchpad", "BOND": "Launchpad",
     # ===== Exchange tokens =====
     "BNB": "Exchange", "KCS": "Exchange", "OKB": "Exchange", "HT": "Exchange",
     "CRO": "Exchange", "GT": "Exchange", "MX": "Exchange", "BGB": "Exchange",
-    # ===== Popular but uncategorized =====
+    # ===== Прочее популярное =====
     "BR": "Infra", "XAN": "AI", "OBT": "DeFi", "METAX": "Gaming",
-    "ASTER": "L1", "POLYX": "Infra", "CAP": "DeFi", "TAC": "L1",
+    "ASTER": "L1", "CAP": "DeFi", "TAC": "L1",
     "FF": "Gaming", "BLIFE": "Gaming",
 }
 
@@ -165,6 +167,46 @@ async def get_regime():
     return regime, {"btc": last, "ema50": e50, "ema200": e200}
 
 
+async def fetch_new_listings():
+    """Новые листинги через Bybit API (launchTime) — надёжный источник. Кэш 1 час."""
+    now = time.time()
+    if _instruments_cache["data"] is not None and now - _instruments_cache["ts"] < 3600:
+        raw = _instruments_cache["data"]
+    else:
+        raw = []
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                cursor = ""
+                for _ in range(5):  # максимум 5 страниц по 1000
+                    params = {"category": "spot", "limit": 1000}
+                    if cursor:
+                        params["cursor"] = cursor
+                    r = await c.get("https://api.bybit.com/v5/market/instruments", params=params)
+                    result = r.json().get("result", {})
+                    raw += result.get("list", [])
+                    cursor = result.get("nextPageCursor", "") or ""
+                    if not cursor:
+                        break
+            _instruments_cache["data"], _instruments_cache["ts"] = raw, now
+            logger.info(f"Instruments loaded: {len(raw)} spot symbols")
+        except Exception as e:
+            logger.error(f"Bybit instruments error: {e}")
+    now_ms = int(now * 1000)
+    out = []
+    for ins in raw:
+        sym = ins.get("symbol", "")
+        if not sym.endswith("USDT") or ins.get("status") != "Trading":
+            continue
+        try:
+            launch = int(ins.get("launchTime", 0) or 0)
+        except Exception:
+            launch = 0
+        if launch <= 0:
+            continue
+        out.append((sym, (now_ms - launch) / 3600000))
+    return out
+
+
 def score_symbol(candles, t, regime):
     closes = [c["close"] for c in candles]
     last = closes[-1]
@@ -219,26 +261,29 @@ async def scan(regime, tickers, limit=5):
                 by_volatility.append((sym, atr_pct))
     by_volatility = [s for s, _ in sorted(by_volatility, key=lambda x: x[1], reverse=True)][:10]
 
-    # NEW LISTINGS: монеты из листингов Bybit (24h - 14 дней)
-    by_listings = []
+    # NEW LISTINGS: Bybit API (launchTime) + RSS как дополнение
+    sources = await fetch_new_listings()
     try:
-        listings = await fetch_listings_cache()
+        rss = await fetch_listings_cache()
         now_ts = int(time.time())
-        for l in listings:
-            sym = l['symbol']
-            age_hours = (now_ts - l['ts']) / 3600
-            # Умный фильтр: 24h - 14 дней
-            if 24 <= age_hours <= 336 and sym in tickers and is_tradable(sym):
-                t = tickers[sym]
-                if t["quote_volume"] >= 500_000:  # минимальная ликвидность
-                    by_listings.append((sym, age_hours))
-                    logger.info(f"NEW LISTING: {sym} ({age_hours:.1f}h old)")
+        sources += [(l["symbol"], (now_ts - l["ts"]) / 3600) for l in rss]
     except Exception as e:
-        logger.error(f"Listings scan error: {e}")
-    by_listings = [s for s, _ in sorted(by_listings, key=lambda x: x[1])][:10]
+        logger.debug(f"RSS listings unavailable: {e}")
+
+    by_listings = []
+    seen = set()
+    for sym, age_h in sorted(sources, key=lambda x: x[1]):
+        if sym in seen or not (24 <= age_h <= 336):  # 24ч – 14 дней
+            continue
+        seen.add(sym)
+        if sym in tickers and is_tradable(sym) and tickers[sym]["quote_volume"] >= 500_000:
+            by_listings.append((sym, age_h))
+            logger.info(f"NEW LISTING: {sym} ({age_h:.1f}h old)")
+    by_listings = by_listings[:10]
 
     # Объединяем пул
-    pool = list(dict.fromkeys(by_vol + by_chg + by_momentum + by_volatility + by_listings))
+    pool = list(dict.fromkeys(by_vol + by_chg + by_momentum + by_volatility +
+                              [s for s, _ in by_listings]))
 
     news_items = await fetch_news_cache()
     btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
@@ -266,16 +311,14 @@ async def scan(regime, tickers, limit=5):
             reasons.append(f"независима от BTC (corr {corr:.2f})")
             keys.append("indep")
 
-        # Тип позиции и сектор
         kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
         sector = sector_of(sym[:-4])
-        is_new = sym in [s for s, _ in by_listings]
 
         scored.append({"symbol": sym, "score": score, "reasons": reasons,
                        "reason_keys": keys, "atr": a, "last": last_price,
                        "liquidity": tickers[sym]["quote_volume"],
                        "corr": round(corr, 2), "atr_pct": round(atr_pct, 2),
-                       "kind": kind, "sector": sector, "is_new": is_new})
+                       "kind": kind, "sector": sector})
 
     scored.sort(key=lambda c: c["score"], reverse=True)
 
@@ -287,10 +330,12 @@ async def scan(regime, tickers, limit=5):
     SCAN_SUMMARY["ts"] = time.time()
     logger.info(f"Scan top: {SCAN_SUMMARY['text']}")
 
+    new_set = set(s for s, _ in by_listings)
     candidates = []
     for c in scored:
         if c["score"] < thr:
             continue
+        c["is_new"] = c["symbol"] in new_set
 
         base = c["symbol"][:-4]
         name = await get_coin_name(base)
