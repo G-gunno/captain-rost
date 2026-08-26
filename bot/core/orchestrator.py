@@ -10,6 +10,7 @@ from bot.strategy.indicators import atr, ema
 from bot.core.state import bot_state
 from bot.news.cmc import get_coin_name
 from bot.news.rss_news import fetch_news_cache, check_sentiment
+from bot.strategy.learner import learner
 from bot.utils.format import fmt_price, fmt_usdt, fmt_pct, fmt_sym
 
 CYCLE_SECONDS = 300
@@ -130,6 +131,15 @@ async def run_cycle():
     if not tickers:
         logger.error("Нет тикеров — цикл пропущен")
         return
+
+    # АДАПТИВНАЯ СТРАТЕГИЯ: корректируем порог входа на основе метрик
+    metrics = paper.get_metrics(tickers)
+    new_thr_adj = learner.update_threshold(metrics["profit_factor"], metrics["max_drawdown_pct"])
+    mode, _ = learner.risk_mode(metrics["profit_factor"], metrics["max_drawdown_pct"])
+    pf = metrics["profit_factor"]
+    pf_txt = "∞" if pf == float("inf") else (f"{pf:.2f}" if pf is not None else "—")
+    logger.info(f"METRICS: PF={pf_txt} | DD={metrics['max_drawdown_pct']:.1f}% | "
+                f"mode={mode} | thr_adj=+{new_thr_adj}")
 
     news_items = await fetch_news_cache()
 
