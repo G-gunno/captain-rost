@@ -17,7 +17,7 @@ from bot.core.orchestrator import run_cycle, set_notifier, CYCLE_SECONDS
 from bot.core.state import bot_state
 from bot.core.remote_state import ensure_branch
 from bot.services.reports import build_report
-from bot.strategy.scanner import SCAN_SUMMARY
+from bot.strategy.scanner import SCAN_SUMMARY, FILTERED_BY_NEWS
 from bot.strategy.learner import learner
 from bot.utils.format import fmt_price, fmt_usdt, fmt_pct, fmt_sym
 
@@ -94,11 +94,10 @@ async def run_all(application):
     global _app
     _app = application
 
-    # --- Инициализация PTB Application ---
     await application.initialize()
     await application.start()
 
-    # --- ЖЁСТКАЯ ОЧИСТКА: удаляем любой webhook и сбрасываем очередь ---
+    # Жёсткая очистка
     try:
         await application.bot.delete_webhook(drop_pending_updates=True)
         logger.info("Webhook удалён, очередь обновлений сброшена")
@@ -116,7 +115,6 @@ async def run_all(application):
     )
     logger.info(f"✅ Webhook установлен: {webhook_url}")
 
-    # --- Меню команд ---
     await application.bot.set_my_commands([
         BotCommand("start", "🚀 Запустить торговлю"),
         BotCommand("status", "📊 Статус: балансы и позиции"),
@@ -125,20 +123,18 @@ async def run_all(application):
         BotCommand("exitall", "🛑 Продать всё и остановить"),
         BotCommand("learn", "🧠 Обучение: веса и winrate"),
         BotCommand("resetlearn", "🧠♻️ Сбросить опыт обучения"),
+        BotCommand("news", "📰 Статус новостной аналитики"),
         BotCommand("log", "📄 Файл лога"),
         BotCommand("help", "📖 Справка"),
     ])
 
-    # --- Резервное хранилище опыта ---
     await asyncio.to_thread(ensure_branch)
 
-    # --- Уведомления и циклы ---
     set_notifier(send_chat)
     asyncio.create_task(cycle_loop())
     asyncio.create_task(report_loop())
     logger.info("Цикл торговли и отчёты запущены (WEBHOOK MODE)")
 
-    # --- HTTP-сервер: health check + webhook ---
     web_app = web.Application()
     web_app.router.add_get("/", health_handler)
     web_app.router.add_post(WEBHOOK_PATH, webhook_handler)
@@ -150,7 +146,6 @@ async def run_all(application):
     await site.start()
     logger.info(f"HTTP-сервер запущен на порту {port} (GET / + POST {WEBHOOK_PATH})")
 
-    # --- Держим процесс живым ---
     try:
         while True:
             await asyncio.sleep(3600)
@@ -182,6 +177,7 @@ async def cmd_help(update, context):
         "/exitall — остановить и продать всё (опыт обучения сохраняется)\n"
         "/learn — показать обучение: веса сигналов и winrate\n"
         "/resetlearn — сбросить опыт обучения в ноль\n"
+        "/news — статус новостной аналитики (CMC + RSS)\n"
         "/log — прислать файл лога\n"
         "/help — эта справка"
     )
@@ -238,6 +234,43 @@ async def cmd_learn(update, context):
 async def cmd_resetlearn(update, context):
     learner.reset()
     await update.message.reply_text("🧠♻️ Опыт обучения сброшен: все веса = 1.0, история очищена.")
+
+
+async def cmd_news(update, context):
+    """Статус новостной аналитики: CMC + RSS."""
+    from bot.news.cmc import get_stats as cmc_stats
+    from bot.news.rss_news import get_stats as rss_stats
+
+    cmc = cmc_stats()
+    rss = rss_stats()
+
+    lines = ["📰 НОВОСТНАЯ АНАЛИТИКА", ""]
+
+    lines.append("📡 RSS-ЛЕНТЫ:")
+    if rss["feeds_working"]:
+        lines.append(f"   ✅ Работают · {rss['items_count']} новостей")
+        lines.append(f"   ⏱ Кэш обновлён {rss['cache_age_min']} мин назад")
+        if rss["neg_examples"]:
+            lines.append(f"   ⚠️ Негатив: {rss['neg_examples'][0][:60]}...")
+        if rss["pos_examples"]:
+            lines.append(f"   ✅ Позитив: {rss['pos_examples'][0][:60]}...")
+    else:
+        lines.append("   ❌ Ленты недоступны (проверь сеть)")
+
+    lines.append("")
+    lines.append("🏷 COINMARKETCAP:")
+    lines.append(f"   {'✅' if cmc['api_key_set'] else '❌'} API ключ: {'настроен' if cmc['api_key_set'] else 'НЕ НАСТРОЕН'}")
+    lines.append(f"   📊 В кэше: {cmc['cache_count']} монет")
+
+    lines.append("")
+    lines.append("🚫 ОТФИЛЬТРОВАНО (последние 5):")
+    if FILTERED_BY_NEWS:
+        for item in FILTERED_BY_NEWS[-5:]:
+            lines.append(f"   • {fmt_sym(item['symbol'])} (негатив {item['neg_count']})")
+    else:
+        lines.append("   (пока ничего не отфильтровано)")
+
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_log(update, context):
@@ -347,6 +380,7 @@ def main():
     app.add_handler(CommandHandler("exitall", cmd_exitall))
     app.add_handler(CommandHandler("learn", cmd_learn))
     app.add_handler(CommandHandler("resetlearn", cmd_resetlearn))
+    app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("log", cmd_log))
     app.add_handler(CommandHandler("help", cmd_help))
 
