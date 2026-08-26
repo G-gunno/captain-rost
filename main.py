@@ -17,7 +17,7 @@ from bot.core.orchestrator import run_cycle, set_notifier, CYCLE_SECONDS
 from bot.core.state import bot_state
 from bot.core.remote_state import ensure_branch
 from bot.services.reports import build_report
-from bot.strategy.scanner import SCAN_SUMMARY, FILTERED_BY_NEWS
+from bot.strategy.scanner import SCAN_SUMMARY, FILTERED_BY_NEWS, get_regime
 from bot.strategy.learner import learner
 from bot.utils.format import fmt_price, fmt_usdt, fmt_pct, fmt_sym
 
@@ -97,7 +97,6 @@ async def run_all(application):
     await application.initialize()
     await application.start()
 
-    # Жёсткая очистка
     try:
         await application.bot.delete_webhook(drop_pending_updates=True)
         logger.info("Webhook удалён, очередь обновлений сброшена")
@@ -348,9 +347,13 @@ async def cmd_status(update, context):
             msg.append(f"🏆 Лучшая: {fmt_sym(best['symbol'])} {fmt_pct(best['pnl_pct'])}")
             msg.append(f"📉 Худшая: {fmt_sym(worst['symbol'])} {fmt_pct(worst['pnl_pct'])}")
 
+        regime, _ = await get_regime()
+        regime_emoji = {"bull": "🟢", "neutral": "🟡", "bear": "🔴"}.get(regime, "⚪")
+        regime_text = {"bull": "Бычий", "neutral": "Нейтральный", "bear": "Медвежий"}.get(regime, regime)
+
         btc = prices.get("BTCUSDT", {}).get("last", 0)
         msg.append("")
-        msg.append(f"₿ BTC: {fmt_price(btc)} $")
+        msg.append(f"₿ BTC: {fmt_price(btc)} $ · {regime_emoji} {regime_text}")
         if SCAN_SUMMARY.get("text"):
             msg.append(f"🔎 Сканирование: {SCAN_SUMMARY['text']}")
         msg.append(f"🧠 Обучение: {learner.summary()}")
