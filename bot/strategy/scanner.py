@@ -9,7 +9,7 @@ from bot.news.cmc import get_coin_name
 from bot.news.rss_news import fetch_news_cache, check_sentiment
 
 SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
-FILTERED_BY_NEWS = []  # последние монеты, отфильтрованные из-за негативных новостей
+FILTERED_BY_NEWS = []
 
 STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
                 "USD1", "USDD", "EUR", "EURT", "AEUR", "USDT",
@@ -30,7 +30,7 @@ def is_tradable(symbol):
 
 def threshold(regime):
     base = {"bull": 5, "neutral": 6, "bear": 8}.get(regime, 6)
-    return max(4, base + learner.threshold_adj)  # не ниже 4 даже в aggressive
+    return max(4, base + learner.threshold_adj)
 
 
 def _returns(closes):
@@ -93,11 +93,37 @@ async def scan(regime, tickers, limit=5):
     tradable = [s for s, t in tickers.items()
                 if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
 
-    # Пул: ликвидные + растущие за сутки (следим за "муверами")
+    # Базовый пул: ликвидные + растущие за сутки
     by_vol = sorted(tradable, key=lambda s: tickers[s]["quote_volume"], reverse=True)[:40]
     by_chg = sorted([s for s in tradable if 0 < tickers[s]["change_pct"] < 25],
                     key=lambda s: tickers[s]["change_pct"], reverse=True)[:20]
-    pool = list(dict.fromkeys(by_vol + by_chg))
+    
+    # Momentum: сильный тренд за неделю (168 часов = 7 дней)
+    by_momentum = []
+    for sym in tradable[:50]:  # только топ-50 для скорости
+        candles = await market_data.get_kline(sym, "60", 168)  # 7 дней по 1h
+        if len(candles) >= 100:
+            start_price = candles[0]["close"]
+            end_price = candles[-1]["close"]
+            chg_7d = (end_price - start_price) / start_price * 100
+            if 5 < chg_7d < 50:  # растущие, но не перегретые
+                by_momentum.append((sym, chg_7d))
+    by_momentum = [s for s, _ in sorted(by_momentum, key=lambda x: x[1], reverse=True)][:15]
+
+    # Volatility: высоковолатильные для потенциальной Satellite-стратегии
+    by_volatility = []
+    for sym in tradable[:50]:
+        candles = await market_data.get_kline(sym, "15", 60)
+        if len(candles) >= 30:
+            a = atr(candles)
+            last = candles[-1]["close"]
+            atr_pct = (a / last) * 100 if last else 0
+            if atr_pct > 2.5:  # высокая волатильность
+                by_volatility.append((sym, atr_pct))
+    by_volatility = [s for s, _ in sorted(by_volatility, key=lambda x: x[1], reverse=True)][:10]
+
+    # Объединяем пул
+    pool = list(dict.fromkeys(by_vol + by_chg + by_momentum + by_volatility))
 
     news_items = await fetch_news_cache()
     btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
@@ -110,10 +136,10 @@ async def scan(regime, tickers, limit=5):
             continue
         a = atr(candles)
         if a <= 0 or (a / tickers[sym]["last"]) * 100 < 0.25:
-            continue  # слишком низкая волатильность
+            continue
         score, reasons, keys = score_symbol(candles, tickers[sym], regime)
 
-        # --- Корреляция с BTC/USDT ---
+        # Корреляция с BTC
         corr = _corr(_returns([c["close"] for c in candles]), btc_ret)
         if corr > 0.85 and regime == "neutral":
             score -= 1
@@ -129,7 +155,6 @@ async def scan(regime, tickers, limit=5):
 
     scored.sort(key=lambda c: c["score"], reverse=True)
 
-    # Диагностика: лучшие сигналы цикла
     thr = threshold(regime)
     SCAN_SUMMARY["text"] = " · ".join(
         f"{c['symbol']} {c['score']:.1f}/{thr}" for c in scored[:3]
@@ -143,7 +168,7 @@ async def scan(regime, tickers, limit=5):
         if c["score"] < thr:
             continue
 
-        # --- НОВОСТНАЯ АНАЛИТИКА (RSS + справка CMC) ---
+        # НОВОСТНАЯ АНАЛИТИКА
         base = c["symbol"][:-4]
         name = await get_coin_name(base)
         neg, pos, mentions, heads = check_sentiment(news_items, [base, name])
