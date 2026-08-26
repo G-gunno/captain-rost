@@ -223,9 +223,8 @@ class PaperExchange:
             eq += pos["qty"] * prices.get(sym, {}).get("last", 0)
         return eq
 
-    # --- МЕТРИКИ КАЧЕСТВА ТОРГОВЛИ ---
     def get_metrics(self, prices=None):
-        """Profit Factor, Max Drawdown, Winrate из истории сделок."""
+        """Profit Factor, Max Drawdown, Expectancy, Recovery Factor."""
         if prices is None:
             prices = {}
         wins = [r for r in self.realized if r["pnl"] > 0]
@@ -237,7 +236,7 @@ class PaperExchange:
         else:
             profit_factor = sum_win / sum_loss
 
-        # Max Drawdown: идём по realized и симулируем эквити
+        # Max Drawdown
         eq = self.start_usdt
         peak = eq
         max_dd = 0.0
@@ -250,16 +249,32 @@ class PaperExchange:
                 if dd > max_dd:
                     max_dd = dd
 
-        wr, n = learner.winrate()
+        # Expectancy (математическое ожидание на сделку)
+        total_trades = len(self.realized)
+        if total_trades > 0:
+            avg_win = sum_win / len(wins) if wins else 0
+            avg_loss = sum_loss / len(losses) if losses else 0
+            winrate = len(wins) / total_trades
+            lossrate = 1 - winrate
+            expectancy = (winrate * avg_win) - (lossrate * avg_loss)
+        else:
+            expectancy = 0
+
+        # Recovery Factor (как быстро восстанавливаемся от просадок)
         total_pnl = sum(r["pnl"] for r in self.realized)
+        recovery_factor = total_pnl / max_dd if max_dd > 0 else 0
+
+        wr, n = learner.winrate()
         return {
             "profit_factor": profit_factor,
             "max_drawdown_pct": max_dd,
             "winrate": wr,
             "win_count": len(wins),
             "loss_count": len(losses),
-            "total_trades": len(self.realized),
+            "total_trades": total_trades,
             "total_pnl": total_pnl,
+            "expectancy": expectancy,
+            "recovery_factor": recovery_factor,
         }
 
 
