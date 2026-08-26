@@ -9,20 +9,21 @@ from bot.strategy.learner import learner
 
 
 class PaperExchange:
-    """Виртуальная биржа: реальные цены, виртуальные деньги."""
+    """Виртуальная биржа: реальные цены, виртуальные деньги, честные комиссии."""
+
+    FEE_PCT = 0.10  # комиссия за сторону, % (моделируем реальную биржу)
 
     def __init__(self, start_usdt: float = 1000.0):
         self.state_file = Path(os.getenv("STORAGE_DIR", "storage")) / "paper_state.json"
         self.start_usdt = start_usdt
         self.usdt = start_usdt
         self.funding = 0.0
-        self.positions = {}  # symbol -> {"qty","avg","tp","sl","max_sl","score","reason_keys","entry_time"}
-        self.orders = []     # активные лимитные ордера
-        self.trades = []     # история всех сделок
-        self.realized = []   # закрытые сделки с PnL
+        self.positions = {}
+        self.orders = []
+        self.trades = []
+        self.realized = []
         self._load()
 
-    # ---------- персистентность ----------
     def _load(self):
         try:
             if self.state_file.exists():
@@ -51,7 +52,6 @@ class PaperExchange:
         except Exception as e:
             logger.error(f"Paper save error: {e}")
 
-    # ---------- ордера ----------
     def place_limit_buy(self, symbol, qty, price, tp, sl, score=0, reason_keys=None):
         order = {
             "id": f"paper-{int(time.time() * 1000)}",
@@ -75,7 +75,7 @@ class PaperExchange:
         self.save()
 
     def check_fills(self, prices):
-        """Лимитный ордер на покупку исполняется, если рынок опустился до цены ордера."""
+        """Лимитная покупка исполняется, если рынок опустился до цены ордера."""
         fills = []
         for order in list(self.orders):
             last = prices.get(order["symbol"], {}).get("last")
@@ -83,8 +83,9 @@ class PaperExchange:
                 continue
             if order["side"] == "Buy" and last <= order["price"]:
                 cost = order["qty"] * order["price"]
-                if cost <= self.usdt:
-                    self.usdt -= cost
+                fee = cost * self.FEE_PCT / 100
+                if cost + fee <= self.usdt:
+                    self.usdt -= cost + fee
                     pos = self.positions.setdefault(order["symbol"], {"qty": 0.0, "avg": 0.0})
                     total = pos["qty"] + order["qty"]
                     pos["avg"] = (pos["avg"] * pos["qty"] + cost) / total
@@ -108,7 +109,6 @@ class PaperExchange:
         self.save()
         return fills
 
-    # ---------- выходы ----------
     def check_exits(self, prices):
         """Продажа по TP или SL."""
         results = []
@@ -127,16 +127,17 @@ class PaperExchange:
         pos = self.positions.pop(sym)
         proceeds = pos["qty"] * price
         cost = pos["qty"] * pos["avg"]
-        pnl = proceeds - cost
-        pnl_pct = (pnl / cost * 100) if cost else 0.0
+        fee_buy = cost * self.FEE_PCT / 100
+        fee_sell = proceeds * self.FEE_PCT / 100
+        pnl = (proceeds - fee_sell) - (cost + fee_buy)
+        pnl_pct = pnl / (cost + fee_buy) * 100 if cost else 0.0
 
-        # --- самообучение: фиксируем исход и причины ---
         try:
             learner.record(pos.get("reason_keys", []), pnl > 0)
         except Exception as e:
             logger.error(f"learner record error: {e}")
 
-        self.usdt += proceeds
+        self.usdt += proceeds - fee_sell
         transferred = 0.0
         if pnl > 0:
             transferred = round(pnl * 0.62, 4)   # 60-65% прибыли -> Funding
@@ -177,7 +178,6 @@ class PaperExchange:
         self.save()
         return results
 
-    # ---------- метрики ----------
     def equity(self, prices):
         eq = self.usdt + self.funding
         for sym, pos in self.positions.items():
