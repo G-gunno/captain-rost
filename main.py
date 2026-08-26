@@ -290,7 +290,7 @@ def main():
     app.add_handler(CommandHandler("help", cmd_help))
 
     logger.info("Бот успешно стартовал и слушает Telegram...")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == '__main__':
