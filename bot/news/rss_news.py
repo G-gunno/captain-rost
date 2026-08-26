@@ -5,9 +5,14 @@ import xml.etree.ElementTree as ET
 import httpx
 from loguru import logger
 
-from bot.core.remote_state import download_state, upload_state
+_cache = {"items": None, "ts": 0, "listings": None, "listings_ts": 0}
 
-REMOTE_PATH = "rss_cache.json"
+# Новости (RSS-ленты)
+NEWS_FEEDS = [
+    "https://cointelegraph.com/rss",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://decrypt.co/feed",
+]
 
 NEG_WORDS = [
     "hack", "hacked", "hacking", "exploit", "exploited", "vulnerability",
@@ -23,8 +28,6 @@ POS_WORDS = [
     "adoption", "adopted", "institutional", "bullish", "breakout",
     "ath", "all time high", "record high", "surge", "soaring"
 ]
-
-_cache = {"items": None, "ts": 0, "listings": None, "listings_ts": 0}
 
 
 def _count(words, text):
@@ -54,20 +57,20 @@ def _parse(xml_text):
 
 
 def _parse_listings(xml_text):
-    """Извлекает новые листинги из RSS Bybit."""
+    """Извлекает новые листинги из RSS Bybit — устойчиво к невалидному XML."""
     listings = []
+    
+    # Пытаемся через стандартный ET
     try:
         root = ET.fromstring(xml_text)
         for item in root.iter('item'):
             title = item.findtext('title') or ''
             link = item.findtext('link') or ''
-            # Ищем паттерны: "New Listing: BTCUSDT", "BTCUSDT Now Listed", etc.
             match = re.search(r'New Listing:?\s+([A-Z0-9]+)USDT', title, re.IGNORECASE)
             if not match:
                 match = re.search(r'([A-Z0-9]+)USDT\s+(?:Now\s+)?Listed', title, re.IGNORECASE)
             if match:
                 symbol = match.group(1).upper() + 'USDT'
-                # Парсим дату из pubDate или используем текущее время
                 pub_date = item.findtext('pubDate')
                 ts = int(time.time())
                 if pub_date:
@@ -77,14 +80,46 @@ def _parse_listings(xml_text):
                         ts = int(dt.timestamp())
                     except:
                         pass
-                listings.append({
-                    'symbol': symbol,
-                    'title': title,
-                    'link': link,
-                    'ts': ts,
-                })
+                listings.append({'symbol': symbol, 'title': title, 'link': link, 'ts': ts})
+        return listings
+    except ET.ParseError:
+        pass  # переходим к fallback
     except Exception as e:
-        logger.error(f"Listings parse error: {e}")
+        logger.debug(f"Listings ET parse failed, trying regex fallback: {e}")
+    
+    # FALLBACK: парсинг через regex — работает с невалидным XML
+    try:
+        item_pattern = re.compile(
+            r'<item[^>]*>\s*'
+            r'<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>\s*'
+            r'(?:<link[^>]*>(.*?)</link>\s*)?'
+            r'(?:<pubDate[^>]*>(.*?)</pubDate>\s*)?',
+            re.IGNORECASE | re.DOTALL
+        )
+        for m in item_pattern.finditer(xml_text):
+            title = m.group(1) or ''
+            link = m.group(2) or ''
+            pub_date = m.group(3)
+            
+            match = re.search(r'New Listing:?\s+([A-Z0-9]+)USDT', title, re.IGNORECASE)
+            if not match:
+                match = re.search(r'([A-Z0-9]+)USDT\s+(?:Now\s+)?Listed', title, re.IGNORECASE)
+            if match:
+                symbol = match.group(1).upper() + 'USDT'
+                ts = int(time.time())
+                if pub_date:
+                    try:
+                        from email.utils import parsedate_to_datetime
+                        dt = parsedate_to_datetime(pub_date.strip())
+                        ts = int(dt.timestamp())
+                    except:
+                        pass
+                listings.append({'symbol': symbol, 'title': title.strip(), 'link': link.strip(), 'ts': ts})
+        if listings:
+            logger.info(f"Listings parsed via regex fallback: {len(listings)} items")
+    except Exception as e:
+        logger.error(f"Listings regex fallback also failed: {e}")
+    
     return listings
 
 
@@ -95,11 +130,7 @@ async def fetch_news_cache():
         return _cache["items"]
     all_items = []
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
-        for url in [
-            "https://cointelegraph.com/rss",
-            "https://www.coindesk.com/arc/outboundfeeds/rss/",
-            "https://decrypt.co/feed",
-        ]:
+        for url in NEWS_FEEDS:
             try:
                 r = await c.get(url)
                 all_items += _parse(r.text)
@@ -164,11 +195,10 @@ def get_stats():
         elif p > n and len(pos_examples) < 3:
             pos_examples.append(item["title"][:80])
 
-    # Фильтруем листинги по возрасту (24ч - 14 дней)
     now_ts = int(time.time())
     fresh_listings = [
         l for l in listings
-        if 86400 <= now_ts - l['ts'] <= 1209600  # 24h - 14d
+        if 86400 <= now_ts - l['ts'] <= 1209600
     ]
 
     return {
