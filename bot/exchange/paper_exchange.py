@@ -11,7 +11,7 @@ from bot.strategy.learner import learner
 class PaperExchange:
     """Виртуальная биржа: реальные цены, виртуальные деньги, честные комиссии."""
 
-    FEE_PCT = 0.10  # комиссия за сторону, % (моделируем реальную биржу)
+    FEE_PCT = 0.10  # комиссия за сторону, %
 
     def __init__(self, start_usdt: float = 1000.0):
         self.state_file = Path(os.getenv("STORAGE_DIR", "storage")) / "paper_state.json"
@@ -75,7 +75,6 @@ class PaperExchange:
         self.save()
 
     def check_fills(self, prices):
-        """Лимитная покупка исполняется, если рынок опустился до цены ордера."""
         fills = []
         for order in list(self.orders):
             last = prices.get(order["symbol"], {}).get("last")
@@ -110,7 +109,7 @@ class PaperExchange:
         return fills
 
     def check_exits(self, prices):
-        """Продажа по TP или SL."""
+        """Полная продажа остатка по TP или SL."""
         results = []
         for sym in list(self.positions):
             last = prices.get(sym, {}).get("last")
@@ -122,6 +121,45 @@ class PaperExchange:
             elif last <= pos["sl"]:
                 results.append(self._sell(sym, pos["sl"], "SL 🛡"))
         return results
+
+    def sell_partial(self, sym, qty_part, price, reason):
+        """Продажа ЧАСТИ позиции (частичный TP)."""
+        pos = self.positions.get(sym)
+        if not pos:
+            return None
+        qty_part = min(qty_part, pos["qty"])
+        proceeds = qty_part * price
+        cost_part = qty_part * pos["avg"]
+        fee_buy = cost_part * self.FEE_PCT / 100
+        fee_sell = proceeds * self.FEE_PCT / 100
+        pnl = (proceeds - fee_sell) - (cost_part + fee_buy)
+        pnl_pct = pnl / (cost_part + fee_buy) * 100 if cost_part else 0.0
+
+        try:
+            learner.record(pos.get("reason_keys", []), pnl > 0)
+        except Exception as e:
+            logger.error(f"learner record error: {e}")
+
+        self.usdt += proceeds - fee_sell
+        transferred = 0.0
+        if pnl > 0:
+            transferred = round(pnl * 0.62, 4)
+            self.usdt -= transferred
+            self.funding += transferred
+        pos["qty"] -= qty_part
+        self.realized.append({
+            "symbol": sym, "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 2),
+            "reason": reason, "time": int(time.time()),
+        })
+        self.trades.append({
+            "side": "Sell(part)", "symbol": sym, "qty": qty_part,
+            "price": price, "time": int(time.time()),
+        })
+        self.save()
+        return {
+            "symbol": sym, "price": price, "pnl": pnl,
+            "pnl_pct": pnl_pct, "reason": reason, "transferred": transferred,
+        }
 
     def _sell(self, sym, price, reason):
         pos = self.positions.pop(sym)
@@ -140,35 +178,24 @@ class PaperExchange:
         self.usdt += proceeds - fee_sell
         transferred = 0.0
         if pnl > 0:
-            transferred = round(pnl * 0.62, 4)   # 60-65% прибыли -> Funding
+            transferred = round(pnl * 0.62, 4)
             self.usdt -= transferred
             self.funding += transferred
         self.realized.append({
-            "symbol": sym,
-            "pnl": round(pnl, 4),
-            "pnl_pct": round(pnl_pct, 2),
-            "reason": reason,
-            "time": int(time.time()),
+            "symbol": sym, "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 2),
+            "reason": reason, "time": int(time.time()),
         })
         self.trades.append({
-            "side": "Sell",
-            "symbol": sym,
-            "qty": pos["qty"],
-            "price": price,
-            "time": int(time.time()),
+            "side": "Sell", "symbol": sym, "qty": pos["qty"],
+            "price": price, "time": int(time.time()),
         })
         self.save()
         return {
-            "symbol": sym,
-            "price": price,
-            "pnl": pnl,
-            "pnl_pct": pnl_pct,
-            "reason": reason,
-            "transferred": transferred,
+            "symbol": sym, "price": price, "pnl": pnl,
+            "pnl_pct": pnl_pct, "reason": reason, "transferred": transferred,
         }
 
     def sell_all(self, prices):
-        """Продать все позиции по рынку и снять все ордера."""
         results = []
         for sym in list(self.positions):
             last = prices.get(sym, {}).get("last")
