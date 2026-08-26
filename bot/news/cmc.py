@@ -28,7 +28,7 @@ async def _get(path, params):
 
 
 async def get_coin_name(symbol: str) -> str:
-    """Название монеты по тикеру (кэш 24 часа)."""
+    """Название монеты по тику (кэш 24 часа)."""
     info = _cache["info"].get(symbol)
     if info and time.time() - info["ts"] < 86400:
         return info["name"]
@@ -41,8 +41,9 @@ async def get_coin_name(symbol: str) -> str:
         elif isinstance(arr, dict):
             name = arr.get("name", "")
     _cache["info"][symbol] = {"name": name, "ts": time.time()}
-    
     return name
+
+
 def get_stats():
     """Статистика CMC API для мониторинга."""
     key = os.getenv("CMC_API_KEY", "").strip()
