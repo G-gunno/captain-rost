@@ -32,6 +32,31 @@ def _parse(xml_text):
     except Exception as e:
         logger.error(f"RSS parse error: {e}")
     return items
+    def get_stats():
+    """Статистика RSS-лент для мониторинга."""
+    import time
+    now = time.time()
+    cache_age = now - _cache["ts"] if _cache["ts"] else None
+    items = _cache["items"] or []
+    
+    neg_examples = []
+    pos_examples = []
+    for item in items[:20]:
+        text = (item["title"] + " " + item.get("desc", "")).lower()
+        neg_count = sum(w in text for w in NEG_WORDS)
+        pos_count = sum(w in text for w in POS_WORDS)
+        if neg_count > 0:
+            neg_examples.append(item["title"][:80])
+        if pos_count > 0:
+            pos_examples.append(item["title"][:80])
+    
+    return {
+        "cache_age_min": round(cache_age / 60, 1) if cache_age else None,
+        "items_count": len(items),
+        "feeds_working": len(items) > 0,
+        "neg_examples": neg_examples[:3],
+        "pos_examples": pos_examples[:3],
+    }
 
 
 async def fetch_news_cache():
