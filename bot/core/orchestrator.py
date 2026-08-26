@@ -4,7 +4,10 @@ from loguru import logger
 
 from bot.exchange.market_data import market_data
 from bot.exchange.paper_exchange import paper
-from bot.strategy.scanner import get_regime, scan, score_symbol, threshold, sector_of
+from bot.strategy.scanner import (
+    get_regime, scan, score_symbol, threshold,
+    sector_of, sector_limit,
+)
 from bot.strategy.sizing import buy_size
 from bot.strategy.indicators import atr, ema
 from bot.core.state import bot_state
@@ -22,7 +25,6 @@ MIN_RR = 1.5              # мин. R:R для Core
 SAT_MAX_SL_PCT = 5.0      # максимум SL для сателлитов
 MIN_RR_SAT = 2.0          # мин. R:R для сателлитов
 SAT_MAX_TOTAL_PCT = 20.0  # лимит всех сателлитов: 20% equity
-MAX_SECTOR_POSITIONS = 3  # не более 3 позиций/ордеров в одном секторе
 MIN_EARLY_EXIT_PCT = 1.0
 _notify_cb = None
 _reconciled = False
@@ -365,12 +367,13 @@ async def run_cycle():
         kind = cand.get("kind", "core")
         sector = cand.get("sector", "Other")
 
-        # СЕКТОРНАЯ ДИВЕРСИФИКАЦИЯ: не более 3 в одном секторе
+        # СЕКТОРНАЯ ДИВЕРСИФИКАЦИЯ: динамический лимит по сектору
         sector_count = sum(
             1 for s in paper.positions if sector_of(s[:-4]) == sector
         ) + sum(1 for o in paper.orders if sector_of(o["symbol"][:-4]) == sector)
-        if sector_count >= MAX_SECTOR_POSITIONS:
-            logger.info(f"{sym}: пропущен — сектор {sector} переполнен ({sector_count})")
+        max_in_sector = sector_limit(sector)
+        if sector_count >= max_in_sector:
+            logger.info(f"{sym}: пропущен — сектор {sector} переполнен ({sector_count}/{max_in_sector})")
             continue
 
         # ЛИМИТ САТЕЛЛИТОВ: суммарно не более 20% equity
@@ -391,7 +394,6 @@ async def run_cycle():
             continue
 
         if kind == "satellite":
-            # Широкий SL (даём "дышать"), дальний TP, R:R >= 2
             sl_dist_pct = max(min(1.5 * a / entry * 100, SAT_MAX_SL_PCT), 2.0)
             tp_dist_pct = max(min(2.5 * a / entry * 100, 12.0), sl_dist_pct * MIN_RR_SAT)
             sl = entry * (1 - sl_dist_pct / 100)
