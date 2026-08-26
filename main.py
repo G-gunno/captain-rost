@@ -25,14 +25,11 @@ _app = None
 WEBHOOK_PATH = "/telegram-webhook"
 
 
-# ==================== HTTP handlers ====================
 async def health_handler(request):
-    """Ответ для Render health check (GET /)."""
     return web.Response(text="OK")
 
 
 async def webhook_handler(request):
-    """Принимаем апдейты от Telegram (POST /telegram-webhook)."""
     try:
         data = await request.json()
         update = Update.de_json(data, bot=_app.bot)
@@ -42,7 +39,6 @@ async def webhook_handler(request):
     return web.Response(text="OK")
 
 
-# ==================== Уведомления и циклы ====================
 async def send_chat(text):
     chat = os.getenv("TELEGRAM_CHAT_ID")
     if chat and _app:
@@ -88,9 +84,7 @@ async def error_handler(update, context):
     logger.exception(f"Unhandled error: {err}")
 
 
-# ==================== Главный запуск ====================
 async def run_all(application):
-    """Запускает aiohttp-сервер + регистрирует webhook + стартует циклы."""
     global _app
     _app = application
 
@@ -158,7 +152,6 @@ async def run_all(application):
         await runner.cleanup()
 
 
-# ==================== Команды Telegram ====================
 async def cmd_start(update, context):
     bot_state.fresh_start()
     await update.message.reply_text(
@@ -236,7 +229,6 @@ async def cmd_resetlearn(update, context):
 
 
 async def cmd_news(update, context):
-    """Статус новостной аналитики: CMC + RSS."""
     from bot.news.cmc import get_stats as cmc_stats
     from bot.news.rss_news import get_stats as rss_stats
 
@@ -337,7 +329,6 @@ async def cmd_status(update, context):
         else:
             msg.append("📋 АКТИВНЫЕ ОРДЕРА: нет")
 
-        # --- МЕТРИКИ КАЧЕСТВА И АДАПТИВНЫЙ РЕЖИМ ---
         msg.append("")
         metrics = paper.get_metrics(prices)
         mode, _ = learner.risk_mode(metrics["profit_factor"], metrics["max_drawdown_pct"])
@@ -345,6 +336,7 @@ async def cmd_status(update, context):
 
         msg.append(f"📊 МЕТРИКИ · режим {mode_emoji} {mode}")
         msg.append(f"   🧾 Сделок: {metrics['total_trades']} (✅ {metrics['win_count']} / ❌ {metrics['loss_count']})")
+        
         pf = metrics["profit_factor"]
         if pf is None:
             pf_text = "—"
@@ -359,6 +351,7 @@ async def cmd_status(update, context):
             else:
                 pf_text += " 🎯"
         msg.append(f"   📈 Profit Factor: {pf_text}  (цель ≥ 1.3)")
+        
         dd = metrics["max_drawdown_pct"]
         if dd < 5:
             dd_text = f"{dd:.1f}% ✅"
@@ -367,6 +360,25 @@ async def cmd_status(update, context):
         else:
             dd_text = f"{dd:.1f}% 🔴"
         msg.append(f"   📉 Max Drawdown: {dd_text}  (лимит 15%)")
+        
+        # Expectancy
+        exp = metrics["expectancy"]
+        if exp > 0:
+            exp_text = f"{exp:+.2f} USDT 🎯"
+        else:
+            exp_text = f"{exp:+.2f} USDT ❌"
+        msg.append(f"   💹 Expectancy: {exp_text}  (мат. ожидание на сделку)")
+        
+        # Recovery Factor
+        rf = metrics["recovery_factor"]
+        if rf > 2:
+            rf_text = f"{rf:.1f} 🎯"
+        elif rf > 1:
+            rf_text = f"{rf:.1f} ⚠️"
+        else:
+            rf_text = f"{rf:.1f} ❌"
+        msg.append(f"   🔄 Recovery Factor: {rf_text}  (скорость восстановления)")
+        
         msg.append(f"   💵 Суммарный PnL: {metrics['total_pnl']:+.2f} USDT")
 
         if paper.realized:
