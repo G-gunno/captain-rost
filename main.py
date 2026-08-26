@@ -147,7 +147,6 @@ ACTIONS = {
 
 
 async def ask_confirmation(update, context, key):
-    """Показывает сообщение с кнопками Подтвердить/Отмена."""
     _, question = ACTIONS[key]
     keyboard = [[
         InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm:{key}"),
@@ -160,7 +159,6 @@ async def ask_confirmation(update, context, key):
 
 
 async def confirm_handler(update, context):
-    """Обрабатывает нажатия кнопок подтверждения."""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -186,7 +184,6 @@ async def confirm_handler(update, context):
 
 # ==================== Главный запуск ====================
 async def run_all(application):
-    """Запускает aiohttp-сервер + регистрирует webhook + стартует циклы."""
     global _app
     _app = application
 
@@ -218,7 +215,7 @@ async def run_all(application):
         BotCommand("exitall", "🛑 Продать всё и остановить (с подтверждением)"),
         BotCommand("learn", "🧠 Обучение: веса и winrate"),
         BotCommand("resetlearn", "🧠♻️ Сбросить опыт обучения (с подтверждением)"),
-        BotCommand("resetstats", "📊 Сбросить торговую статистику (с подтверждением)"),
+        BotCommand("resetstats", "📊 Сбросить статистику (с подтверждением)"),
         BotCommand("news", "📰 Статус новостной аналитики"),
         BotCommand("log", "📄 Файл лога"),
         BotCommand("help", "📖 Справка"),
@@ -273,7 +270,7 @@ async def cmd_help(update, context):
         "/exitall — остановить и продать всё · с подтверждением\n"
         "/learn — показать обучение: веса сигналов и winrate\n"
         "/resetlearn — сбросить опыт обучения в ноль · с подтверждением\n"
-        "/resetstats — сбросить только торговую статистику (веса сохранены) · с подтверждением\n"
+        "/resetstats — сбросить только торговую статистику · с подтверждением\n"
         "/news — статус новостной аналитики (CMC + RSS)\n"
         "/log — прислать файл лога\n"
         "/help — эта справка"
@@ -314,7 +311,6 @@ async def cmd_learn(update, context):
 
 
 async def cmd_news(update, context):
-    """Статус новостной аналитики: CMC + RSS."""
     from bot.news.cmc import get_stats as cmc_stats
     from bot.news.rss_news import get_stats as rss_stats
 
@@ -390,7 +386,8 @@ async def cmd_status(update, context):
                 w = val / eq * 100 if eq else 0
                 pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
                 tp1 = " · TP1✅" if pos.get("tp1_done") else ""
-                msg.append(f"   • {fmt_sym(sym)} · {fmt_pct(pnl_pct)}{tp1}")
+                kind_tag = " 🛰" if pos.get("kind") == "satellite" else " 🏛"
+                msg.append(f"   • {fmt_sym(sym)} · {fmt_pct(pnl_pct)}{tp1}{kind_tag}")
                 msg.append(f"      💼 Вес: {fmt_usdt(val)} USDT ({w:.1f}% портфеля)")
                 msg.append(f"      📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)}")
                 msg.append(f"      🎯 {fmt_price(pos['tp'])} | 🛡 {fmt_price(pos['sl'])}")
@@ -407,15 +404,15 @@ async def cmd_status(update, context):
             for o in paper.orders:
                 val = o["qty"] * o["price"]
                 w = val / eq * 100 if eq else 0
+                kind_tag = " 🛰" if o.get("kind") == "satellite" else " 🏛"
                 msg.append(
                     f"   • {fmt_sym(o['symbol'])}: {fmt_usdt(val)} USDT "
-                    f"({w:.1f}%) @ {fmt_price(o['price'])}"
+                    f"({w:.1f}%) @ {fmt_price(o['price'])}{kind_tag}"
                 )
                 msg.append(f"      🎯 {fmt_price(o['tp'])} | 🛡 {fmt_price(o['sl'])}")
         else:
             msg.append("📋 АКТИВНЫЕ ОРДЕРА: нет")
 
-        # --- МЕТРИКИ КАЧЕСТВА И АДАПТИВНЫЙ РЕЖИМ ---
         msg.append("")
         metrics = paper.get_metrics(prices)
         mode, _ = learner.risk_mode(metrics["profit_factor"], metrics["max_drawdown_pct"])
@@ -449,10 +446,7 @@ async def cmd_status(update, context):
         msg.append(f"   📉 Max Drawdown: {dd_text}  (лимит 15%)")
 
         exp = metrics["expectancy"]
-        if exp > 0:
-            exp_text = f"{exp:+.2f} USDT 🎯"
-        else:
-            exp_text = f"{exp:+.2f} USDT ❌"
+        exp_text = f"{exp:+.2f} USDT 🎯" if exp > 0 else f"{exp:+.2f} USDT ❌"
         msg.append(f"   💹 Expectancy: {exp_text}  (мат. ожидание на сделку)")
 
         rf = metrics["recovery_factor"]
@@ -463,6 +457,15 @@ async def cmd_status(update, context):
         else:
             rf_text = f"{rf:.1f} ❌"
         msg.append(f"   🔄 Recovery Factor: {rf_text}  (скорость восстановления)")
+
+        sat_exposure = sum(
+            p["qty"] * prices.get(s, {}).get("last", 0)
+            for s, p in paper.positions.items() if p.get("kind") == "satellite"
+        ) + sum(
+            o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite"
+        )
+        sat_pct = sat_exposure / eq * 100 if eq else 0
+        msg.append(f"   🛰 Сателлиты: {sat_pct:.1f}% из 20% лимита")
 
         msg.append(f"   💵 Суммарный PnL: {metrics['total_pnl']:+.2f} USDT")
 
