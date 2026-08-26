@@ -217,6 +217,13 @@ class PaperExchange:
         self.save()
         return results
 
+    def reset_stats(self):
+        """Сбросить торговую статистику (историю закрытых сделок)."""
+        self.realized = []
+        self.trades = []
+        self.save()
+        logger.info("paper: торговая статистика сброшена")
+
     def equity(self, prices):
         eq = self.usdt + self.funding
         for sym, pos in self.positions.items():
@@ -260,7 +267,7 @@ class PaperExchange:
         else:
             expectancy = 0
 
-        # Recovery Factor (как быстро восстанавливаемся от просадок)
+        # Recovery Factor (скорость восстановления от просадок)
         total_pnl = sum(r["pnl"] for r in self.realized)
         recovery_factor = total_pnl / max_dd if max_dd > 0 else 0
 
