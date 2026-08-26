@@ -41,4 +41,12 @@ async def get_coin_name(symbol: str) -> str:
         elif isinstance(arr, dict):
             name = arr.get("name", "")
     _cache["info"][symbol] = {"name": name, "ts": time.time()}
+    
     return name
+def get_stats():
+    """Статистика CMC API для мониторинга."""
+    key = os.getenv("CMC_API_KEY", "").strip()
+    return {
+        "api_key_set": bool(key),
+        "cache_count": len(_cache["info"]),
+    }
