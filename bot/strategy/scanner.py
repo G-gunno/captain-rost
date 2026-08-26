@@ -32,6 +32,24 @@ def threshold(regime):
     return base + learner.threshold_adj
 
 
+def _returns(closes):
+    return [(b - a) / a for a, b in zip(closes, closes[1:]) if a]
+
+
+def _corr(a, b):
+    n = min(len(a), len(b))
+    if n < 10:
+        return 0.0
+    a, b = a[-n:], b[-n:]
+    ma, mb = sum(a) / n, sum(b) / n
+    cov = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    va = sum((x - ma) ** 2 for x in a)
+    vb = sum((y - mb) ** 2 for y in b)
+    if va <= 0 or vb <= 0:
+        return 0.0
+    return cov / (va * vb) ** 0.5
+
+
 async def get_regime():
     candles = await market_data.get_kline("BTCUSDT", "60", 250)
     if len(candles) < 60:
@@ -80,6 +98,8 @@ async def scan(regime, tickers, limit=5):
     pool = list(dict.fromkeys(by_vol + by_chg))
 
     news_items = await fetch_news_cache()
+    btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
+    btc_ret = _returns([c["close"] for c in btc_candles])
 
     scored = []
     for sym in pool:
@@ -90,9 +110,20 @@ async def scan(regime, tickers, limit=5):
         if a <= 0 or (a / tickers[sym]["last"]) * 100 < 0.25:
             continue
         score, reasons, keys = score_symbol(candles, tickers[sym], regime)
+
+        # --- Корреляция с BTC/USDT ---
+        corr = _corr(_returns([c["close"] for c in candles]), btc_ret)
+        if corr > 0.85 and regime == "neutral":
+            score -= 1
+            reasons.append(f"зеркало BTC (corr {corr:.2f})")
+        elif corr < 0.45:
+            score += learner.weight("indep")
+            reasons.append(f"независима от BTC (corr {corr:.2f})")
+            keys.append("indep")
+
         scored.append({"symbol": sym, "score": score, "reasons": reasons,
                        "reason_keys": keys, "atr": a, "last": tickers[sym]["last"],
-                       "liquidity": tickers[sym]["quote_volume"]})
+                       "liquidity": tickers[sym]["quote_volume"], "corr": round(corr, 2)})
 
     scored.sort(key=lambda c: c["score"], reverse=True)
 
