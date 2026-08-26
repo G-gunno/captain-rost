@@ -1,3 +1,4 @@
+import re
 import time
 
 import httpx
@@ -10,14 +11,34 @@ FEEDS = [
     "https://decrypt.co/feed",
 ]
 
-NEG_WORDS = {"hack", "exploit", "scam", "rug", "fraud", "lawsuit", "sues", "sec",
-             "ban", "delist", "crash", "plunge", "sanction", "breach", "steal",
-             "stolen", "vulnerability", "attack", "investigation", "fine", "collapse"}
-POS_WORDS = {"partnership", "integration", "listing", "listed", "approval",
-             "approved", "adopt", "adoption", "upgrade", "launch", "ath",
-             "record", "surge", "rally", "breakout", "institutional", "etf", "inflow"}
+NEG_WORDS = {"hack", "hacked", "hackers", "exploit", "exploited", "scam", "scams",
+             "rug", "fraud", "lawsuit", "lawsuits", "sues", "sued", "sec", "ban",
+             "banned", "delist", "delisted", "delisting", "crash", "crashes",
+             "plunge", "plunges", "sanction", "sanctions", "breach", "breaches",
+             "steal", "stole", "stolen", "vulnerability", "vulnerabilities",
+             "attack", "attacks", "investigation", "investigations", "fined",
+             "collapse", "collapsed"}
+POS_WORDS = {"partnership", "partnerships", "integration", "integrations",
+             "listing", "listings", "listed", "approval", "approvals", "approved",
+             "adopt", "adopts", "adoption", "upgrade", "upgrades", "launch",
+             "launches", "ath", "record", "surge", "surges", "rally", "rallies",
+             "breakout", "breakouts", "institutional", "etf", "inflow", "inflows"}
 
 _cache = {"items": None, "ts": 0}
+_PATTERNS = {}
+
+
+def _count(words, text):
+    """Считает совпадения по границам слов (bank != ban)."""
+    total = 0
+    for w in words:
+        pat = _PATTERNS.get(w)
+        if pat is None:
+            pat = re.compile(r"\b" + re.escape(w) + r"\b", re.IGNORECASE)
+            _PATTERNS[w] = pat
+        if pat.search(text):
+            total += 1
+    return total
 
 
 def _parse(xml_text):
@@ -57,12 +78,12 @@ def check_sentiment(items, keys):
     heads = []
     keys_low = [k.lower() for k in keys if k]
     for it in items:
-        text = (it["title"] + " " + it["desc"]).lower()
-        if not any(k in text for k in keys_low):
+        text = it["title"] + " " + it["desc"]
+        if not any(k in text.lower() for k in keys_low):
             continue
         mentions += 1
-        n = sum(w in text for w in NEG_WORDS)
-        p = sum(w in text for w in POS_WORDS)
+        n = _count(NEG_WORDS, text)
+        p = _count(POS_WORDS, text)
         if n > p:
             neg += 1
             heads.append("⚠️ " + it["title"])
@@ -80,19 +101,19 @@ def get_stats():
 
     neg_examples = []
     pos_examples = []
-    for item in items[:20]:
-        text = (item["title"] + " " + item.get("desc", "")).lower()
-        neg_count = sum(w in text for w in NEG_WORDS)
-        pos_count = sum(w in text for w in POS_WORDS)
-        if neg_count > 0:
+    for item in items[:30]:
+        text = item["title"] + " " + item.get("desc", "")
+        n = _count(NEG_WORDS, text)
+        p = _count(POS_WORDS, text)
+        if n > p and len(neg_examples) < 3:
             neg_examples.append(item["title"][:80])
-        if pos_count > 0:
+        elif p > n and len(pos_examples) < 3:
             pos_examples.append(item["title"][:80])
 
     return {
         "cache_age_min": round(cache_age / 60, 1) if cache_age else None,
         "items_count": len(items),
         "feeds_working": len(items) > 0,
-        "neg_examples": neg_examples[:3],
-        "pos_examples": pos_examples[:3],
+        "neg_examples": neg_examples,
+        "pos_examples": pos_examples,
     }
