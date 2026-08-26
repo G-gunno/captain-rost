@@ -15,6 +15,7 @@ from bot.exchange.market_data import market_data
 from bot.exchange.paper_exchange import paper
 from bot.core.orchestrator import run_cycle, set_notifier, CYCLE_SECONDS
 from bot.core.state import bot_state
+from bot.core.remote_state import ensure_branch
 from bot.services.reports import build_report
 from bot.strategy.scanner import SCAN_SUMMARY
 from bot.strategy.learner import learner
@@ -23,7 +24,6 @@ from bot.utils.format import fmt_price, fmt_usdt, fmt_pct, fmt_sym
 _app = None
 
 
-# --- Мини веб-сервер "пульс" для Render (чтобы бесплатный тариф не засыпал) ---
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -82,12 +82,16 @@ async def post_init(application):
     _app = application
     set_notifier(send_chat)
 
+    await asyncio.to_thread(ensure_branch)  # ветка для резервного опыта (если настроен токен)
+
     await application.bot.set_my_commands([
         BotCommand("start", "🚀 Запустить торговлю"),
         BotCommand("status", "📊 Статус: балансы и позиции"),
         BotCommand("pause", "⏸ Пауза"),
         BotCommand("resume", "▶️ Возобновить"),
         BotCommand("exitall", "🛑 Продать всё и остановить"),
+        BotCommand("learn", "🧠 Обучение: веса и winrate"),
+        BotCommand("resetlearn", "🧠♻️ Сбросить опыт обучения"),
         BotCommand("log", "📄 Файл лога"),
         BotCommand("help", "📖 Справка"),
     ])
@@ -109,10 +113,12 @@ async def cmd_help(update, context):
     await update.message.reply_text(
         "📖 МОИ КОМАНДЫ:\n"
         "/start — запустить торговлю, новый цикл\n"
-        "/status — балансы, позиции с весами, активные ордера, статистика, обучение\n"
+        "/status — балансы, позиции с весами, активные ордера, статистика\n"
         "/pause — пауза (ордера запомнить и снять)\n"
         "/resume — возобновить (ордера вернуть)\n"
-        "/exitall — остановить и продать всё\n"
+        "/exitall — остановить и продать всё (опыт обучения сохраняется)\n"
+        "/learn — показать обучение: веса сигналов и winrate\n"
+        "/resetlearn — сбросить опыт обучения в ноль\n"
         "/log — прислать файл лога\n"
         "/help — эта справка"
     )
@@ -148,8 +154,27 @@ async def cmd_exitall(update, context):
     total = sum(r["pnl"] for r in results)
     await update.message.reply_text(
         f"🛑 ТОРГОВЛЯ ОСТАНОВЛЕНА.\nПозиций закрыто: {len(results)}\n"
-        f"Суммарный PnL: {total:+.2f} USDT\nБаланс: {fmt_usdt(paper.usdt)} USDT"
+        f"Суммарный PnL: {total:+.2f} USDT\nБаланс: {fmt_usdt(paper.usdt)} USDT\n"
+        f"🧠 Опыт обучения сохранён."
     )
+
+
+async def cmd_learn(update, context):
+    wr, n = learner.winrate()
+    lines = ["🧠 ОБУЧЕНИЕ БОТА", ""]
+    lines.append(f"Winrate: {wr:.0%} (последних сделок: {n})")
+    lines.append(f"Строгость входа: +{learner.threshold_adj}")
+    lines.append("")
+    lines.append("Веса сигналов:")
+    for k, v in sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True):
+        bar = "▮" * max(1, int(round(v * 5)))
+        lines.append(f"   {k}: {v:.2f} {bar}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_resetlearn(update, context):
+    learner.reset()
+    await update.message.reply_text("🧠️ Опыт обучения сброшен: все веса = 1.0, история очищена.")
 
 
 async def cmd_log(update, context):
@@ -175,7 +200,6 @@ async def cmd_status(update, context):
         msg.append(f"🏦 Funding: {fmt_usdt(paper.funding)} USDT")
         msg.append(f"📈 Total Equity: {fmt_usdt(eq)} $")
 
-        # --- ПОЗИЦИИ С ВЕСОМ ---
         msg.append("")
         if paper.positions:
             invested = sum(
@@ -199,7 +223,6 @@ async def cmd_status(update, context):
         else:
             msg.append("📦 ПОЗИЦИИ: нет")
 
-        # --- АКТИВНЫЕ ОРДЕРА С ВЕСОМ ---
         msg.append("")
         if paper.orders:
             orders_sum = sum(o["qty"] * o["price"] for o in paper.orders)
@@ -218,7 +241,6 @@ async def cmd_status(update, context):
         else:
             msg.append("📋 АКТИВНЫЕ ОРДЕРА: нет")
 
-        # --- СТАТИСТИКА ---
         msg.append("")
         wins = [r for r in paper.realized if r["pnl"] > 0]
         losses = [r for r in paper.realized if r["pnl"] <= 0]
@@ -262,6 +284,8 @@ def main():
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("exitall", cmd_exitall))
+    app.add_handler(CommandHandler("learn", cmd_learn))
+    app.add_handler(CommandHandler("resetlearn", cmd_resetlearn))
     app.add_handler(CommandHandler("log", cmd_log))
     app.add_handler(CommandHandler("help", cmd_help))
 
