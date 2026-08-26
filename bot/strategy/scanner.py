@@ -30,7 +30,7 @@ def is_tradable(symbol):
 
 def threshold(regime):
     base = {"bull": 5, "neutral": 6, "bear": 8}.get(regime, 6)
-    return base + learner.threshold_adj
+    return max(4, base + learner.threshold_adj)  # не ниже 4 даже в aggressive
 
 
 def _returns(closes):
