@@ -3,3 +3,4 @@ loguru==0.7.2
 python-dotenv==1.0.1
 httpx
 pybit
+aiohttp
