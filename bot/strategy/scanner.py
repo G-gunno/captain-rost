@@ -19,46 +19,102 @@ STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
                 "LUSD", "GUSD", "XUSD", "USDX", "CUSD", "SUSD"}
 
 SECTORS = {
-    # L1
-    "ETH": "L1", "SOL": "L1", "BNB": "L1", "AVAX": "L1", "ADA": "L1",
-    "DOT": "L1", "NEAR": "L1", "APT": "L1", "SUI": "L1", "SEI": "L1",
-    "TON": "L1", "TRX": "L1", "KAS": "L1", "HBAR": "L1", "XLM": "L1",
-    "ALGO": "L1", "ATOM": "L1", "INJ": "L1", "TIA": "L1", "ICP": "L1",
-    "FTM": "L1", "S": "L1", "CSPR": "L1", "MINA": "L1", "HYPE": "L1",
-    "MOVE": "L1", "MON": "L1", "KAVA": "L1", "CELO": "L1",
-    # L2
+    # ===== L1 =====
+    "BTC": "L1", "ETH": "L1", "SOL": "L1", "BNB": "L1", "AVAX": "L1",
+    "ADA": "L1", "DOT": "L1", "NEAR": "L1", "APT": "L1", "SUI": "L1",
+    "SEI": "L1", "TON": "L1", "TRX": "L1", "KAS": "L1", "HBAR": "L1",
+    "XLM": "L1", "XRP": "L1", "ALGO": "L1", "ATOM": "L1", "INJ": "L1",
+    "TIA": "L1", "ICP": "L1", "FTM": "L1", "S": "L1", "CSPR": "L1",
+    "MINA": "L1", "HYPE": "L1", "MOVE": "L1", "MON": "L1", "KAVA": "L1",
+    "CELO": "L1", "EGLD": "L1", "VET": "L1", "EOS": "L1", "XTZ": "L1",
+    "NEO": "L1", "QTUM": "L1", "WAVES": "L1", "XEM": "L1", "ZEC": "L1",
+    "LTC": "L1", "BCH": "L1", "ETC": "L1", "XMR": "L1", "DASH": "L1",
+    "ZIL": "L1", "RVN": "L1", "ERG": "L1", "CFX": "L1", "FLR": "L1",
+    "KDA": "L1", "ROSE": "L1", "GLMR": "L1", "ASTR": "L1", "METIS": "L1",
+    # ===== L2 =====
     "ARB": "L2", "OP": "L2", "STRK": "L2", "ZK": "L2", "MANTA": "L2",
-    "SCROLL": "L2", "BLAST": "L2", "METIS": "L2", "POL": "L2", "ZRO": "L2",
-    "MANTLE": "L2", "LINEA": "L2",
-    # DeFi
+    "SCROLL": "L2", "BLAST": "L2", "POL": "L2", "MATIC": "L2", "ZRO": "L2",
+    "MANTLE": "L2", "LINEA": "L2", "IMX": "L2", "LRC": "L2", "STX": "L2",
+    # ===== DeFi =====
     "UNI": "DeFi", "AAVE": "DeFi", "LINK": "DeFi", "MKR": "DeFi",
     "SNX": "DeFi", "CRV": "DeFi", "COMP": "DeFi", "LDO": "DeFi",
     "DYDX": "DeFi", "GMX": "DeFi", "JUP": "DeFi", "RAY": "DeFi",
     "PENDLE": "DeFi", "ENA": "DeFi", "ONDO": "DeFi", "PYTH": "DeFi",
     "JTO": "DeFi", "CAKE": "DeFi", "SUSHI": "DeFi", "FLUID": "DeFi",
-    "EIGEN": "DeFi", "ETHFI": "DeFi", "RSR": "DeFi",
-    # AI
-    "FET": "AI", "OCEAN": "AI", "RNDR": "AI", "GRT": "AI", "TAO": "AI",
-    "ARKM": "AI", "WLD": "AI", "VIRTUAL": "AI", "FLOCK": "AI",
-    "GRASS": "AI", "SQD": "AI", "AI16Z": "AI", "ZEREBRO": "AI",
-    # Meme
+    "EIGEN": "DeFi", "ETHFI": "DeFi", "RSR": "DeFi", "YFI": "DeFi",
+    "BAL": "DeFi", "BNT": "DeFi", "1INCH": "DeFi", "BIFI": "DeFi",
+    "KP3R": "DeFi", "RPL": "DeFi", "SSV": "DeFi", "BLUR": "DeFi",
+    "MAGIC": "DeFi", "TORN": "DeFi", "AZERO": "DeFi", "ZRO": "DeFi",
+    # ===== AI =====
+    "FET": "AI", "OCEAN": "AI", "RNDR": "AI", "RENDER": "AI",
+    "GRT": "AI", "TAO": "AI", "ARKM": "AI", "WLD": "AI", "VIRTUAL": "AI",
+    "FLOCK": "AI", "GRASS": "AI", "SQD": "AI", "AI16Z": "AI",
+    "ZEREBRO": "AI", "AGIX": "AI", "AKT": "AI", "NMR": "AI", "PHB": "AI",
+    "OLAS": "AI", "PAAL": "AI", "AIOZ": "AI", "CTXC": "AI", "ALCH": "AI",
+    "WLD": "AI", "AI": "AI", "COOKIE": "AI",
+    # ===== Meme =====
     "DOGE": "Meme", "SHIB": "Meme", "PEPE": "Meme", "BONK": "Meme",
     "FLOKI": "Meme", "WIF": "Meme", "BRETT": "Meme", "POPCAT": "Meme",
     "MEW": "Meme", "TURBO": "Meme", "PENGU": "Meme", "SPX": "Meme",
     "MOODENG": "Meme", "PUMP": "Meme", "NEIRO": "Meme", "BOME": "Meme",
-    # Gaming
+    "FARTCOIN": "Meme", "PNUT": "Meme", "GOAT": "Meme", "ACT": "Meme",
+    "MOTHER": "Meme", "DADDY": "Meme", "GIGA": "Meme", "POPCAT": "Meme",
+    "MOG": "Meme", "TOSHI": "Meme", "MYRO": "Meme", "SLERF": "Meme",
+    "BODEN": "Meme", "TREMP": "Meme", "HARAMBE": "Meme", "MAGA": "Meme",
+    "TRUMP": "Meme", "HAT": "Meme",
+    # ===== Gaming =====
     "AXS": "Gaming", "SAND": "Gaming", "MANA": "Gaming", "GALA": "Gaming",
-    "IMX": "Gaming", "RONIN": "Gaming", "PIXEL": "Gaming", "PORTAL": "Gaming",
+    "RONIN": "Gaming", "PIXEL": "Gaming", "PORTAL": "Gaming",
     "XAI": "Gaming", "NOT": "Gaming", "HMSTR": "Gaming", "CATI": "Gaming",
-    # Infra
+    "ENJ": "Gaming", "CHZ": "Gaming", "WEMIX": "Gaming", "SUPER": "Gaming",
+    "YGG": "Gaming", "MAGIC": "Gaming", "BEAM": "Gaming", "GHST": "Gaming",
+    "PRIME": "Gaming", "ALT": "Gaming", "ALICE": "Gaming", "BIGTIME": "Gaming",
+    # ===== Infra =====
     "FIL": "Infra", "AR": "Infra", "LPT": "Infra", "TWT": "Infra",
-    "CFX": "Infra", "IOTA": "Infra", "EGLD": "Infra", "BICO": "Infra",
-    "API3": "Infra", "BAND": "Infra", "TRB": "Infra", "STX": "Infra",
+    "IOTA": "Infra", "BICO": "Infra", "API3": "Infra", "BAND": "Infra",
+    "TRB": "Infra", "HNT": "Infra", "IOTX": "Infra", "XDB": "Infra",
+    "WAXP": "Infra", "STORJ": "Infra", "GTC": "Infra", "ANKR": "Infra",
+    "OCEAN": "Infra", "RNDR": "Infra", "AKT": "Infra", "TAO": "Infra",
+    "HONEY": "Infra", "RAD": "Infra", "MOBILE": "Infra", "IOTX": "Infra",
+    # ===== RWA (Real World Assets) =====
+    "ONDO": "RWA", "PENDLE": "RWA", "ENA": "RWA", "ETHFI": "RWA",
+    "MPL": "RWA", "CFG": "RWA", "TOKEN": "RWA", "POLYX": "RWA",
+    "CHEX": "RWA", "TRADE": "RWA", "IXT": "RWA", "LPOOL": "RWA",
+    # ===== Privacy =====
+    "XMR": "Privacy", "ZEC": "Privacy", "DASH": "Privacy", "FIRO": "Privacy",
+    "SCRT": "Privacy", "NYM": "Privacy", "TORN": "Privacy", "OASIS": "Privacy",
+    # ===== Storage =====
+    "FIL": "Storage", "AR": "Storage", "STORJ": "Storage", "SIA": "Storage",
+    # ===== DEX =====
+    "UNI": "DEX", "CAKE": "DEX", "SUSHI": "DEX", "1INCH": "DEX",
+    "DYDX": "DEX", "GMX": "DEX", "JUP": "DEX", "RAY": "DEX",
+    "ORCA": "DEX", "OSMO": "DEX",
+    # ===== Launchpad =====
+    "DAO": "Launchpad", "BOND": "Launchpad", "POL": "Launchpad",
+    # ===== Exchange tokens =====
+    "BNB": "Exchange", "KCS": "Exchange", "OKB": "Exchange", "HT": "Exchange",
+    "CRO": "Exchange", "GT": "Exchange", "MX": "Exchange", "BGB": "Exchange",
+    # ===== Popular but uncategorized =====
+    "BR": "Infra", "XAN": "AI", "OBT": "DeFi", "METAX": "Gaming",
+    "ASTER": "L1", "POLYX": "Infra", "CAP": "DeFi", "TAC": "L1",
+    "FF": "Gaming", "BLIFE": "Gaming",
+}
+
+# Лимиты по секторам (Other — больше, потому что туда попадают неизвестные монеты)
+SECTOR_LIMITS = {
+    "L1": 3, "L2": 3, "DeFi": 3, "AI": 3, "Meme": 3,
+    "Gaming": 3, "Infra": 3, "RWA": 2, "Privacy": 2,
+    "Storage": 2, "DEX": 3, "Launchpad": 2, "Exchange": 2,
+    "Other": 5,  # для неизвестных монет — больше
 }
 
 
 def sector_of(base):
     return SECTORS.get(base, "Other")
+
+
+def sector_limit(sector):
+    return SECTOR_LIMITS.get(sector, 3)
 
 
 def is_tradable(symbol):
@@ -137,12 +193,10 @@ async def scan(regime, tickers, limit=5):
     tradable = [s for s, t in tickers.items()
                 if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
 
-    # Базовый пул: ликвидные + растущие за сутки
     by_vol = sorted(tradable, key=lambda s: tickers[s]["quote_volume"], reverse=True)[:40]
     by_chg = sorted([s for s in tradable if 0 < tickers[s]["change_pct"] < 25],
                     key=lambda s: tickers[s]["change_pct"], reverse=True)[:20]
 
-    # Momentum: сильный тренд за неделю
     by_momentum = []
     for sym in tradable[:50]:
         candles = await market_data.get_kline(sym, "60", 168)
@@ -152,7 +206,6 @@ async def scan(regime, tickers, limit=5):
                 by_momentum.append((sym, chg_7d))
     by_momentum = [s for s, _ in sorted(by_momentum, key=lambda x: x[1], reverse=True)][:15]
 
-    # Volatility: высоковолатильные для сателлитов
     by_volatility = []
     for sym in tradable[:50]:
         candles = await market_data.get_kline(sym, "15", 60)
@@ -182,7 +235,6 @@ async def scan(regime, tickers, limit=5):
             continue
         score, reasons, keys = score_symbol(candles, tickers[sym], regime)
 
-        # Корреляция с BTC
         corr = _corr(_returns([c["close"] for c in candles]), btc_ret)
         if corr > 0.85 and regime == "neutral":
             score -= 1
@@ -192,7 +244,6 @@ async def scan(regime, tickers, limit=5):
             reasons.append(f"независима от BTC (corr {corr:.2f})")
             keys.append("indep")
 
-        # Тип позиции и сектор
         kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
         sector = sector_of(sym[:-4])
 
