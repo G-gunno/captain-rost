@@ -6,7 +6,7 @@ from bot.exchange.market_data import market_data
 from bot.exchange.paper_exchange import paper
 from bot.strategy.scanner import get_regime, scan
 from bot.strategy.sizing import buy_size
-from bot.strategy.indicators import atr
+from bot.strategy.indicators import atr, ema
 from bot.core.state import bot_state
 from bot.utils.format import fmt_price, fmt_usdt, fmt_pct, fmt_sym
 
@@ -14,6 +14,7 @@ CYCLE_SECONDS = 300
 FEE_PCT = 0.10      # комиссия Bybit за сторону, %
 MIN_TP_PCT = 0.60   # минимальный TP (двойная комиссия + прибыль)
 MIN_SL_PCT = 0.35   # минимальный SL (защита от рыночного шума)
+MAX_SL_PCT = 3.0    # максимальный SL: дальше — монета слишком шумная
 MIN_RR = 1.5        # минимальное соотношение прибыль/риск
 _notify_cb = None
 
@@ -82,7 +83,7 @@ async def run_cycle():
             await notify("🚨 Риск-менеджмент: резкий дамп рынка. Все позиции закрыты в USDT.")
         return
 
-    # 4. Трейлинг SL — только вверх
+    # 4. Управление позициями: трейлинг SL (только вверх) + ранний выход при слоде тренда
     for sym, pos in list(paper.positions.items()):
         t = tickers.get(sym)
         if not t:
@@ -90,9 +91,23 @@ async def run_cycle():
         candles = await market_data.get_kline(sym, "15", 60)
         if len(candles) < 30:
             continue
+        closes = [c["close"] for c in candles]
         a = atr(candles)
         if a <= 0:
             continue
+        pnl_pct = (t["last"] - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
+
+        # "Сигнал иссяк": тренд 15m сломан, а позиция в плюсе — фиксируем прибыль
+        e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
+        if t["last"] < e50 and e21 < e50 and pnl_pct >= 0.3:
+            ex = paper._sell(sym, t["last"], "СИГНАЛ ИСЯК 📉")
+            await notify(
+                f"📉 РАННИЙ ВЫХОД · {fmt_sym(sym)}\n"
+                f"Тренд 15m сломан — фиксируем {fmt_pct(ex['pnl_pct'])} "
+                f"({ex['pnl']:+.2f} USDT), не дожидаясь SL"
+            )
+            continue
+
         new_sl = None
         if t["last"] >= pos["avg"] + 1.0 * a:
             new_sl = max(pos["sl"], pos["avg"])
@@ -161,9 +176,6 @@ async def run_cycle():
         sym = cand["symbol"]
         if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
             continue
-        size = buy_size(equity, cand["score"], cand["liquidity"], paper.usdt)
-        if size < 5:
-            continue
         entry = cand["last"] * 0.998
         a = cand["atr"]
         if a <= 0:
@@ -171,8 +183,15 @@ async def run_cycle():
         sl, tp = entry - 1.2 * a, entry + 2.0 * a
         tp = max(tp, entry * (1 + MIN_TP_PCT / 100))
         sl = min(sl, entry * (1 - MIN_SL_PCT / 100))
+        sl_dist = (entry - sl) / entry * 100
+        if sl_dist > MAX_SL_PCT:
+            logger.info(f"{sym}: пропущен — SL слишком далеко ({sl_dist:.1f}%)")
+            continue
         rr = (tp - entry) / (entry - sl) if entry > sl else 0
         if tp <= entry or sl >= entry or rr < MIN_RR:
+            continue
+        size = buy_size(equity, cand["score"], cand["liquidity"], paper.usdt, sl_dist)
+        if size < 5:
             continue
         qty = size / entry
         paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl,
