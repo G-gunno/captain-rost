@@ -11,10 +11,54 @@ from bot.news.rss_news import fetch_news_cache, check_sentiment
 SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
 FILTERED_BY_NEWS = []
 
+SAT_ATR_PCT = 1.2  # порог волатильности: выше — монета идёт в сателлиты
+
 STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
                 "USD1", "USDD", "EUR", "EURT", "AEUR", "USDT",
                 "RLUSD", "PYUSD", "EURI", "USDS", "USD0", "FRAX",
                 "LUSD", "GUSD", "XUSD", "USDX", "CUSD", "SUSD"}
+
+SECTORS = {
+    # L1
+    "ETH": "L1", "SOL": "L1", "BNB": "L1", "AVAX": "L1", "ADA": "L1",
+    "DOT": "L1", "NEAR": "L1", "APT": "L1", "SUI": "L1", "SEI": "L1",
+    "TON": "L1", "TRX": "L1", "KAS": "L1", "HBAR": "L1", "XLM": "L1",
+    "ALGO": "L1", "ATOM": "L1", "INJ": "L1", "TIA": "L1", "ICP": "L1",
+    "FTM": "L1", "S": "L1", "CSPR": "L1", "MINA": "L1", "HYPE": "L1",
+    "MOVE": "L1", "MON": "L1", "KAVA": "L1", "CELO": "L1",
+    # L2
+    "ARB": "L2", "OP": "L2", "STRK": "L2", "ZK": "L2", "MANTA": "L2",
+    "SCROLL": "L2", "BLAST": "L2", "METIS": "L2", "POL": "L2", "ZRO": "L2",
+    "MANTLE": "L2", "LINEA": "L2",
+    # DeFi
+    "UNI": "DeFi", "AAVE": "DeFi", "LINK": "DeFi", "MKR": "DeFi",
+    "SNX": "DeFi", "CRV": "DeFi", "COMP": "DeFi", "LDO": "DeFi",
+    "DYDX": "DeFi", "GMX": "DeFi", "JUP": "DeFi", "RAY": "DeFi",
+    "PENDLE": "DeFi", "ENA": "DeFi", "ONDO": "DeFi", "PYTH": "DeFi",
+    "JTO": "DeFi", "CAKE": "DeFi", "SUSHI": "DeFi", "FLUID": "DeFi",
+    "EIGEN": "DeFi", "ETHFI": "DeFi", "RSR": "DeFi",
+    # AI
+    "FET": "AI", "OCEAN": "AI", "RNDR": "AI", "GRT": "AI", "TAO": "AI",
+    "ARKM": "AI", "WLD": "AI", "VIRTUAL": "AI", "FLOCK": "AI",
+    "GRASS": "AI", "SQD": "AI", "AI16Z": "AI", "ZEREBRO": "AI",
+    # Meme
+    "DOGE": "Meme", "SHIB": "Meme", "PEPE": "Meme", "BONK": "Meme",
+    "FLOKI": "Meme", "WIF": "Meme", "BRETT": "Meme", "POPCAT": "Meme",
+    "MEW": "Meme", "TURBO": "Meme", "PENGU": "Meme", "SPX": "Meme",
+    "MOODENG": "Meme", "PUMP": "Meme", "NEIRO": "Meme", "BOME": "Meme",
+    # Gaming
+    "AXS": "Gaming", "SAND": "Gaming", "MANA": "Gaming", "GALA": "Gaming",
+    "IMX": "Gaming", "RONIN": "Gaming", "PIXEL": "Gaming", "PORTAL": "Gaming",
+    "XAI": "Gaming", "NOT": "Gaming", "HMSTR": "Gaming", "CATI": "Gaming",
+    # Infra
+    "FIL": "Infra", "AR": "Infra", "LPT": "Infra", "TWT": "Infra",
+    "CFX": "Infra", "IOTA": "Infra", "EGLD": "Infra", "BICO": "Infra",
+    "API3": "Infra", "BAND": "Infra", "TRB": "Infra", "STX": "Infra",
+}
+
+
+def sector_of(base):
+    return SECTORS.get(base, "Other")
 
 
 def is_tradable(symbol):
@@ -97,20 +141,18 @@ async def scan(regime, tickers, limit=5):
     by_vol = sorted(tradable, key=lambda s: tickers[s]["quote_volume"], reverse=True)[:40]
     by_chg = sorted([s for s in tradable if 0 < tickers[s]["change_pct"] < 25],
                     key=lambda s: tickers[s]["change_pct"], reverse=True)[:20]
-    
-    # Momentum: сильный тренд за неделю (168 часов = 7 дней)
+
+    # Momentum: сильный тренд за неделю
     by_momentum = []
-    for sym in tradable[:50]:  # только топ-50 для скорости
-        candles = await market_data.get_kline(sym, "60", 168)  # 7 дней по 1h
+    for sym in tradable[:50]:
+        candles = await market_data.get_kline(sym, "60", 168)
         if len(candles) >= 100:
-            start_price = candles[0]["close"]
-            end_price = candles[-1]["close"]
-            chg_7d = (end_price - start_price) / start_price * 100
-            if 5 < chg_7d < 50:  # растущие, но не перегретые
+            chg_7d = (candles[-1]["close"] - candles[0]["close"]) / candles[0]["close"] * 100
+            if 5 < chg_7d < 50:
                 by_momentum.append((sym, chg_7d))
     by_momentum = [s for s, _ in sorted(by_momentum, key=lambda x: x[1], reverse=True)][:15]
 
-    # Volatility: высоковолатильные для потенциальной Satellite-стратегии
+    # Volatility: высоковолатильные для сателлитов
     by_volatility = []
     for sym in tradable[:50]:
         candles = await market_data.get_kline(sym, "15", 60)
@@ -118,11 +160,10 @@ async def scan(regime, tickers, limit=5):
             a = atr(candles)
             last = candles[-1]["close"]
             atr_pct = (a / last) * 100 if last else 0
-            if atr_pct > 2.5:  # высокая волатильность
+            if atr_pct > 2.5:
                 by_volatility.append((sym, atr_pct))
     by_volatility = [s for s, _ in sorted(by_volatility, key=lambda x: x[1], reverse=True)][:10]
 
-    # Объединяем пул
     pool = list(dict.fromkeys(by_vol + by_chg + by_momentum + by_volatility))
 
     news_items = await fetch_news_cache()
@@ -135,7 +176,9 @@ async def scan(regime, tickers, limit=5):
         if len(candles) < 60:
             continue
         a = atr(candles)
-        if a <= 0 or (a / tickers[sym]["last"]) * 100 < 0.25:
+        last_price = tickers[sym]["last"]
+        atr_pct = (a / last_price) * 100 if last_price else 0
+        if a <= 0 or atr_pct < 0.25:
             continue
         score, reasons, keys = score_symbol(candles, tickers[sym], regime)
 
@@ -149,9 +192,15 @@ async def scan(regime, tickers, limit=5):
             reasons.append(f"независима от BTC (corr {corr:.2f})")
             keys.append("indep")
 
+        # Тип позиции и сектор
+        kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
+        sector = sector_of(sym[:-4])
+
         scored.append({"symbol": sym, "score": score, "reasons": reasons,
-                       "reason_keys": keys, "atr": a, "last": tickers[sym]["last"],
-                       "liquidity": tickers[sym]["quote_volume"], "corr": round(corr, 2)})
+                       "reason_keys": keys, "atr": a, "last": last_price,
+                       "liquidity": tickers[sym]["quote_volume"],
+                       "corr": round(corr, 2), "atr_pct": round(atr_pct, 2),
+                       "kind": kind, "sector": sector})
 
     scored.sort(key=lambda c: c["score"], reverse=True)
 
@@ -168,7 +217,6 @@ async def scan(regime, tickers, limit=5):
         if c["score"] < thr:
             continue
 
-        # НОВОСТНАЯ АНАЛИТИКА
         base = c["symbol"][:-4]
         name = await get_coin_name(base)
         neg, pos, mentions, heads = check_sentiment(news_items, [base, name])
