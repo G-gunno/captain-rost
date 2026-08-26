@@ -216,7 +216,8 @@ async def cmd_status(update, context):
                 val = pos["qty"] * last
                 w = val / eq * 100 if eq else 0
                 pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
-                msg.append(f"   • {fmt_sym(sym)} · {fmt_pct(pnl_pct)}")
+                tp1 = " · TP1✅" if pos.get("tp1_done") else ""
+                msg.append(f"   • {fmt_sym(sym)} · {fmt_pct(pnl_pct)}{tp1}")
                 msg.append(f"      💼 Вес: {fmt_usdt(val)} USDT ({w:.1f}% портфеля)")
                 msg.append(f"      📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)}")
                 msg.append(f"      🎯 {fmt_price(pos['tp'])} | 🛡 {fmt_price(pos['sl'])}")
