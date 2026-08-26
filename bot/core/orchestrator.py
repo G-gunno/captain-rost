@@ -8,6 +8,8 @@ from bot.strategy.scanner import get_regime, scan, score_symbol, threshold
 from bot.strategy.sizing import buy_size
 from bot.strategy.indicators import atr, ema
 from bot.core.state import bot_state
+from bot.news.cmc import get_coin_name
+from bot.news.rss_news import fetch_news_cache, check_sentiment
 from bot.utils.format import fmt_price, fmt_usdt, fmt_pct, fmt_sym
 
 CYCLE_SECONDS = 300
@@ -36,8 +38,7 @@ async def notify(text):
 
 # ==================== СВЕРКА СОСТОЯНИЯ ПРИ СТАРТЕ ====================
 async def startup_reconciliation():
-    """После деплоя/рестарта: привести позиции и ордера к ТЕКУЩЕЙ логике.
-    Для реальной биржи сюда добавится сканирование балансов/ордеров на бирже."""
+    """После деплоя/рестарта: привести позиции и ордера к ТЕКУЩЕЙ логике."""
     logger.info("=== RECONCILE START ===")
     prices = await market_data.get_tickers()
     if not prices:
@@ -45,7 +46,7 @@ async def startup_reconciliation():
         return
     actions = []
 
-    # 1. Позиции: пересчитать TP/SL по актуальным правилам (если они пропали или устарели)
+    # 1. Позиции: пересчитать TP/SL по актуальным правилам
     for sym, pos in list(paper.positions.items()):
         entry = pos.get("avg", 0)
         if not entry:
@@ -71,7 +72,7 @@ async def startup_reconciliation():
             actions.append(f"{sym}: {' и '.join(fixed)} пересчитаны по новой логике")
     paper.save()
 
-    # 2. Ордера: проверить сигнал текущим скорингом; протухшие — снять, живые — освежить
+    # 2. Ордера: проверить сигнал текущим скорингом
     regime, _ = await get_regime()
     thr = threshold(regime)
     for order in list(paper.orders):
@@ -130,6 +131,8 @@ async def run_cycle():
         logger.error("Нет тикеров — цикл пропущен")
         return
 
+    news_items = await fetch_news_cache()
+
     # 1. Исполнения покупок
     for f in paper.check_fills(tickers):
         tp_pct = (f["tp"] - f["price"]) / f["price"] * 100
@@ -162,7 +165,7 @@ async def run_cycle():
             await notify("🚨 Риск-менеджмент: резкий дамп рынка. Все позиции закрыты в USDT.")
         return
 
-    # 4. УПРАВЛЕНИЕ ПОЗИЦИЯМИ
+    # 4. УПРАВЛЕНИЕ ПОЗИЦИЯМИ (включая новостную проверку)
     for sym, pos in list(paper.positions.items()):
         t = tickers.get(sym)
         if not t:
@@ -180,6 +183,28 @@ async def run_cycle():
         score_pos, _, _ = score_symbol(candles, t, regime)
         thr = threshold(regime)
         trend_broken = last < e50 and e21 < e50
+
+        # 4.0 НОВОСТНАЯ ПРОВЕРКА ПОЗИЦИИ
+        base = sym[:-4]
+        name = await get_coin_name(base)
+        neg, pos_news, _, _ = check_sentiment(news_items, [base, name])
+        if neg > 0 and neg > pos_news:
+            if pnl_pct >= MIN_EARLY_EXIT_PCT:
+                ex = paper._sell(sym, last, "НОВОСТИ ⚠️")
+                await notify(
+                    f"⚠️ НОВОСТНОЙ ВЫХОД · {fmt_sym(sym)}\n"
+                    f"Вышли {neg} негативных новостей — фиксируем "
+                    f"{fmt_pct(ex['pnl_pct'])} ({ex['pnl']:+.2f} USDT)"
+                )
+                continue
+            elif pnl_pct <= 0:
+                ex = paper._sell(sym, last, "НОВОСТИ 🛑")
+                await notify(
+                    f"🛑 НОВОСТНАЯ РЕЗКА · {fmt_sym(sym)}\n"
+                    f"Вышли {neg} негативных новостей — режем "
+                    f"{fmt_pct(ex['pnl_pct'])} ({ex['pnl']:+.2f} USDT)"
+                )
+                continue
 
         # 4а. ЧАСТИЧНЫЙ TP: первый таргет -> продаём 50%, остаток бежит
         if not pos.get("tp1_done") and last >= pos["tp"]:
@@ -248,13 +273,26 @@ async def run_cycle():
             f"🏦 В Funding: {fmt_usdt(ex['transferred'])} USDT"
         )
 
-    # 6. Неисполненные ордера: перевыставление
+    # 6. Неисполненные ордера: новостная проверка + перевыставление
     now = int(time.time())
     for order in list(paper.orders):
-        if (now - order["created"]) < 900:
-            continue
         t = tickers.get(order["symbol"])
         if not t:
+            continue
+
+        # НОВОСТНАЯ ПРОВЕРКА ОРДЕРА
+        base = order["symbol"][:-4]
+        name = await get_coin_name(base)
+        neg, pos_news, _, _ = check_sentiment(news_items, [base, name])
+        if neg > 0 and neg > pos_news:
+            paper.cancel_order(order["id"])
+            await notify(
+                f"⚠️ ОРДЕР СНЯТ (новости) · {fmt_sym(order['symbol'])}\n"
+                f"{neg} негативных новостей"
+            )
+            continue
+
+        if (now - order["created"]) < 900:
             continue
         if order.get("requotes", 0) >= 2:
             paper.cancel_order(order["id"])
