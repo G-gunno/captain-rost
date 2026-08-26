@@ -12,10 +12,9 @@ REMOTE_PATH = "paper_state.json"
 
 
 class PaperExchange:
-    """Виртуальная биржа: реальные цены, виртуальные деньги, честные комиссии.
-    Состояние резервируется в GitHub и переживает деплои."""
+    """Виртуальная биржа с резервированием состояния в GitHub."""
 
-    FEE_PCT = 0.10  # комиссия за сторону, %
+    FEE_PCT = 0.10
 
     def __init__(self, start_usdt: float = 1000.0):
         self.state_file = Path(os.getenv("STORAGE_DIR", "storage")) / "paper_state.json"
@@ -149,7 +148,7 @@ class PaperExchange:
         pnl_pct = pnl / (cost_part + fee_buy) * 100 if cost_part else 0.0
 
         try:
-            learner.record(pos.get("reason_keys", []), pnl > 0)
+            learner.record(pos.get("reason_keys", []), pnl > 0, pnl_pct)
         except Exception as e:
             logger.error(f"learner record error: {e}")
 
@@ -184,7 +183,7 @@ class PaperExchange:
         pnl_pct = pnl / (cost + fee_buy) * 100 if cost else 0.0
 
         try:
-            learner.record(pos.get("reason_keys", []), pnl > 0)
+            learner.record(pos.get("reason_keys", []), pnl > 0, pnl_pct)
         except Exception as e:
             logger.error(f"learner record error: {e}")
 
@@ -223,6 +222,45 @@ class PaperExchange:
         for sym, pos in self.positions.items():
             eq += pos["qty"] * prices.get(sym, {}).get("last", 0)
         return eq
+
+    # --- МЕТРИКИ КАЧЕСТВА ТОРГОВЛИ ---
+    def get_metrics(self, prices=None):
+        """Profit Factor, Max Drawdown, Winrate из истории сделок."""
+        if prices is None:
+            prices = {}
+        wins = [r for r in self.realized if r["pnl"] > 0]
+        losses = [r for r in self.realized if r["pnl"] <= 0]
+        sum_win = sum(r["pnl"] for r in wins)
+        sum_loss = abs(sum(r["pnl"] for r in losses))
+        if sum_loss == 0:
+            profit_factor = None if sum_win == 0 else float("inf")
+        else:
+            profit_factor = sum_win / sum_loss
+
+        # Max Drawdown: идём по realized и симулируем эквити
+        eq = self.start_usdt
+        peak = eq
+        max_dd = 0.0
+        for r in self.realized:
+            eq += r["pnl"]
+            if eq > peak:
+                peak = eq
+            if peak > 0:
+                dd = (peak - eq) / peak * 100
+                if dd > max_dd:
+                    max_dd = dd
+
+        wr, n = learner.winrate()
+        total_pnl = sum(r["pnl"] for r in self.realized)
+        return {
+            "profit_factor": profit_factor,
+            "max_drawdown_pct": max_dd,
+            "winrate": wr,
+            "win_count": len(wins),
+            "loss_count": len(losses),
+            "total_trades": len(self.realized),
+            "total_pnl": total_pnl,
+        }
 
 
 paper = PaperExchange()
