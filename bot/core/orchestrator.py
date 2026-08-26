@@ -186,7 +186,7 @@ async def run_cycle():
             f"📥 Вход: {fmt_price(entry)}\n"
             f"🎯 TP: {fmt_price(tp)} ({fmt_pct(tp_pct)})\n"
             f"🛡 SL: {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
-            f"⭐ Сигнал: {cand['score']:.1f}\n"
+            f"⭐ Сигнал: {cand['score']:.1f} | 🔗 BTC: {cand.get('corr', 0):.2f}\n"
             f"🧠 Причина: {'; '.join(cand['reasons'][:4])}"
         )
 
