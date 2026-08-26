@@ -98,9 +98,10 @@ async def run_all(application):
     await application.initialize()
     await application.start()
 
-    # --- Очистка и установка webhook ---
+    # --- ЖЁСТКАЯ ОЧИСТКА: удаляем любой webhook и сбрасываем очередь ---
     try:
         await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook удалён, очередь обновлений сброшена")
     except Exception as e:
         logger.error(f"delete_webhook error: {e}")
 
@@ -144,7 +145,7 @@ async def run_all(application):
 
     runner = web.AppRunner(web_app)
     await runner.setup()
-    port = int(os.getenv("PORT", 10000"))
+    port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     logger.info(f"HTTP-сервер запущен на порту {port} (GET / + POST {WEBHOOK_PATH})")
