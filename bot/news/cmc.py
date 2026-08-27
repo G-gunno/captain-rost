@@ -89,6 +89,11 @@ def _save_sectors():
 _load_sectors()
 
 
+def sector_of(base):
+    """Синхронная справка сектора: ручной словарь -> выученный кэш -> Other."""
+    return SECTORS.get(base) or _sector_cache.get(base) or "Other"
+
+
 def _tags_to_sector(tags):
     for t in tags or []:
         s = SECTOR_TAG_MAP.get(t)
@@ -110,10 +115,10 @@ async def get_sectors_for_pool(bases):
             need.append(b)
     if not need:
         return result
-    
-    # Защита от rate limit: ждём 1 секунду перед запросом
+
+    # Защита от rate limit
     await asyncio.sleep(1.0)
-    
+
     try:
         key = os.getenv("CMC_API_KEY", "").strip()
         headers = {"X-CMC_PRO_API_KEY": key} if key else {}
