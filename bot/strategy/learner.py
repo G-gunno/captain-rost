@@ -13,12 +13,13 @@ KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "news_pos", "hyp
 
 
 class Learner:
-    """Самообучение: взвешенное по силе сделок + адаптивная стратегия по PF и Max Drawdown."""
+    """Самообучение: веса сигналов + адаптивный режим + секторная аналитика."""
 
     def __init__(self):
         self.weights = {k: 1.0 for k in KEYS}
         self.results = []
         self.threshold_adj = 0
+        self.sector_stats = {}  # {сектор: [pnl% ...]} — секторная ротация
         self._last_upload = 0.0
         self._load()
 
@@ -35,6 +36,7 @@ class Learner:
             self.weights.update(data.get("weights", {}))
             self.results = data.get("results", [])
             self.threshold_adj = data.get("threshold_adj", 0)
+            self.sector_stats = data.get("sector_stats", {})
             logger.info("learner: опыт загружен")
 
     def save(self):
@@ -42,6 +44,7 @@ class Learner:
             "weights": self.weights,
             "results": self.results[-200:],
             "threshold_adj": self.threshold_adj,
+            "sector_stats": {k: v[-50:] for k, v in self.sector_stats.items()},
         }
         try:
             STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -55,10 +58,14 @@ class Learner:
     def weight(self, key):
         return self.weights.get(key, 1.0)
 
-    def record(self, keys, win, pnl_pct=0.0):
-        """Взвешенное обучение: сильные сделки влияют на веса больше."""
+    def record(self, keys, win, pnl_pct=0.0, sector=None):
+        """Взвешенное обучение + запись в секторную статистику."""
         self.results.append(1 if win else 0)
         self.results = self.results[-200:]
+        if sector:
+            hist = self.sector_stats.setdefault(sector, [])
+            hist.append(round(pnl_pct, 2))
+            self.sector_stats[sector] = hist[-50:]
         abs_pnl = abs(pnl_pct)
         if abs_pnl >= 3.0:
             delta = 0.10 if win else -0.10
@@ -70,20 +77,33 @@ class Learner:
             if k in self.weights:
                 self.weights[k] = round(min(1.7, max(0.3, self.weights[k] + delta)), 3)
         self.save()
-        logger.info(f"learner: win={win} pnl={pnl_pct:+.2f}% delta={delta:+.2f} keys={keys}")
+        logger.info(f"learner: win={win} pnl={pnl_pct:+.2f}% delta={delta:+.2f} "
+                    f"keys={keys} sector={sector}")
+
+    def sector_bias(self, sector):
+        """Бонус/штраф к score по истории сектора: −1.0…+1.0 (нужно ≥3 сделок)."""
+        hist = self.sector_stats.get(sector) or []
+        if len(hist) < 3:
+            return 0.0
+        wr = sum(1 for p in hist if p > 0) / len(hist)
+        avg = sum(hist) / len(hist)
+        bias = (wr - 0.5) + max(-0.5, min(0.5, avg * 0.25))
+        return round(max(-1.0, min(1.0, bias)), 2)
 
     def reset(self):
-        """Полный сброс: веса + статистика + порог."""
+        """Полный сброс: веса + статистика + порог + сектора."""
         self.weights = {k: 1.0 for k in KEYS}
         self.results = []
         self.threshold_adj = 0
+        self.sector_stats = {}
         self.save()
         logger.info("learner: опыт сброшен")
 
     def reset_stats(self):
-        """Сбросить только статистику (results, порог), веса-знания сохранить."""
+        """Сбросить статистику (results, порог, сектора), веса-знания сохранить."""
         self.results = []
         self.threshold_adj = 0
+        self.sector_stats = {}
         self.save()
         logger.info("learner: статистика сброшена (веса сохранены)")
 
@@ -91,17 +111,8 @@ class Learner:
         last = self.results[-20:]
         return (sum(last) / len(last), len(last)) if last else (0.0, 0)
 
-    # --- АДАПТИВНАЯ СТРАТЕГИЯ НА ОСНОВЕ PF И MAX DD (СМЯГЧЁННАЯ) ---
+    # --- АДАПТИВНАЯ СТРАТЕГИЯ (СМЯГЧЁННАЯ, БЕЗ МЁРТВОЙ ПЕТЛИ) ---
     def risk_mode(self, profit_factor, max_dd_pct, total_trades=0):
-        """Возвращает (mode_name, динамический сдвиг порога).
-
-        Мягкая логика без мёртвой петли:
-        - штрафы по PF только после 5+ сделок (раньше — шум);
-        - PF < 0.5   -> STRICT (+2);
-        - PF 0.5–1.0 -> CAUTIOUS (+1), а не STRICT как раньше;
-        - DD > 15%   -> +1 (защита капитала, всегда);
-        - PF > 1.5 и DD < 8% -> -1 (AGGRESSIVE).
-        """
         adj = 0
         enough = total_trades >= 5
         if enough and profit_factor is not None:
@@ -124,7 +135,6 @@ class Learner:
         return mode, adj
 
     def update_threshold(self, profit_factor, max_dd_pct, total_trades=0):
-        """Обновляет динамическую корректировку порога на основе метрик."""
         _, dyn_adj = self.risk_mode(profit_factor, max_dd_pct, total_trades)
         wr_adj = 0
         if total_trades >= 10:
@@ -141,7 +151,7 @@ class Learner:
         wr, n = self.winrate()
         top = sorted(self.weights.items(), key=lambda kv: kv[1], reverse=True)
         txt = ", ".join(f"{k} {v:.2f}" for k, v in top[:3])
-        return f"winrate {wr:.0%} ({n}) | топ-веса: {txt} | строгость +{self.threshold_adj}"
+        return f"winrate {wr:.0%} ({n}) | топ-веса: {txt} | строгость {self.threshold_adj:+d}"
 
 
 learner = Learner()
