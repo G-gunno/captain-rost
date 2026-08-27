@@ -4,11 +4,8 @@ from loguru import logger
 
 from bot.exchange.market_data import market_data
 from bot.exchange.paper_exchange import paper
-from bot.strategy.scanner import (
-    get_regime, scan, score_symbol, threshold,
-    sector_of, sector_limit,
-)
-from bot.strategy.sizing import buy_size
+from bot.strategy.scanner import get_regime, scan, score_symbol, threshold
+from bot.strategy.sizing import buy_size, portfolio_limits
 from bot.strategy.indicators import atr, ema
 from bot.core.state import bot_state
 from bot.news.cmc import get_coin_name
@@ -20,11 +17,11 @@ CYCLE_SECONDS = 300
 FEE_PCT = 0.10
 MIN_TP_PCT = 0.60
 MIN_SL_PCT = 0.35
-MAX_SL_PCT = 3.0          # максимум SL для Core
-MIN_RR = 1.5              # мин. R:R для Core
-SAT_MAX_SL_PCT = 5.0      # максимум SL для сателлитов
-MIN_RR_SAT = 2.0          # мин. R:R для сателлитов
-SAT_MAX_TOTAL_PCT = 20.0  # лимит всех сателлитов: 20% equity
+MAX_SL_PCT = 3.0
+MIN_RR = 1.5
+SAT_MAX_SL_PCT = 5.0
+MIN_RR_SAT = 2.0
+SAT_MAX_TOTAL_PCT = 20.0
 MIN_EARLY_EXIT_PCT = 1.0
 _notify_cb = None
 _reconciled = False
@@ -53,7 +50,6 @@ async def startup_reconciliation():
         return
     actions = []
 
-    # 1. Позиции: пересчитать TP/SL по актуальным правилам
     for sym, pos in list(paper.positions.items()):
         entry = pos.get("avg", 0)
         if not entry:
@@ -80,7 +76,6 @@ async def startup_reconciliation():
             actions.append(f"{sym}: {' и '.join(fixed)} пересчитаны по новой логике")
     paper.save()
 
-    # 2. Ордера: проверить сигнал текущим скорингом
     regime, _ = await get_regime()
     thr = threshold(regime)
     for order in list(paper.orders):
@@ -139,7 +134,6 @@ async def run_cycle():
         logger.error("Нет тикеров — цикл пропущен")
         return
 
-    # АДАПТИВНАЯ СТРАТЕГИЯ: корректируем порог входа на основе метрик
     metrics = paper.get_metrics(tickers)
     new_thr_adj = learner.update_threshold(
         metrics["profit_factor"], metrics["max_drawdown_pct"], metrics["total_trades"]
@@ -159,6 +153,7 @@ async def run_cycle():
         pos = paper.positions.get(f["symbol"])
         if pos is not None:
             pos["kind"] = f.get("kind", "core")
+            pos["sector"] = f.get("sector", "Other")
             paper.save()
         tp_pct = (f["tp"] - f["price"]) / f["price"] * 100
         sl_pct = (f["sl"] - f["price"]) / f["price"] * 100
@@ -231,7 +226,7 @@ async def run_cycle():
                 )
                 continue
 
-        # 4а. ЧАСТИЧНЫЙ TP: первый таргет -> продаём 50%, остаток бежит
+        # 4а. ЧАСТИЧНЫЙ TP
         if not pos.get("tp1_done") and last >= pos["tp"]:
             half = pos["qty"] / 2
             ex = paper.sell_partial(sym, half, pos["tp"], "TP1 🎯")
@@ -246,7 +241,7 @@ async def run_cycle():
             )
             continue
 
-        # 4б. ИНВАЛИДАЦИЯ: тренд сломан / сигнал умер
+        # 4б. ИНВАЛИДАЦИЯ
         if trend_broken or score_pos <= thr - 2:
             if pnl_pct >= MIN_EARLY_EXIT_PCT:
                 ex = paper._sell(sym, last, "СИГНАЛ ИСЯК 📉")
@@ -265,7 +260,7 @@ async def run_cycle():
                 )
                 continue
 
-        # 4в. РАННЕР: тренд силён у нового TP -> двигаем TP вверх
+        # 4в. РАННЕР
         new_sl = None
         if pos.get("tp1_done") and last > e21 > e50 and score_pos >= thr and last >= pos["tp"] - 0.3 * a:
             new_tp = max(pos["tp"], last + 1.5 * a)
@@ -298,7 +293,7 @@ async def run_cycle():
             f"🏦 В Funding: {fmt_usdt(ex['transferred'])} USDT"
         )
 
-    # 6. Неисполненные ордера: новостная проверка + перевыставление
+    # 6. Неисполненные ордера
     now = int(time.time())
     for order in list(paper.orders):
         t = tickers.get(order["symbol"])
@@ -347,6 +342,9 @@ async def run_cycle():
         logger.info("Медвежий рынок — новые покупки отключены (умный риск)")
 
     equity = paper.equity(tickers)
+    max_positions, sec_lim, other_lim = portfolio_limits(equity)
+    logger.info(f"PORTFOLIO LIMITS: equity={equity:.0f} | "
+                f"max_positions={max_positions} | sector={sec_lim} | other={other_lim}")
 
     if paper.usdt < 10 and candidates and paper.positions:
         best = candidates[0]
@@ -371,16 +369,21 @@ async def run_cycle():
         kind = cand.get("kind", "core")
         sector = cand.get("sector", "Other")
 
-        # СЕКТОРНАЯ ДИВЕРСИФИКАЦИЯ: динамический лимит по сектору
-        sector_count = sum(
-            1 for s in paper.positions if sector_of(s[:-4]) == sector
-        ) + sum(1 for o in paper.orders if sector_of(o["symbol"][:-4]) == sector)
-        max_in_sector = sector_limit(sector)
-        if sector_count >= max_in_sector:
-            logger.info(f"{sym}: пропущен — сектор {sector} переполнен ({sector_count}/{max_in_sector})")
+        # АДАПТИВНЫЙ ЛИМИТ ПОРТФЕЛЯ ПО БАЛАНСУ
+        open_count = len(paper.positions) + len(paper.orders)
+        if open_count >= max_positions:
+            logger.info(f"{sym}: пропущен — портфель полон ({open_count}/{max_positions})")
             continue
 
-        # ЛИМИТ САТЕЛЛИТОВ: суммарно не более 20% equity
+        lim = other_lim if sector == "Other" else sec_lim
+        sector_count = sum(
+            1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector
+        ) + sum(1 for o in paper.orders if (o.get("sector") or "Other") == sector)
+        if sector_count >= lim:
+            logger.info(f"{sym}: пропущен — сектор {sector} переполнен ({sector_count}/{lim})")
+            continue
+
+        # ЛИМИТ САТЕЛЛИТОВ
         if kind == "satellite":
             sat_exposure = sum(
                 p["qty"] * tickers.get(s, {}).get("last", 0)
