@@ -50,25 +50,33 @@ class PaperExchange:
             logger.info(f"Paper state загружен: USDT={self.usdt:.2f}, позиций={len(self.positions)}")
 
     def _migrate_sectors(self):
-        """Миграция: позициям и ордерам без сектора определяем сектор через sector_of."""
+        """Миграция: переопределяет sector у всех позиций/ордеров через sector_of.
+        Работает даже если раньше был записан "Other" как дефолт.
+        Переопределяет только если новый sector != Other (чтобы не сломать реальные Other)."""
         try:
             from bot.news.cmc import sector_of
         except ImportError:
             return
         migrated = 0
         for sym, pos in self.positions.items():
-            if not pos.get("sector"):
-                base = sym[:-4] if sym.endswith("USDT") else sym
-                pos["sector"] = sector_of(base)
+            base = sym[:-4] if sym.endswith("USDT") else sym
+            new_sector = sector_of(base)
+            old_sector = pos.get("sector")
+            if new_sector and new_sector != old_sector:
+                pos["sector"] = new_sector
                 migrated += 1
         for order in self.orders:
-            if not order.get("sector"):
-                base = order["symbol"][:-4] if order["symbol"].endswith("USDT") else order["symbol"]
-                order["sector"] = sector_of(base)
+            base = order["symbol"][:-4] if order["symbol"].endswith("USDT") else order["symbol"]
+            new_sector = sector_of(base)
+            old_sector = order.get("sector")
+            if new_sector and new_sector != old_sector:
+                order["sector"] = new_sector
                 migrated += 1
         if migrated:
-            logger.info(f"Миграция секторов: подтянуто {migrated} позиций/ордеров")
+            logger.info(f"Миграция секторов: переопределено {migrated} позиций/ордеров")
             self.save()
+        else:
+            logger.info("Миграция секторов: все секторы актуальны")
 
     def save(self):
         payload = {
@@ -90,12 +98,12 @@ class PaperExchange:
 
     def _resolve_sector(self, symbol, fallback_sector=None):
         """Определяет сектор монеты: из fallback -> из sector_of -> Other."""
-        if fallback_sector:
+        if fallback_sector and fallback_sector != "Other":
             return fallback_sector
         try:
             from bot.news.cmc import sector_of
             base = symbol[:-4] if symbol.endswith("USDT") else symbol
-            return sector_of(base)
+            return sector_of(base) or "Other"
         except Exception:
             return "Other"
 
@@ -142,7 +150,6 @@ class PaperExchange:
                     pos["score"] = order.get("score", 0)
                     pos["reason_keys"] = order.get("reason_keys", [])
                     pos["kind"] = order.get("kind", "core")
-                    # ВАЖНО: определяем сектор, если не сохранён в ордере
                     pos["sector"] = self._resolve_sector(
                         order["symbol"], order.get("sector")
                     )
@@ -185,8 +192,7 @@ class PaperExchange:
         pnl = (proceeds - fee_sell) - (cost_part + fee_buy)
         pnl_pct = pnl / (cost_part + fee_buy) * 100 if cost_part else 0.0
 
-        # Всегда определяем сектор (fallback к Other)
-        sector = pos.get("sector") or self._resolve_sector(sym)
+        sector = self._resolve_sector(sym, pos.get("sector"))
         try:
             learner.record(pos.get("reason_keys", []), pnl > 0, pnl_pct,
                            sector=sector)
@@ -224,8 +230,7 @@ class PaperExchange:
         pnl = (proceeds - fee_sell) - (cost + fee_buy)
         pnl_pct = pnl / (cost + fee_buy) * 100 if cost else 0.0
 
-        # Всегда определяем сектор (fallback к Other)
-        sector = pos.get("sector") or self._resolve_sector(sym)
+        sector = self._resolve_sector(sym, pos.get("sector"))
         try:
             learner.record(pos.get("reason_keys", []), pnl > 0, pnl_pct,
                            sector=sector)
