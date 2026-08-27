@@ -13,13 +13,14 @@ KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "news_pos", "hyp
 
 
 class Learner:
-    """Самообучение: веса сигналов + адаптивный режим (дробная сетка 0.5) + секторная аналитика."""
+    """Самообучение: веса + адаптив (дробная сетка 0.5) + сектора + типы выходов + пробежки."""
 
     def __init__(self):
         self.weights = {k: 1.0 for k in KEYS}
         self.results = []
         self.threshold_adj = 0.0
         self.sector_stats = {}
+        self.exit_stats = {}
         self._last_upload = 0.0
         self._load()
 
@@ -37,6 +38,7 @@ class Learner:
             self.results = data.get("results", [])
             self.threshold_adj = float(data.get("threshold_adj", 0))
             self.sector_stats = data.get("sector_stats", {})
+            self.exit_stats = data.get("exit_stats", {})
             logger.info("learner: опыт загружен")
 
     def save(self):
@@ -45,6 +47,7 @@ class Learner:
             "results": self.results[-200:],
             "threshold_adj": self.threshold_adj,
             "sector_stats": {k: v[-50:] for k, v in self.sector_stats.items()},
+            "exit_stats": {k: v[-50:] for k, v in self.exit_stats.items()},
         }
         try:
             STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -58,14 +61,20 @@ class Learner:
     def weight(self, key):
         return self.weights.get(key, 1.0)
 
-    def record(self, keys, win, pnl_pct=0.0, sector=None):
-        """Взвешенное обучение + запись в секторную статистику."""
+    def record(self, keys, win, pnl_pct=0.0, sector=None,
+               exit_type=None, runner_bonus=0.0):
+        """Одна запись на позицию (TP1+финал объединены в paper_exchange)."""
         self.results.append(1 if win else 0)
         self.results = self.results[-200:]
         if sector:
             hist = self.sector_stats.setdefault(sector, [])
             hist.append(round(pnl_pct, 2))
             self.sector_stats[sector] = hist[-50:]
+        if exit_type:
+            eh = self.exit_stats.setdefault(exit_type, [])
+            eh.append(round(pnl_pct, 2))
+            self.exit_stats[exit_type] = eh[-50:]
+
         abs_pnl = abs(pnl_pct)
         if abs_pnl >= 3.0:
             delta = 0.10 if win else -0.10
@@ -73,15 +82,17 @@ class Learner:
             delta = 0.05 if win else -0.05
         else:
             delta = 0.03 if win else -0.03
+        # ПРЕБЕЖКА: остаток убежал >5% выше TP1 -> бонус к весам
+        if runner_bonus > 5.0:
+            delta += 0.05
         for k in keys:
             if k in self.weights:
                 self.weights[k] = round(min(1.7, max(0.3, self.weights[k] + delta)), 3)
         self.save()
         logger.info(f"learner: win={win} pnl={pnl_pct:+.2f}% delta={delta:+.2f} "
-                    f"keys={keys} sector={sector}")
+                    f"exit={exit_type} runner={runner_bonus:.1f}% keys={keys} sector={sector}")
 
     def sector_bias(self, sector):
-        """Бонус/штраф к score по истории сектора: −1.0…+1.0 (нужно ≥3 сделок)."""
         hist = self.sector_stats.get(sector) or []
         if len(hist) < 3:
             return 0.0
@@ -95,6 +106,7 @@ class Learner:
         self.results = []
         self.threshold_adj = 0.0
         self.sector_stats = {}
+        self.exit_stats = {}
         self.save()
         logger.info("learner: опыт сброшен")
 
@@ -102,6 +114,7 @@ class Learner:
         self.results = []
         self.threshold_adj = 0.0
         self.sector_stats = {}
+        self.exit_stats = {}
         self.save()
         logger.info("learner: статистика сброшена (веса сохранены)")
 
@@ -109,20 +122,19 @@ class Learner:
         last = self.results[-20:]
         return (sum(last) / len(last), len(last)) if last else (0.0, 0)
 
-    # --- АДАПТИВНАЯ СТРАТЕГИЯ: ДРОБНАЯ СЕТКА (шаг 0.5, диапазон 5.0–9.5) ---
+    # --- АДАПТИВ: дробная сетка 0.5, диапазон порога 5.0-9.5 ---
     def risk_mode(self, profit_factor, max_dd_pct, total_trades=0):
-        """Возвращает (mode_name, дробный сдвиг порога)."""
         adj = 0.0
         enough = total_trades >= 5
         if enough and profit_factor is not None:
             if profit_factor < 0.5:
-                adj += 1.5          # STRICT
+                adj += 1.5
             elif profit_factor < 1.0:
-                adj += 0.5          # CAUTIOUS
+                adj += 0.5
             elif profit_factor > 1.5 and max_dd_pct and max_dd_pct < 8:
-                adj -= 0.5          # AGGRESSIVE
+                adj -= 0.5
         if max_dd_pct and max_dd_pct > 15:
-            adj += 0.5              # защита капитала
+            adj += 0.5
         if adj >= 1.5:
             mode = "STRICT"
         elif adj >= 0.5:
