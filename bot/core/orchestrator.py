@@ -342,9 +342,9 @@ async def run_cycle():
         logger.info("Медвежий рынок — новые покупки отключены (умный риск)")
 
     equity = paper.equity(tickers)
-    max_positions, sec_lim, other_lim = portfolio_limits(equity)
+    sec_lim, other_lim = portfolio_limits(equity)
     logger.info(f"PORTFOLIO LIMITS: equity={equity:.0f} | "
-                f"max_positions={max_positions} | sector={sec_lim} | other={other_lim}")
+                f"лимит на сектор={sec_lim} | лимит Other={other_lim} | всего позиций: без лимита")
 
     if paper.usdt < 10 and candidates and paper.positions:
         best = candidates[0]
@@ -369,17 +369,7 @@ async def run_cycle():
         kind = cand.get("kind", "core")
         sector = cand.get("sector", "Other")
 
-        # АДАПТИВНЫЙ ЛИМИТ ПОРТФЕЛЯ ПО БАЛАНСУ
-        open_count = len(paper.positions) + len(paper.orders)
-        if open_count >= max_positions:
-            logger.info(f"{sym}: пропущен — портфель полон ({open_count}/{max_positions})")
-            continue
-
-        # Дополнительная проверка: если позиций БОЛЬШЕ лимита (старые позиции), не добавляем
-        if len(paper.positions) >= max_positions:
-            logger.info(f"{sym}: пропущен — слишком много открытых позиций ({len(paper.positions)}/{max_positions})")
-            continue
-
+        # АДАПТИВНЫЙ ЛИМИТ НА СЕКТОР (общее число позиций ограничено только деньгами)
         lim = other_lim if sector == "Other" else sec_lim
         sector_count = sum(
             1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector
@@ -388,7 +378,7 @@ async def run_cycle():
             logger.info(f"{sym}: пропущен — сектор {sector} переполнен ({sector_count}/{lim})")
             continue
 
-        # ЛИМИТ САТЕЛЛИТОВ
+        # ЛИМИТ САТЕЛЛИТОВ: суммарно не более 20% equity
         if kind == "satellite":
             sat_exposure = sum(
                 p["qty"] * tickers.get(s, {}).get("last", 0)
