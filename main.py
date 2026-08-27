@@ -19,6 +19,7 @@ from bot.core.remote_state import ensure_branch
 from bot.services.reports import build_report
 from bot.strategy.scanner import SCAN_SUMMARY, FILTERED_BY_NEWS, get_regime, threshold
 from bot.strategy.learner import learner
+from bot.news.cmc import sector_of
 from bot.utils.format import fmt_price, fmt_usdt, fmt_pct, fmt_sym
 
 _app = None
@@ -288,7 +289,7 @@ async def cmd_help(update, context):
         "/pause — пауза (ордера запомнить и снять) · с подтверждением\n"
         "/resume — возобновить (ордера вернуть) · с подтверждением\n"
         "/exitall — остановить и продать всё · с подтверждением\n"
-        "/learn — показать обучение: веса сигналов и winrate\n"
+        "/learn — показать обучение: веса сигналов, winrate и секторная аналитика\n"
         "/resetlearn — сбросить опыт обучения в ноль · с подтверждением\n"
         "/resetstats — сбросить только торговую статистику · с подтверждением\n"
         "/news — статус новостной аналитики (CMC + RSS)\n"
@@ -321,12 +322,27 @@ async def cmd_learn(update, context):
     wr, n = learner.winrate()
     lines = ["🧠 ОБУЧЕНИЕ БОТА", ""]
     lines.append(f"Winrate: {wr:.0%} (последних сделок: {n})")
-    lines.append(f"Строгость входа: +{learner.threshold_adj}")
+    lines.append(f"Строгость входа: {learner.threshold_adj:+d}")
     lines.append("")
     lines.append("Веса сигналов:")
     for k, v in sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True):
         bar = "▮" * max(1, int(round(v * 5)))
         lines.append(f"   {k}: {v:.2f} {bar}")
+    lines.append("")
+    lines.append("Секторная аналитика:")
+    if learner.sector_stats:
+        rows = []
+        for s, hist in learner.sector_stats.items():
+            if not hist:
+                continue
+            swr = sum(1 for p in hist if p > 0) / len(hist)
+            avg = sum(hist) / len(hist)
+            rows.append((s, swr, len(hist), avg, learner.sector_bias(s)))
+        rows.sort(key=lambda r: r[1], reverse=True)
+        for s, swr, cnt, avg, bias in rows[:8]:
+            lines.append(f"   {s}: {swr:.0%} ({cnt}) · ср. {avg:+.2f}% · бонус {bias:+.2f}")
+    else:
+        lines.append("   (пока нет данных по секторам)")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -407,7 +423,8 @@ async def cmd_status(update, context):
                 pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
                 tp1 = " · TP1✅" if pos.get("tp1_done") else ""
                 kind_tag = " 🛰" if pos.get("kind") == "satellite" else " 🏛"
-                msg.append(f"   • {fmt_sym(sym)} · {fmt_pct(pnl_pct)}{tp1}{kind_tag}")
+                sector_tag = pos.get("sector") or sector_of(sym[:-4])
+                msg.append(f"   • {fmt_sym(sym)} · {fmt_pct(pnl_pct)}{tp1}{kind_tag} · 🧭 {sector_tag}")
                 msg.append(f"      💼 Вес: {fmt_usdt(val)} USDT ({w:.1f}% портфеля)")
                 msg.append(f"      📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)}")
                 msg.append(f"      🎯 {fmt_price(pos['tp'])} | 🛡 {fmt_price(pos['sl'])}")
@@ -425,9 +442,10 @@ async def cmd_status(update, context):
                 val = o["qty"] * o["price"]
                 w = val / eq * 100 if eq else 0
                 kind_tag = " 🛰" if o.get("kind") == "satellite" else " 🏛"
+                sector_tag = o.get("sector") or sector_of(o["symbol"][:-4])
                 msg.append(
                     f"   • {fmt_sym(o['symbol'])}: {fmt_usdt(val)} USDT "
-                    f"({w:.1f}%) @ {fmt_price(o['price'])}{kind_tag}"
+                    f"({w:.1f}%) @ {fmt_price(o['price'])}{kind_tag} · 🧭 {sector_tag}"
                 )
                 msg.append(f"      🎯 {fmt_price(o['tp'])} | 🛡 {fmt_price(o['sl'])}")
         else:
@@ -505,7 +523,7 @@ async def cmd_status(update, context):
         msg.append("")
         msg.append(f"₿ BTC: {fmt_price(btc)} $ · {regime_emoji} {regime_text}")
         msg.append(f"🎯 Порог входа сейчас: {threshold(regime)} "
-                   f"(режим рынка: {regime_text}, строгость +{learner.threshold_adj})")
+                   f"(режим рынка: {regime_text}, строгость {learner.threshold_adj:+d})")
         if SCAN_SUMMARY.get("text"):
             msg.append(f"🔎 Сканирование (посл. цикл): {SCAN_SUMMARY['text']}")
         msg.append(f"🧠 Обучение: {learner.summary()}")
