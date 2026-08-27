@@ -232,6 +232,12 @@ async def scan(regime, tickers, limit=5):
         kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
         sector = sectors_map.get(sym[:-4], "Other")
 
+        # СЕКТОРНОЕ САМООБУЧЕНИЕ: бонус/штраф по истории сектора
+        bias = learner.sector_bias(sector)
+        if bias:
+            score += bias
+            reasons.append(f"сектор {sector}: {bias:+.2f}")
+
         scored.append({"symbol": sym, "score": score, "reasons": reasons,
                        "reason_keys": keys, "atr": a, "last": last_price,
                        "liquidity": tickers[sym]["quote_volume"],
