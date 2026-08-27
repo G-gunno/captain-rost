@@ -174,7 +174,7 @@ class PaperExchange:
         return results
 
     def sell_partial(self, sym, qty_part, price, reason):
-        """Частичный выход TP1: НЕ пишет в learner — опыт запишется один раз на финале."""
+        """Частичный выход TP1: помечается partial=True — не входит в счётчик сделок."""
         pos = self.positions.get(sym)
         if not pos:
             return None
@@ -186,7 +186,6 @@ class PaperExchange:
         pnl = (proceeds - fee_sell) - (cost_part + fee_buy)
         pnl_pct = pnl / (cost_part + fee_buy) * 100 if cost_part else 0.0
 
-        # Накапливаем частичный PnL для объединения на финальном выходе
         pos["partial_pnl"] = pos.get("partial_pnl", 0.0) + pnl
         pos["partial_cost"] = pos.get("partial_cost", 0.0) + (cost_part + fee_buy)
         pos["tp1_price"] = price
@@ -201,7 +200,7 @@ class PaperExchange:
         pos["qty"] -= qty_part
         self.realized.append({
             "symbol": sym, "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 2),
-            "reason": reason, "time": int(time.time()),
+            "reason": reason, "time": int(time.time()), "partial": True,
         })
         self.trades.append({
             "side": "Sell(part)", "symbol": sym, "qty": qty_part,
@@ -214,7 +213,7 @@ class PaperExchange:
         }
 
     def _sell(self, sym, price, reason):
-        """Финальный выход: объединяет TP1+остаток в ОДНУ запись learner."""
+        """Финальный выход: одна запись learner + позиция целиком в realized."""
         pos = self.positions.pop(sym)
         proceeds = pos["qty"] * price
         cost = pos["qty"] * pos["avg"]
@@ -223,14 +222,12 @@ class PaperExchange:
         pnl_final = (proceeds - fee_sell) - (cost + fee_buy)
         pnl_final_pct = pnl_final / (cost + fee_buy) * 100 if (cost + fee_buy) else 0.0
 
-        # Объединённый результат всей позиции (TP1 + остаток)
         partial_pnl = pos.get("partial_pnl", 0.0)
         partial_cost = pos.get("partial_cost", 0.0)
         total_pnl = partial_pnl + pnl_final
         total_cost = partial_cost + (cost + fee_buy)
         total_pnl_pct = total_pnl / total_cost * 100 if total_cost else pnl_final_pct
 
-        # Тип выхода для аналитики
         if reason.startswith("TP"):
             exit_type = "TP1_RUN" if pos.get("tp1_done") else "TP"
         elif reason.startswith("SL"):
@@ -238,7 +235,6 @@ class PaperExchange:
         else:
             exit_type = "EARLY"
 
-        # ПРОБЕЖКА: насколько остаток убежал выше TP1
         runner_bonus = 0.0
         tp1_price = pos.get("tp1_price")
         max_price = pos.get("max_price", 0.0)
@@ -259,8 +255,9 @@ class PaperExchange:
             transferred = round(pnl_final * 0.62, 4)
             self.usdt -= transferred
             self.funding += transferred
+        # В realized — результат ПОЗИЦИИ ЦЕЛИКОМ (TP1 + остаток)
         self.realized.append({
-            "symbol": sym, "pnl": round(pnl_final, 4), "pnl_pct": round(pnl_final_pct, 2),
+            "symbol": sym, "pnl": round(total_pnl, 4), "pnl_pct": round(total_pnl_pct, 2),
             "reason": reason, "time": int(time.time()), "exit_type": exit_type,
         })
         self.trades.append({
@@ -297,10 +294,14 @@ class PaperExchange:
         return eq
 
     def get_metrics(self, prices=None):
+        """Метрики по ЗАКРЫТЫМ ПОЗИЦИЯМ (частичные TP1 не входят в счётчик сделок)."""
         if prices is None:
             prices = {}
-        wins = [r for r in self.realized if r["pnl"] > 0]
-        losses = [r for r in self.realized if r["pnl"] <= 0]
+        finals = [r for r in self.realized if not r.get("partial")]
+        partial_count = len(self.realized) - len(finals)
+
+        wins = [r for r in finals if r["pnl"] > 0]
+        losses = [r for r in finals if r["pnl"] <= 0]
         sum_win = sum(r["pnl"] for r in wins)
         sum_loss = abs(sum(r["pnl"] for r in losses))
         if sum_loss == 0:
@@ -311,7 +312,7 @@ class PaperExchange:
         eq = self.start_usdt
         peak = eq
         max_dd = 0.0
-        for r in self.realized:
+        for r in finals:
             eq += r["pnl"]
             if eq > peak:
                 peak = eq
@@ -320,7 +321,7 @@ class PaperExchange:
                 if dd > max_dd:
                     max_dd = dd
 
-        total_trades = len(self.realized)
+        total_trades = len(finals)
         if total_trades > 0:
             avg_win = sum_win / len(wins) if wins else 0
             avg_loss = sum_loss / len(losses) if losses else 0
@@ -330,7 +331,7 @@ class PaperExchange:
         else:
             expectancy = 0
 
-        total_pnl = sum(r["pnl"] for r in self.realized)
+        total_pnl = sum(r["pnl"] for r in finals)
         recovery_factor = total_pnl / max_dd if max_dd > 0 else 0
 
         wr, n = learner.winrate()
@@ -341,6 +342,7 @@ class PaperExchange:
             "win_count": len(wins),
             "loss_count": len(losses),
             "total_trades": total_trades,
+            "partial_count": partial_count,
             "total_pnl": total_pnl,
             "expectancy": expectancy,
             "recovery_factor": recovery_factor,
