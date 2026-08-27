@@ -31,12 +31,12 @@ def portfolio_limits(equity):
     if equity <= 500:
         return 4, 3
     if equity <= 1000:
-        return 6, 4
+        return 6, 8   # Other увеличен с 4 до 8
     if equity <= 2500:
-        return 8, 5
+        return 8, 10  # Other увеличен с 5 до 10
     if equity <= 5000:
-        return 10, 6
-    return 12, 8
+        return 10, 12 # Other увеличен с 6 до 12
+    return 12, 15     # Other увеличен с 8 до 15
 
 
 def kelly_multiplier(realized):
