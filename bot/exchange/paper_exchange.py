@@ -27,6 +27,7 @@ class PaperExchange:
         self.realized = []
         self._last_upload = 0.0
         self._load()
+        self._migrate_sectors()
 
     def _load(self):
         data = None
@@ -48,6 +49,27 @@ class PaperExchange:
             self.realized = data.get("realized", [])
             logger.info(f"Paper state загружен: USDT={self.usdt:.2f}, позиций={len(self.positions)}")
 
+    def _migrate_sectors(self):
+        """Миграция: позициям и ордерам без сектора определяем сектор через sector_of."""
+        try:
+            from bot.news.cmc import sector_of
+        except ImportError:
+            return
+        migrated = 0
+        for sym, pos in self.positions.items():
+            if not pos.get("sector"):
+                base = sym[:-4] if sym.endswith("USDT") else sym
+                pos["sector"] = sector_of(base)
+                migrated += 1
+        for order in self.orders:
+            if not order.get("sector"):
+                base = order["symbol"][:-4] if order["symbol"].endswith("USDT") else order["symbol"]
+                order["sector"] = sector_of(base)
+                migrated += 1
+        if migrated:
+            logger.info(f"Миграция секторов: подтянуто {migrated} позиций/ордеров")
+            self.save()
+
     def save(self):
         payload = {
             "usdt": self.usdt,
@@ -65,6 +87,17 @@ class PaperExchange:
         if time.time() - self._last_upload > 60:
             self._last_upload = time.time()
             upload_state(REMOTE_PATH, payload)
+
+    def _resolve_sector(self, symbol, fallback_sector=None):
+        """Определяет сектор монеты: из fallback -> из sector_of -> Other."""
+        if fallback_sector:
+            return fallback_sector
+        try:
+            from bot.news.cmc import sector_of
+            base = symbol[:-4] if symbol.endswith("USDT") else symbol
+            return sector_of(base)
+        except Exception:
+            return "Other"
 
     def place_limit_buy(self, symbol, qty, price, tp, sl, score=0, reason_keys=None):
         order = {
@@ -109,7 +142,10 @@ class PaperExchange:
                     pos["score"] = order.get("score", 0)
                     pos["reason_keys"] = order.get("reason_keys", [])
                     pos["kind"] = order.get("kind", "core")
-                    pos["sector"] = order.get("sector", "Other")
+                    # ВАЖНО: определяем сектор, если не сохранён в ордере
+                    pos["sector"] = self._resolve_sector(
+                        order["symbol"], order.get("sector")
+                    )
                     pos["entry_time"] = int(time.time())
                     self.trades.append({
                         "side": "Buy",
@@ -149,9 +185,11 @@ class PaperExchange:
         pnl = (proceeds - fee_sell) - (cost_part + fee_buy)
         pnl_pct = pnl / (cost_part + fee_buy) * 100 if cost_part else 0.0
 
+        # Всегда определяем сектор (fallback к Other)
+        sector = pos.get("sector") or self._resolve_sector(sym)
         try:
             learner.record(pos.get("reason_keys", []), pnl > 0, pnl_pct,
-                           sector=pos.get("sector"))
+                           sector=sector)
         except Exception as e:
             logger.error(f"learner record error: {e}")
 
@@ -164,7 +202,7 @@ class PaperExchange:
         pos["qty"] -= qty_part
         self.realized.append({
             "symbol": sym, "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 2),
-            "reason": reason, "time": int(time.time()),
+            "reason": reason, "time": int(time.time()), "sector": sector,
         })
         self.trades.append({
             "side": "Sell(part)", "symbol": sym, "qty": qty_part,
@@ -174,6 +212,7 @@ class PaperExchange:
         return {
             "symbol": sym, "price": price, "pnl": pnl,
             "pnl_pct": pnl_pct, "reason": reason, "transferred": transferred,
+            "sector": sector,
         }
 
     def _sell(self, sym, price, reason):
@@ -185,9 +224,11 @@ class PaperExchange:
         pnl = (proceeds - fee_sell) - (cost + fee_buy)
         pnl_pct = pnl / (cost + fee_buy) * 100 if cost else 0.0
 
+        # Всегда определяем сектор (fallback к Other)
+        sector = pos.get("sector") or self._resolve_sector(sym)
         try:
             learner.record(pos.get("reason_keys", []), pnl > 0, pnl_pct,
-                           sector=pos.get("sector"))
+                           sector=sector)
         except Exception as e:
             logger.error(f"learner record error: {e}")
 
@@ -199,7 +240,7 @@ class PaperExchange:
             self.funding += transferred
         self.realized.append({
             "symbol": sym, "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 2),
-            "reason": reason, "time": int(time.time()),
+            "reason": reason, "time": int(time.time()), "sector": sector,
         })
         self.trades.append({
             "side": "Sell", "symbol": sym, "qty": pos["qty"],
@@ -209,6 +250,7 @@ class PaperExchange:
         return {
             "symbol": sym, "price": price, "pnl": pnl,
             "pnl_pct": pnl_pct, "reason": reason, "transferred": transferred,
+            "sector": sector,
         }
 
     def sell_all(self, prices):
