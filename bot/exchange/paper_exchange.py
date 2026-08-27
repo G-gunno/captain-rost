@@ -50,9 +50,6 @@ class PaperExchange:
             logger.info(f"Paper state загружен: USDT={self.usdt:.2f}, позиций={len(self.positions)}")
 
     def _migrate_sectors(self):
-        """Миграция: переопределяет sector у всех позиций/ордеров через sector_of.
-        Работает даже если раньше был записан "Other" как дефолт.
-        Переопределяет только если новый sector != Other (чтобы не сломать реальные Other)."""
         try:
             from bot.news.cmc import sector_of
         except ImportError:
@@ -61,15 +58,13 @@ class PaperExchange:
         for sym, pos in self.positions.items():
             base = sym[:-4] if sym.endswith("USDT") else sym
             new_sector = sector_of(base)
-            old_sector = pos.get("sector")
-            if new_sector and new_sector != old_sector:
+            if new_sector and new_sector != pos.get("sector"):
                 pos["sector"] = new_sector
                 migrated += 1
         for order in self.orders:
             base = order["symbol"][:-4] if order["symbol"].endswith("USDT") else order["symbol"]
             new_sector = sector_of(base)
-            old_sector = order.get("sector")
-            if new_sector and new_sector != old_sector:
+            if new_sector and new_sector != order.get("sector"):
                 order["sector"] = new_sector
                 migrated += 1
         if migrated:
@@ -97,7 +92,6 @@ class PaperExchange:
             upload_state(REMOTE_PATH, payload)
 
     def _resolve_sector(self, symbol, fallback_sector=None):
-        """Определяет сектор монеты: из fallback -> из sector_of -> Other."""
         if fallback_sector and fallback_sector != "Other":
             return fallback_sector
         try:
@@ -150,9 +144,8 @@ class PaperExchange:
                     pos["score"] = order.get("score", 0)
                     pos["reason_keys"] = order.get("reason_keys", [])
                     pos["kind"] = order.get("kind", "core")
-                    pos["sector"] = self._resolve_sector(
-                        order["symbol"], order.get("sector")
-                    )
+                    pos["sector"] = self._resolve_sector(order["symbol"], order.get("sector"))
+                    pos["max_price"] = order["price"]
                     pos["entry_time"] = int(time.time())
                     self.trades.append({
                         "side": "Buy",
@@ -181,6 +174,7 @@ class PaperExchange:
         return results
 
     def sell_partial(self, sym, qty_part, price, reason):
+        """Частичный выход TP1: НЕ пишет в learner — опыт запишется один раз на финале."""
         pos = self.positions.get(sym)
         if not pos:
             return None
@@ -192,12 +186,11 @@ class PaperExchange:
         pnl = (proceeds - fee_sell) - (cost_part + fee_buy)
         pnl_pct = pnl / (cost_part + fee_buy) * 100 if cost_part else 0.0
 
-        sector = self._resolve_sector(sym, pos.get("sector"))
-        try:
-            learner.record(pos.get("reason_keys", []), pnl > 0, pnl_pct,
-                           sector=sector)
-        except Exception as e:
-            logger.error(f"learner record error: {e}")
+        # Накапливаем частичный PnL для объединения на финальном выходе
+        pos["partial_pnl"] = pos.get("partial_pnl", 0.0) + pnl
+        pos["partial_cost"] = pos.get("partial_cost", 0.0) + (cost_part + fee_buy)
+        pos["tp1_price"] = price
+        pos["max_price"] = max(pos.get("max_price", 0.0), price)
 
         self.usdt += proceeds - fee_sell
         transferred = 0.0
@@ -208,7 +201,7 @@ class PaperExchange:
         pos["qty"] -= qty_part
         self.realized.append({
             "symbol": sym, "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 2),
-            "reason": reason, "time": int(time.time()), "sector": sector,
+            "reason": reason, "time": int(time.time()),
         })
         self.trades.append({
             "side": "Sell(part)", "symbol": sym, "qty": qty_part,
@@ -218,34 +211,57 @@ class PaperExchange:
         return {
             "symbol": sym, "price": price, "pnl": pnl,
             "pnl_pct": pnl_pct, "reason": reason, "transferred": transferred,
-            "sector": sector,
         }
 
     def _sell(self, sym, price, reason):
+        """Финальный выход: объединяет TP1+остаток в ОДНУ запись learner."""
         pos = self.positions.pop(sym)
         proceeds = pos["qty"] * price
         cost = pos["qty"] * pos["avg"]
         fee_buy = cost * self.FEE_PCT / 100
         fee_sell = proceeds * self.FEE_PCT / 100
-        pnl = (proceeds - fee_sell) - (cost + fee_buy)
-        pnl_pct = pnl / (cost + fee_buy) * 100 if cost else 0.0
+        pnl_final = (proceeds - fee_sell) - (cost + fee_buy)
+        pnl_final_pct = pnl_final / (cost + fee_buy) * 100 if (cost + fee_buy) else 0.0
+
+        # Объединённый результат всей позиции (TP1 + остаток)
+        partial_pnl = pos.get("partial_pnl", 0.0)
+        partial_cost = pos.get("partial_cost", 0.0)
+        total_pnl = partial_pnl + pnl_final
+        total_cost = partial_cost + (cost + fee_buy)
+        total_pnl_pct = total_pnl / total_cost * 100 if total_cost else pnl_final_pct
+
+        # Тип выхода для аналитики
+        if reason.startswith("TP"):
+            exit_type = "TP1_RUN" if pos.get("tp1_done") else "TP"
+        elif reason.startswith("SL"):
+            exit_type = "TP1_SL" if pos.get("tp1_done") else "SL"
+        else:
+            exit_type = "EARLY"
+
+        # ПРОБЕЖКА: насколько остаток убежал выше TP1
+        runner_bonus = 0.0
+        tp1_price = pos.get("tp1_price")
+        max_price = pos.get("max_price", 0.0)
+        if tp1_price and max_price > tp1_price:
+            runner_bonus = (max_price - tp1_price) / tp1_price * 100
 
         sector = self._resolve_sector(sym, pos.get("sector"))
         try:
-            learner.record(pos.get("reason_keys", []), pnl > 0, pnl_pct,
-                           sector=sector)
+            learner.record(pos.get("reason_keys", []), total_pnl > 0,
+                           total_pnl_pct, sector=sector,
+                           exit_type=exit_type, runner_bonus=runner_bonus)
         except Exception as e:
             logger.error(f"learner record error: {e}")
 
         self.usdt += proceeds - fee_sell
         transferred = 0.0
-        if pnl > 0:
-            transferred = round(pnl * 0.62, 4)
+        if pnl_final > 0:
+            transferred = round(pnl_final * 0.62, 4)
             self.usdt -= transferred
             self.funding += transferred
         self.realized.append({
-            "symbol": sym, "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 2),
-            "reason": reason, "time": int(time.time()), "sector": sector,
+            "symbol": sym, "pnl": round(pnl_final, 4), "pnl_pct": round(pnl_final_pct, 2),
+            "reason": reason, "time": int(time.time()), "exit_type": exit_type,
         })
         self.trades.append({
             "side": "Sell", "symbol": sym, "qty": pos["qty"],
@@ -253,9 +269,9 @@ class PaperExchange:
         })
         self.save()
         return {
-            "symbol": sym, "price": price, "pnl": pnl,
-            "pnl_pct": pnl_pct, "reason": reason, "transferred": transferred,
-            "sector": sector,
+            "symbol": sym, "price": price, "pnl": total_pnl,
+            "pnl_pct": total_pnl_pct, "reason": reason, "transferred": transferred,
+            "exit_type": exit_type, "runner_bonus": runner_bonus,
         }
 
     def sell_all(self, prices):
@@ -269,7 +285,6 @@ class PaperExchange:
         return results
 
     def reset_stats(self):
-        """Сбросить торговую статистику (историю закрытых сделок)."""
         self.realized = []
         self.trades = []
         self.save()
@@ -282,7 +297,6 @@ class PaperExchange:
         return eq
 
     def get_metrics(self, prices=None):
-        """Profit Factor, Max Drawdown, Expectancy, Recovery Factor."""
         if prices is None:
             prices = {}
         wins = [r for r in self.realized if r["pnl"] > 0]
