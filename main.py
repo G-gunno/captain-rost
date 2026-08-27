@@ -481,7 +481,11 @@ async def cmd_status(update, context):
         mode_emoji = {"NORMAL": "🟢", "CAUTIOUS": "🟡", "STRICT": "🔴", "AGGRESSIVE": "🚀"}.get(mode, "⚪")
 
         msg.append(f"📊 <b>Метрики</b> · {mode_emoji} {mode}")
-        msg.append(f"🧾 {metrics['total_trades']} сделок (✅ {metrics['win_count']} / ❌ {metrics['loss_count']})")
+        msg.append(
+            f"🧾 {metrics['total_trades']} позиций "
+            f"(✅ {metrics['win_count']} / ❌ {metrics['loss_count']}) · "
+            f"🎯 частичных TP1: {metrics['partial_count']}"
+        )
 
         pf = metrics["profit_factor"]
         if pf is None:
@@ -517,7 +521,9 @@ async def cmd_status(update, context):
         if SCAN_SUMMARY.get("text"):
             msg.append(f"🔎 {_html.escape(SCAN_SUMMARY['text'])}")
         wr, n = learner.winrate()
-        msg.append(f"🧠 wr {wr:.0%} ({n}) · строгость {learner.threshold_adj:+.1f}")
+        top = sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        top_txt = " · ".join(f"{k} {v:.2f}" for k, v in top)
+        msg.append(f"🧠 wr {wr:.0%} ({n}) · топ: {top_txt} · строгость {learner.threshold_adj:+.1f}")
 
         await reply(update, "\n".join(msg))
     except Exception as e:
