@@ -12,7 +12,7 @@ from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sent
 SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
 FILTERED_BY_NEWS = []
 
-SAT_ATR_PCT = 1.2
+SAT_ATR_PCT = 1.2  # порог волатильности: выше — монета идёт в сателлиты
 
 _instruments_cache = {"data": None, "ts": 0}
 
@@ -72,6 +72,7 @@ async def get_regime():
 
 
 async def fetch_new_listings():
+    """Новые листинги через Bybit API (launchTime) — надёжный источник. Кэш 1 час."""
     now = time.time()
     if _instruments_cache["data"] is not None and now - _instruments_cache["ts"] < 3600:
         raw = _instruments_cache["data"]
@@ -198,6 +199,7 @@ async def scan(regime, tickers, limit=5):
     pool = list(dict.fromkeys(by_vol + by_chg + by_momentum + by_volatility +
                               [s for s, _ in by_listings]))
 
+    # АВТО-СЕКТОРА: ручной словарь -> кэш -> теги CMC
     sectors_map = await get_sectors_for_pool(list({s[:-4] for s in pool}))
 
     news_items = await fetch_news_cache()
@@ -228,6 +230,7 @@ async def scan(regime, tickers, limit=5):
         kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
         sector = sectors_map.get(sym[:-4], "Other")
 
+        # СЕКТОРНОЕ САМООБУЧЕНИЕ: бонус/штраф по истории сектора
         bias = learner.sector_bias(sector)
         if bias:
             score += bias
@@ -242,12 +245,19 @@ async def scan(regime, tickers, limit=5):
     scored.sort(key=lambda c: c["score"], reverse=True)
 
     thr = threshold(regime)
-    SCAN_SUMMARY["text"] = " · ".join(
-        f"{c['symbol']} {c['score']:.1f}/{thr:g}" for c in scored[:3]
-    ) or "сигналов нет"
+    # Топ-5 в единой стилистике (HTML для Telegram) + plain для логов
+    parts_html = []
+    parts_plain = []
+    for c in scored[:5]:
+        k_tag = "🛰" if c.get("kind") == "satellite" else "🏛"
+        parts_html.append(
+            f"{k_tag} <b>{c['symbol'][:-4]}</b> · <i>{c['sector']}</i> · {c['score']:.1f}/{thr:g}"
+        )
+        parts_plain.append(f"{c['symbol']} {c['score']:.1f}/{thr:g}")
+    SCAN_SUMMARY["text"] = " | ".join(parts_html) or "сигналов нет"
     SCAN_SUMMARY["thr"] = thr
     SCAN_SUMMARY["ts"] = time.time()
-    logger.info(f"Scan top: {SCAN_SUMMARY['text']}")
+    logger.info(f"Scan top: {' | '.join(parts_plain) or 'сигналов нет'}")
 
     new_set = set(s for s, _ in by_listings)
     candidates = []
