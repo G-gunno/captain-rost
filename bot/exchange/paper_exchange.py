@@ -108,6 +108,8 @@ class PaperExchange:
                     pos["max_sl"] = order["sl"]
                     pos["score"] = order.get("score", 0)
                     pos["reason_keys"] = order.get("reason_keys", [])
+                    pos["kind"] = order.get("kind", "core")
+                    pos["sector"] = order.get("sector", "Other")
                     pos["entry_time"] = int(time.time())
                     self.trades.append({
                         "side": "Buy",
@@ -148,7 +150,8 @@ class PaperExchange:
         pnl_pct = pnl / (cost_part + fee_buy) * 100 if cost_part else 0.0
 
         try:
-            learner.record(pos.get("reason_keys", []), pnl > 0, pnl_pct)
+            learner.record(pos.get("reason_keys", []), pnl > 0, pnl_pct,
+                           sector=pos.get("sector"))
         except Exception as e:
             logger.error(f"learner record error: {e}")
 
@@ -183,7 +186,8 @@ class PaperExchange:
         pnl_pct = pnl / (cost + fee_buy) * 100 if cost else 0.0
 
         try:
-            learner.record(pos.get("reason_keys", []), pnl > 0, pnl_pct)
+            learner.record(pos.get("reason_keys", []), pnl > 0, pnl_pct,
+                           sector=pos.get("sector"))
         except Exception as e:
             logger.error(f"learner record error: {e}")
 
@@ -243,7 +247,6 @@ class PaperExchange:
         else:
             profit_factor = sum_win / sum_loss
 
-        # Max Drawdown
         eq = self.start_usdt
         peak = eq
         max_dd = 0.0
@@ -256,7 +259,6 @@ class PaperExchange:
                 if dd > max_dd:
                     max_dd = dd
 
-        # Expectancy (математическое ожидание на сделку)
         total_trades = len(self.realized)
         if total_trades > 0:
             avg_win = sum_win / len(wins) if wins else 0
@@ -267,7 +269,6 @@ class PaperExchange:
         else:
             expectancy = 0
 
-        # Recovery Factor (скорость восстановления от просадок)
         total_pnl = sum(r["pnl"] for r in self.realized)
         recovery_factor = total_pnl / max_dd if max_dd > 0 else 0
 
