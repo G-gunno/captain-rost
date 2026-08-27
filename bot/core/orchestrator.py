@@ -40,6 +40,11 @@ def pair_html(sym, sector, kind_tag="🏛"):
     return f"{kind_tag} <b>{sym}</b> · <i>{sector}</i>"
 
 
+def funding_line(x):
+    """Строка про накопления — только если реально пополнились."""
+    return f"\n🏦 в накопления {usd(x)}" if x > 0 else ""
+
+
 def set_notifier(cb):
     global _notify_cb
     _notify_cb = cb
@@ -202,6 +207,7 @@ async def run_cycle():
                 await notify(
                     f"🚨 <b>Экстренный выход</b> · <b>{ex['symbol'][:-4]}</b> · "
                     f"{pnl_emoji(ex['pnl_pct'])} {ex['pnl']:+.2f}% · {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
+                    f"{funding_line(ex.get('transferred', 0))}"
                 )
             await notify("🚨 <b>Риск-менеджмент</b>: резкий дамп рынка — всё в $.")
         return
@@ -234,15 +240,17 @@ async def run_cycle():
             if pnl_pct >= MIN_EARLY_EXIT_PCT:
                 ex = paper._sell(sym, last, "НОВОСТИ ⚠️")
                 await notify(
-                    f"💸 <b>Продажа</b> · <b>{sym[:-4]}</b> · <i>{ex.get('sector', 'Other')}</i> · новостной выход ⚠️ {neg}\n"
-                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
+                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'))} · новостной выход ⚠️ {neg}\n"
+                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
+                    f"{funding_line(ex.get('transferred', 0))}"
                 )
                 continue
             elif pnl_pct <= 0:
                 ex = paper._sell(sym, last, "НОВОСТИ 🛑")
                 await notify(
-                    f"💸 <b>Продажа</b> · <b>{sym[:-4]}</b> · <i>{ex.get('sector', 'Other')}</i> · новостная резка 🛑 {neg}\n"
-                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
+                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'))} · новостная резка 🛑 {neg}\n"
+                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
+                    f"{funding_line(ex.get('transferred', 0))}"
                 )
                 continue
 
@@ -254,11 +262,13 @@ async def run_cycle():
             pos["sl"] = max(pos["sl"], pos["avg"])
             pos["tp"] = round(pos["tp"] + 1.5 * a, 10)
             paper.save()
-            funding_txt = f" · 🏦 +{usd(ex['transferred'])}" if ex["transferred"] > 0 else ""
+            kind_tag = "🛰" if pos.get("kind") == "satellite" else "🏛"
+            sector = pos.get("sector") or "Other"
             await notify(
-                f"🎯 <b>TP1</b> · <b>{sym[:-4]}</b> · 50% · 🔥 {fmt_pct(ex['pnl_pct'])}\n"
-                f"💵 {usd(ex['pnl'])}{funding_txt} · остаток бежит\n"
-                f"🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])}"
+                f"🎯 <b>TP1</b> · {pair_html(sym[:-4], sector, kind_tag)} · 50%\n"
+                f"📊 {fmt_price(ex['price'])} · 🔥 {fmt_pct(ex['pnl_pct'])} · 💵 прибыль {usd(ex['pnl'])}"
+                f"{funding_line(ex.get('transferred', 0))}\n"
+                f"остаток бежит · 🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])} (безубыток)"
             )
             continue
 
@@ -267,15 +277,17 @@ async def run_cycle():
             if pnl_pct >= MIN_EARLY_EXIT_PCT:
                 ex = paper._sell(sym, last, "СИГНАЛ ИСЯК 📉")
                 await notify(
-                    f"💸 <b>Продажа</b> · <b>{sym[:-4]}</b> · <i>{ex.get('sector', 'Other')}</i> · сигнал ослаб 📉\n"
-                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
+                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'))} · сигнал ослаб 📉\n"
+                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
+                    f"{funding_line(ex.get('transferred', 0))}"
                 )
                 continue
             if trend_broken and score_pos <= thr - 1 and pnl_pct <= -0.5:
                 ex = paper._sell(sym, last, "ИНВАЛИДАЦИЯ 🛑")
                 await notify(
-                    f"💸 <b>Продажа</b> · <b>{sym[:-4]}</b> · <i>{ex.get('sector', 'Other')}</i> · резка убытка 🛑\n"
-                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
+                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'))} · резка убытка 🛑\n"
+                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
+                    f"{funding_line(ex.get('transferred', 0))}"
                 )
                 continue
 
@@ -302,16 +314,16 @@ async def run_cycle():
             logger.info(f"SL поднят {sym} -> {pos['sl']}")
         paper.save()
 
-    # 5. Выходы остатка по TP/SL: 💸 Продажа с ценой
+    # 5. Выходы остатка по TP/SL: 💸 Продажа с ценой и накоплениями
     for ex in paper.check_exits(tickers):
         runner_txt = ""
         if ex.get("runner_bonus", 0) > 5:
             runner_txt = f"\n🏃 пробежка +{ex['runner_bonus']:.1f}% выше TP1"
         ind = "🔥" if ex.get("exit_type") == "TP1_RUN" else pnl_emoji(ex["pnl_pct"])
-        funding_txt = f"\n🏦 +{usd(ex['transferred'])} в накопления" if ex.get("transferred", 0) > 0 else ""
         await notify(
-            f"💸 <b>Продажа</b> · <b>{ex['symbol'][:-4]}</b> · <i>{ex.get('sector', 'Other')}</i> · {ex['reason']}\n"
-            f"{ind} {fmt_pct(ex['pnl_pct'])} · {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{runner_txt}{funding_txt}"
+            f"💸 <b>Продажа</b> · {pair_html(ex['symbol'][:-4], ex.get('sector', 'Other'))} · {ex['reason']}\n"
+            f"{ind} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{runner_txt}"
+            f"{funding_line(ex.get('transferred', 0))}"
         )
 
     # 6. Неисполненные ордера
@@ -375,6 +387,7 @@ async def run_cycle():
                 await notify(
                     f"🔄 <b>Ротация</b> · <b>{weakest_sym[:-4]}</b> → <b>{best['symbol'][:-4]}</b>\n"
                     f"{pnl_emoji(pnl_pct)} {fmt_pct(pnl_pct)} · ⭐ {best['score']:.1f}"
+                    f"{funding_line(ex.get('transferred', 0)) if False else ''}"
                 )
 
     for cand in candidates:
@@ -398,12 +411,12 @@ async def run_cycle():
                 if (p.get("sector") or "Other") == sector
             ]
             rotated = False
-            
+
             # Диагностика: какие монеты в этом секторе
             if sector == "Other" and sector_positions:
                 other_symbols = [s[:-4] for s, _ in sector_positions]
                 logger.info(f"Other позиции: {', '.join(other_symbols)}")
-            
+
             if sector_positions:
                 weakest_sym, weakest_pos = min(
                     sector_positions, key=lambda kv: kv[1].get("score", 0)
@@ -412,32 +425,29 @@ async def run_cycle():
                 t_weak = tickers.get(weakest_sym)
                 if t_weak:
                     weak_pnl = (t_weak["last"] - weakest_pos["avg"]) / weakest_pos["avg"] * 100
-                    
+
                     # Для Other — более агрессивная ротация
                     if sector == "Other":
-                        # Other: продаём если новый сильнее на 1.0+ и позиция не раннер
-                        # Допускаем минус до -2% (вместо -0.5%)
                         can_rotate = (
                             cand["score"] >= weakest_score + 1.0
                             and not weakest_pos.get("tp1_done")
                             and weak_pnl >= -2.0
                         )
                     else:
-                        # Обычные сектора: строгие условия
                         can_rotate = (
                             cand["score"] >= weakest_score + 1.5
                             and not weakest_pos.get("tp1_done")
                             and weak_pnl >= -0.5
                             and weak_pnl < 2.0
                         )
-                    
+
                     if can_rotate:
                         ex = paper._sell(weakest_sym, t_weak["last"], "РОТАЦИЯ СЕКТОРА 🔄")
                         sector_count -= 1
                         await notify(
                             f"🔄 <b>Ротация сектора</b> {sector} · <b>{weakest_sym[:-4]}</b> → <b>{sym[:-4]}</b>\n"
                             f"{pnl_emoji(weak_pnl)} {fmt_pct(weak_pnl)} · ⭐ {weakest_score:.1f} → {cand['score']:.1f}\n"
-                            f"{usd(ex['pnl'])}"
+                            f"💵 {usd(ex['pnl'])}{funding_line(ex.get('transferred', 0))}"
                         )
                         logger.info(f"{sym}: ротация сектора — продан {weakest_sym} "
                                     f"(score {weakest_score:.1f}, pnl {weak_pnl:+.2f}%) "
