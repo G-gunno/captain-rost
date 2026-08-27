@@ -375,9 +375,11 @@ async def run_cycle():
     equity = paper.equity(tickers)
     sec_lim, other_lim = portfolio_limits(equity)
     sat_limit = learner.satellite_limit()
+    sat_size = learner.satellite_size_pct()
     logger.info(f"PORTFOLIO LIMITS: equity={equity:.0f} | "
                 f"лимит на сектор={sec_lim} | лимит Other={other_lim} | "
-                f"лимит сателлитов={sat_limit:.0f}% | всего позиций: без лимита")
+                f"лимит сателлитов={sat_limit:.0f}% · размер сателлита={sat_size:.1f}% | "
+                f"всего позиций: без лимита")
 
     if paper.usdt < 10 and candidates and paper.positions:
         best = candidates[0]
@@ -500,7 +502,8 @@ async def run_cycle():
             continue
 
         size = buy_size(equity, cand["score"], cand["liquidity"], paper.usdt,
-                        sl_dist, kind=kind, realized=paper.realized)
+                        sl_dist, kind=kind, realized=paper.realized,
+                        sat_size_pct=sat_size)
         if size < 5:
             continue
 
