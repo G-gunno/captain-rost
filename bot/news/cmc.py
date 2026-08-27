@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import asyncio
 from pathlib import Path
 
 import httpx
@@ -109,6 +110,10 @@ async def get_sectors_for_pool(bases):
             need.append(b)
     if not need:
         return result
+    
+    # Защита от rate limit: ждём 1 секунду перед запросом
+    await asyncio.sleep(1.0)
+    
     try:
         key = os.getenv("CMC_API_KEY", "").strip()
         headers = {"X-CMC_PRO_API_KEY": key} if key else {}
