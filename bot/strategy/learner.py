@@ -13,13 +13,13 @@ KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "news_pos", "hyp
 
 
 class Learner:
-    """Самообучение: веса сигналов + адаптивный режим + секторная аналитика."""
+    """Самообучение: веса сигналов + адаптивный режим (дробная сетка 0.5) + секторная аналитика."""
 
     def __init__(self):
         self.weights = {k: 1.0 for k in KEYS}
         self.results = []
-        self.threshold_adj = 0
-        self.sector_stats = {}  # {сектор: [pnl% ...]} — секторная ротация
+        self.threshold_adj = 0.0
+        self.sector_stats = {}
         self._last_upload = 0.0
         self._load()
 
@@ -35,7 +35,7 @@ class Learner:
         if data:
             self.weights.update(data.get("weights", {}))
             self.results = data.get("results", [])
-            self.threshold_adj = data.get("threshold_adj", 0)
+            self.threshold_adj = float(data.get("threshold_adj", 0))
             self.sector_stats = data.get("sector_stats", {})
             logger.info("learner: опыт загружен")
 
@@ -91,18 +91,16 @@ class Learner:
         return round(max(-1.0, min(1.0, bias)), 2)
 
     def reset(self):
-        """Полный сброс: веса + статистика + порог + сектора."""
         self.weights = {k: 1.0 for k in KEYS}
         self.results = []
-        self.threshold_adj = 0
+        self.threshold_adj = 0.0
         self.sector_stats = {}
         self.save()
         logger.info("learner: опыт сброшен")
 
     def reset_stats(self):
-        """Сбросить статистику (results, порог, сектора), веса-знания сохранить."""
         self.results = []
-        self.threshold_adj = 0
+        self.threshold_adj = 0.0
         self.sector_stats = {}
         self.save()
         logger.info("learner: статистика сброшена (веса сохранены)")
@@ -111,24 +109,25 @@ class Learner:
         last = self.results[-20:]
         return (sum(last) / len(last), len(last)) if last else (0.0, 0)
 
-    # --- АДАПТИВНАЯ СТРАТЕГИЯ (СМЯГЧЁННАЯ, БЕЗ МЁРТВОЙ ПЕТЛИ) ---
+    # --- АДАПТИВНАЯ СТРАТЕГИЯ: ДРОБНАЯ СЕТКА (шаг 0.5, диапазон 5.0–9.5) ---
     def risk_mode(self, profit_factor, max_dd_pct, total_trades=0):
-        adj = 0
+        """Возвращает (mode_name, дробный сдвиг порога)."""
+        adj = 0.0
         enough = total_trades >= 5
         if enough and profit_factor is not None:
             if profit_factor < 0.5:
-                adj += 2
+                adj += 1.5          # STRICT
             elif profit_factor < 1.0:
-                adj += 1
+                adj += 0.5          # CAUTIOUS
             elif profit_factor > 1.5 and max_dd_pct and max_dd_pct < 8:
-                adj -= 1
+                adj -= 0.5          # AGGRESSIVE
         if max_dd_pct and max_dd_pct > 15:
-            adj += 1
-        if adj >= 2:
+            adj += 0.5              # защита капитала
+        if adj >= 1.5:
             mode = "STRICT"
-        elif adj == 1:
+        elif adj >= 0.5:
             mode = "CAUTIOUS"
-        elif adj == -1:
+        elif adj <= -0.5:
             mode = "AGGRESSIVE"
         else:
             mode = "NORMAL"
@@ -136,13 +135,13 @@ class Learner:
 
     def update_threshold(self, profit_factor, max_dd_pct, total_trades=0):
         _, dyn_adj = self.risk_mode(profit_factor, max_dd_pct, total_trades)
-        wr_adj = 0
+        wr_adj = 0.0
         if total_trades >= 10:
             last = self.results[-20:]
             if last:
                 wr = sum(last) / len(last)
                 if wr < 0.35:
-                    wr_adj = 1
+                    wr_adj = 0.5
         self.threshold_adj = dyn_adj + wr_adj
         self.save()
         return self.threshold_adj
@@ -151,7 +150,7 @@ class Learner:
         wr, n = self.winrate()
         top = sorted(self.weights.items(), key=lambda kv: kv[1], reverse=True)
         txt = ", ".join(f"{k} {v:.2f}" for k, v in top[:3])
-        return f"winrate {wr:.0%} ({n}) | топ-веса: {txt} | строгость {self.threshold_adj:+d}"
+        return f"winrate {wr:.0%} ({n}) | топ-веса: {txt} | строгость {self.threshold_adj:+.1f}"
 
 
 learner = Learner()
