@@ -204,6 +204,8 @@ class PaperExchange:
         self.realized.append({
             "symbol": sym, "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 2),
             "reason": reason, "time": int(time.time()), "partial": True,
+            "sector": self._resolve_sector(sym, pos.get("sector")),
+            "kind": pos.get("kind", "core"),
         })
         self.trades.append({
             "side": "Sell(part)", "symbol": sym, "qty": qty_part,
@@ -250,10 +252,12 @@ class PaperExchange:
             runner_bonus = (max_price - tp1_price) / tp1_price * 100
 
         sector = self._resolve_sector(sym, pos.get("sector"))
+        kind = pos.get("kind", "core")
         try:
             learner.record(pos.get("reason_keys", []), total_pnl > 0,
                            total_pnl_pct, sector=sector,
-                           exit_type=exit_type, runner_bonus=runner_bonus)
+                           exit_type=exit_type, runner_bonus=runner_bonus,
+                           kind=kind)
         except Exception as e:
             logger.error(f"learner record error: {e}")
 
@@ -263,10 +267,11 @@ class PaperExchange:
             transferred = round(pnl_final * 0.62, 4)
             self.usdt -= transferred
             self.funding += transferred
-        # В realized — результат ПОЗИЦИИ ЦЕЛИКОМ (TP1 + остаток)
+        # В realized — результат ПОЗИЦИИ ЦЕЛИКОМ (TP1 + остаток) + sector/kind для отчётов
         self.realized.append({
             "symbol": sym, "pnl": round(total_pnl, 4), "pnl_pct": round(total_pnl_pct, 2),
             "reason": reason, "time": int(time.time()), "exit_type": exit_type,
+            "sector": sector, "kind": kind,
         })
         self.trades.append({
             "side": "Sell", "symbol": sym, "qty": pos["qty"],
@@ -277,7 +282,7 @@ class PaperExchange:
             "symbol": sym, "price": price, "pnl": total_pnl,
             "pnl_pct": total_pnl_pct, "reason": reason, "transferred": transferred,
             "exit_type": exit_type, "runner_bonus": runner_bonus,
-            "sector": sector, "kind": pos.get("kind", "core"),
+            "sector": sector, "kind": kind,
         }
 
     def sell_all(self, prices):
