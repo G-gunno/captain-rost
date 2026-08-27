@@ -171,7 +171,7 @@ async def run_cycle():
 
     news_items = await fetch_news_cache()
 
-    # 1. Исполнения покупок
+    # 1. Исполнения покупок: 🛒 Покупка
     for f in paper.check_fills(tickers):
         pos = paper.positions.get(f["symbol"])
         if pos is not None:
@@ -181,7 +181,7 @@ async def run_cycle():
         kind_tag = "🛰" if (pos and pos.get("kind") == "satellite") else "🏛"
         sector = (pos.get("sector") if pos else None) or f.get("sector") or "Other"
         await notify(
-            f"📥 <b>Покупка исполнена</b> · {pair_html(f['symbol'][:-4], sector, kind_tag)}\n"
+            f"🛒 <b>Покупка</b> · {pair_html(f['symbol'][:-4], sector, kind_tag)}\n"
             f"💵 {usd(f['qty'] * f['price'])} · 📥 {fmt_price(f['price'])}\n"
             f"🎯 {fmt_price(f['tp'])} · 🛡 {fmt_price(f['sl'])}"
         )
@@ -201,7 +201,7 @@ async def run_cycle():
             for ex in paper.sell_all(tickers):
                 await notify(
                     f"🚨 <b>Экстренный выход</b> · <b>{ex['symbol'][:-4]}</b> · "
-                    f"{pnl_emoji(ex['pnl_pct'])} {ex['pnl']:+.2f}% · {usd(ex['pnl'])}"
+                    f"{pnl_emoji(ex['pnl_pct'])} {ex['pnl']:+.2f}% · {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
                 )
             await notify("🚨 <b>Риск-менеджмент</b>: резкий дамп рынка — всё в $.")
         return
@@ -234,15 +234,15 @@ async def run_cycle():
             if pnl_pct >= MIN_EARLY_EXIT_PCT:
                 ex = paper._sell(sym, last, "НОВОСТИ ⚠️")
                 await notify(
-                    f"⚠️ <b>Новостной выход</b> · <b>{sym[:-4]}</b> · негатив {neg}\n"
-                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · {usd(ex['pnl'])}"
+                    f"💸 <b>Продажа</b> · <b>{sym[:-4]}</b> · <i>{ex.get('sector', 'Other')}</i> · новостной выход ⚠️ {neg}\n"
+                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
                 )
                 continue
             elif pnl_pct <= 0:
                 ex = paper._sell(sym, last, "НОВОСТИ 🛑")
                 await notify(
-                    f"🛑 <b>Новостная резка</b> · <b>{sym[:-4]}</b> · негатив {neg}\n"
-                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · {usd(ex['pnl'])}"
+                    f"💸 <b>Продажа</b> · <b>{sym[:-4]}</b> · <i>{ex.get('sector', 'Other')}</i> · новостная резка 🛑 {neg}\n"
+                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
                 )
                 continue
 
@@ -254,9 +254,10 @@ async def run_cycle():
             pos["sl"] = max(pos["sl"], pos["avg"])
             pos["tp"] = round(pos["tp"] + 1.5 * a, 10)
             paper.save()
+            funding_txt = f" · 🏦 +{usd(ex['transferred'])}" if ex["transferred"] > 0 else ""
             await notify(
                 f"🎯 <b>TP1</b> · <b>{sym[:-4]}</b> · 50% · 🔥 {fmt_pct(ex['pnl_pct'])}\n"
-                f"{usd(ex['pnl'])} · остаток бежит\n"
+                f"💵 {usd(ex['pnl'])}{funding_txt} · остаток бежит\n"
                 f"🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])}"
             )
             continue
@@ -266,15 +267,15 @@ async def run_cycle():
             if pnl_pct >= MIN_EARLY_EXIT_PCT:
                 ex = paper._sell(sym, last, "СИГНАЛ ИСЯК 📉")
                 await notify(
-                    f"📉 <b>Ранний выход</b> · <b>{sym[:-4]}</b> · сигнал ослаб\n"
-                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · {usd(ex['pnl'])}"
+                    f"💸 <b>Продажа</b> · <b>{sym[:-4]}</b> · <i>{ex.get('sector', 'Other')}</i> · сигнал ослаб 📉\n"
+                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
                 )
                 continue
             if trend_broken and score_pos <= thr - 1 and pnl_pct <= -0.5:
                 ex = paper._sell(sym, last, "ИНВАЛИДАЦИЯ 🛑")
                 await notify(
-                    f"🛑 <b>Резка убытка</b> · <b>{sym[:-4]}</b> · тренд сломан\n"
-                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · {usd(ex['pnl'])}"
+                    f"💸 <b>Продажа</b> · <b>{sym[:-4]}</b> · <i>{ex.get('sector', 'Other')}</i> · резка убытка 🛑\n"
+                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
                 )
                 continue
 
@@ -301,16 +302,16 @@ async def run_cycle():
             logger.info(f"SL поднят {sym} -> {pos['sl']}")
         paper.save()
 
-    # 5. Выходы остатка по TP/SL
+    # 5. Выходы остатка по TP/SL: 💸 Продажа с ценой
     for ex in paper.check_exits(tickers):
         runner_txt = ""
         if ex.get("runner_bonus", 0) > 5:
             runner_txt = f"\n🏃 пробежка +{ex['runner_bonus']:.1f}% выше TP1"
         ind = "🔥" if ex.get("exit_type") == "TP1_RUN" else pnl_emoji(ex["pnl_pct"])
+        funding_txt = f"\n🏦 +{usd(ex['transferred'])} в накопления" if ex.get("transferred", 0) > 0 else ""
         await notify(
-            f"📤 <b>Продажа</b> · <b>{ex['symbol'][:-4]}</b> · <i>{ex.get('sector', 'Other')}</i> · {ex['reason']}\n"
-            f"{ind} {fmt_pct(ex['pnl_pct'])} · {usd(ex['pnl'])}{runner_txt}\n"
-            f"🏦 +{usd(ex['transferred'])} в накопления"
+            f"💸 <b>Продажа</b> · <b>{ex['symbol'][:-4]}</b> · <i>{ex.get('sector', 'Other')}</i> · {ex['reason']}\n"
+            f"{ind} {fmt_pct(ex['pnl_pct'])} · {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{runner_txt}{funding_txt}"
         )
 
     # 6. Неисполненные ордера
@@ -508,7 +509,7 @@ async def run_cycle():
         kind_tag = "🛰" if kind == "satellite" else "🏛"
         new_tag = "· 🆕 " if cand.get("is_new") else ""
         await notify(
-            f"🛒 <b>Покупка</b> {new_tag}· {pair_html(sym[:-4], sector, kind_tag)}\n"
+            f"📋 <b>Ордер</b> {new_tag}· {pair_html(sym[:-4], sector, kind_tag)}\n"
             f"💵 {usd(size)} · 📥 {fmt_price(entry)}\n"
             f"🎯 {fmt_price(tp)} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
             f"⭐ {cand['score']:.1f} · 🧠 {'; '.join(cand['reasons'][:3])}"
