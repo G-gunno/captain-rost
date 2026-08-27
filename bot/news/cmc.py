@@ -11,47 +11,19 @@ CMC_BASE = "https://pro-api.coinmarketcap.com"
 
 _cache = {"info": {}}
 
-# ===== РУЧНОЙ СЛОВАРЬ (приоритетный оверрид) =====
+# ===== БАЗОВЫЙ СЛОВАРЬ (только ~20 топ-монет, которые никогда не поменяются) =====
+# Всё остальное выучивается автоматически из CMC тегов и сохраняется в sectors.json
 SECTORS = {
+    # L1
     "BTC": "L1", "ETH": "L1", "SOL": "L1", "BNB": "L1", "AVAX": "L1",
     "ADA": "L1", "DOT": "L1", "NEAR": "L1", "APT": "L1", "SUI": "L1",
-    "SEI": "L1", "TON": "L1", "TRX": "L1", "KAS": "L1", "HBAR": "L1",
-    "XLM": "L1", "XRP": "L1", "ALGO": "L1", "ATOM": "L1", "INJ": "L1",
-    "TIA": "L1", "ICP": "L1", "FTM": "L1", "S": "L1", "CSPR": "L1",
-    "MINA": "L1", "HYPE": "L1", "MOVE": "L1", "MON": "L1", "KAVA": "L1",
-    "CELO": "L1", "EGLD": "L1", "VET": "L1", "EOS": "L1", "XTZ": "L1",
-    "LTC": "L1", "BCH": "L1", "ETC": "L1", "ZIL": "L1", "RVN": "L1",
-    "GLMR": "L1", "ASTR": "L1", "MERL": "L1", "OBT": "L1", "BR": "L1",
-    "XAN": "L1", "CAP": "L1", "TAC": "L1", "FF": "L1", "ASTER": "L1",
-    "ARB": "L2", "OP": "L2", "STRK": "L2", "ZK": "L2", "MANTA": "L2",
-    "SCROLL": "L2", "BLAST": "L2", "POL": "L2", "MATIC": "L2", "ZRO": "L2",
-    "MANTLE": "L2", "LINEA": "L2", "IMX": "L2", "STX": "L2",
-    "UNI": "DeFi", "AAVE": "DeFi", "LINK": "DeFi", "MKR": "DeFi",
-    "SNX": "DeFi", "CRV": "DeFi", "COMP": "DeFi", "LDO": "DeFi",
-    "DYDX": "DeFi", "GMX": "DeFi", "JUP": "DeFi", "RAY": "DeFi",
-    "PENDLE": "DeFi", "ENA": "DeFi", "ONDO": "DeFi", "PYTH": "DeFi",
-    "JTO": "DeFi", "CAKE": "DeFi", "SUSHI": "DeFi", "FLUID": "DeFi",
-    "EIGEN": "DeFi", "ETHFI": "DeFi", "RSR": "DeFi", "BICO": "DeFi",
-    "TWT": "Infra", "FIL": "Infra", "AR": "Infra", "LPT": "Infra",
-    "IOTA": "Infra", "API3": "Infra", "BAND": "Infra", "TRB": "Infra",
-    "HNT": "Infra", "IOTX": "Infra", "WAXP": "Infra", "STORJ": "Infra",
-    "ANKR": "Infra", "RAD": "Infra", "MOBILE": "Infra",
-    "FET": "AI", "OCEAN": "AI", "RNDR": "AI", "GRT": "AI", "TAO": "AI",
-    "ARKM": "AI", "WLD": "AI", "VIRTUAL": "AI", "FLOCK": "AI",
-    "GRASS": "AI", "SQD": "AI", "ZEREBRO": "AI", "COOKIE": "AI",
-    "METAX": "AI", "CHIP": "AI",
+    "XRP": "L1", "LTC": "L1", "BCH": "L1", "ATOM": "L1", "ETC": "L1",
+    # L2
+    "MATIC": "L2", "POL": "L2", "ARB": "L2", "OP": "L2",
+    # DeFi
+    "LINK": "DeFi", "UNI": "DeFi", "AAVE": "DeFi", "MKR": "DeFi",
+    # Meme
     "DOGE": "Meme", "SHIB": "Meme", "PEPE": "Meme", "BONK": "Meme",
-    "FLOKI": "Meme", "WIF": "Meme", "BRETT": "Meme", "POPCAT": "Meme",
-    "MEW": "Meme", "TURBO": "Meme", "PENGU": "Meme", "SPX": "Meme",
-    "MOODENG": "Meme", "PUMP": "Meme", "NEIRO": "Meme", "BOME": "Meme",
-    "FARTCOIN": "Meme", "PNUT": "Meme", "GOAT": "Meme", "ACT": "Meme",
-    "TRUMP": "Meme", "HAT": "Meme",
-    "AXS": "Gaming", "SAND": "Gaming", "MANA": "Gaming", "GALA": "Gaming",
-    "RONIN": "Gaming", "PIXEL": "Gaming", "PORTAL": "Gaming",
-    "XAI": "Gaming", "NOT": "Gaming", "HMSTR": "Gaming", "CATI": "Gaming",
-    "ENJ": "Gaming", "CHZ": "Gaming", "SUPER": "Gaming", "YGG": "Gaming",
-    "BEAM": "Gaming", "GHST": "Gaming", "PRIME": "Gaming", "ALICE": "Gaming",
-    "BIGTIME": "Gaming", "BSB": "Gaming",
 }
 
 # ===== АВТО-ПЕРЕВОД ТЕГОВ CMC В НАШИ СЕКТОРА =====
@@ -90,7 +62,7 @@ _load_sectors()
 
 
 def sector_of(base):
-    """Синхронная справка сектора: ручной словарь -> выученный кэш -> Other."""
+    """Синхронная справка сектора: базовый словарь -> выученный кэш -> Other."""
     return SECTORS.get(base) or _sector_cache.get(base) or "Other"
 
 
@@ -103,7 +75,8 @@ def _tags_to_sector(tags):
 
 
 async def get_sectors_for_pool(bases):
-    """Сектора монет: ручной словарь -> кэш -> теги CMC -> Other. Авто-обучение."""
+    """Сектора монет: базовый словарь -> кэш -> теги CMC -> Other.
+    Новые монеты выучиваются автоматически и сохраняются в sectors.json."""
     result = {}
     need = []
     for b in bases:
@@ -136,10 +109,14 @@ async def get_sectors_for_pool(bases):
             elif isinstance(arr, dict):
                 sector = _tags_to_sector(arr.get("tags")) or "Other"
             result[b] = sector
-            _sector_cache[b] = sector
-            learned += 1
-        _save_sectors()
-        logger.info(f"sectors: авто-выучено {learned} монет")
+            # В кэш записываем только реальные секторы, не Other
+            # (чтобы при следующем скане попытаться выучить снова)
+            if sector != "Other":
+                _sector_cache[b] = sector
+                learned += 1
+        if learned:
+            _save_sectors()
+            logger.info(f"sectors: авто-выучено {learned} новых монет (кэш: {len(_sector_cache)})")
     except Exception as e:
         logger.error(f"sectors fetch error: {e}")
         for b in need:
