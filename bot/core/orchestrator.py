@@ -421,6 +421,35 @@ async def run_cycle():
                         sl_dist, kind=kind, realized=paper.realized)
         if size < 5:
             continue
+
+        # === КОНТРОЛЬ СВОБОДНЫХ СРЕДСТВ + РОТАЦИЯ ОРДЕРОВ ===
+        # Сумма уже выставленных ордеров не должна превышать free_usdt
+        pending_amount = sum(o["qty"] * o["price"] for o in paper.orders)
+        if pending_amount + size > paper.usdt:
+            # Пытаемся ротацию: снять самый слабый ордер, если новый сигнал сильнее
+            rotated = False
+            while paper.orders and pending_amount + size > paper.usdt:
+                worst = min(paper.orders, key=lambda o: o.get("score", 0))
+                worst_score = worst.get("score", 0)
+                # Ротируем только если новый сигнал сильнее минимум на 1 балл
+                if cand["score"] >= worst_score + 1.0:
+                    paper.cancel_order(worst["id"])
+                    pending_amount -= worst["qty"] * worst["price"]
+                    await notify(
+                        f"🔄 РОТАЦИЯ ОРДЕРА · {fmt_sym(worst['symbol'])} снят\n"
+                        f"Освобождаем место для {fmt_sym(sym)} (⭐ {cand['score']:.1f} > {worst_score:.1f})"
+                    )
+                    logger.info(f"{sym}: ротация — снят {worst['symbol']} "
+                                f"(score {worst_score:.1f}) для {sym} (score {cand['score']:.1f})")
+                    rotated = True
+                else:
+                    break
+            if pending_amount + size > paper.usdt:
+                reason = "не хватает свободных средств" if not rotated else "новый сигнал слабее худшего"
+                logger.info(f"{sym}: пропущен — {reason} "
+                            f"(pending {pending_amount:.0f} + {size:.0f} > free {paper.usdt:.0f})")
+                continue
+
         qty = size / entry
         order = paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl,
                                       score=cand["score"],
