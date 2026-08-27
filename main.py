@@ -372,6 +372,18 @@ async def cmd_learn(update, context):
             lines.append(f"   {pnl_emoji(avg)} <i>{s}</i> · wr {swr:.0%} ({cnt}) · {avg:+.2f}% · бонус {bias:+.2f}")
     else:
         lines.append("   (пока нет данных)")
+    lines.append("")
+    lines.append("<b>Стиль (core vs сателлиты)</b>")
+    if learner.kind_stats:
+        for k, label in (("core", "🏛 Core"), ("satellite", "🛰 Сателлиты")):
+            v = learner.kind_stats.get(k) or []
+            if v:
+                avg = sum(v) / len(v)
+                wrk = sum(1 for p in v if p > 0) / len(v)
+                lines.append(f"   {pnl_emoji(avg)} {label} · {len(v)} · wr {wrk:.0%} · ср. {avg:+.2f}%")
+        lines.append(f"   🛰 Лимит сателлитов сейчас: <b>{learner.satellite_limit():.0f}%</b>")
+    else:
+        lines.append("   (пока нет данных)")
     await reply(update, "\n".join(lines))
 
 
@@ -453,7 +465,9 @@ async def cmd_status(update, context):
                 msg.append(f"{kind} <b>{sym[:-4]}</b> · <i>{sector}</i> · {ind} {fmt_pct(pnl_pct)}{tp1}")
                 msg.append(f"   💼 {usd(val)} · {w:.1f}%")
                 msg.append(f"   📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)}")
-                msg.append(f"   🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])}")
+                tp_pct = (pos["tp"] - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
+                sl_pct = (pos["sl"] - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
+                msg.append(f"   🎯 {fmt_price(pos['tp'])} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(pos['sl'])} ({fmt_pct(sl_pct)})")
         else:
             msg.append("📦 <b>Позиции</b>: нет")
         msg.append("")
@@ -468,7 +482,9 @@ async def cmd_status(update, context):
                 sector = o.get("sector") or sector_of(o["symbol"][:-4])
                 msg.append(f"{kind} <b>{o['symbol'][:-4]}</b> · <i>{sector}</i> · {w:.1f}%")
                 msg.append(f"   💼 {usd(val)} · 📥 {fmt_price(o['price'])}")
-                msg.append(f"   🎯 {fmt_price(o['tp'])} · 🛡 {fmt_price(o['sl'])}")
+                tp_pct = (o["tp"] - o["price"]) / o["price"] * 100 if o["price"] else 0
+                sl_pct = (o["sl"] - o["price"]) / o["price"] * 100 if o["price"] else 0
+                msg.append(f"   🎯 {fmt_price(o['tp'])} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(o['sl'])} ({fmt_pct(sl_pct)})")
         else:
             msg.append("📋 <b>Ордера</b>: нет")
         msg.append("")
@@ -502,7 +518,7 @@ async def cmd_status(update, context):
         rf = metrics["recovery_factor"]
         exp_mark = "🎯" if exp > 0 else "❌"
         rf_mark = "🎯" if rf > 2 else ("⚠️" if rf > 1 else "❌")
-        msg.append(f"💹 {pnl_emoji(exp)} {exp:+.2f} {exp_mark} (цель > 0) · 🔄 RF: {rf:.1f} {rf_mark} (цель ≥ 2)")
+        msg.append(f"💹 {pnl_emoji(exp)} <b>{exp:+.2f}</b> {exp_mark} (цель > 0) · 🔄 RF: <b>{rf:.1f}</b> {rf_mark} (цель ≥ 2)")
 
         sat_exposure = sum(
             p["qty"] * prices.get(s, {}).get("last", 0)
@@ -511,8 +527,8 @@ async def cmd_status(update, context):
             o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite"
         )
         sat_pct = sat_exposure / eq * 100 if eq else 0
-        msg.append(f"🛰 Сателлиты: {sat_pct:.1f}% / 20%")
-        msg.append(f"💵 Суммарный PnL: {pnl_emoji(metrics['total_pnl'])} {usd(metrics['total_pnl'])}")
+        msg.append(f"🛰 Сателлиты: <b>{sat_pct:.1f}%</b> / {learner.satellite_limit():.0f}%")
+        msg.append(f"💵 Суммарный PnL: {pnl_emoji(metrics['total_pnl'])} <b>{usd(metrics['total_pnl'])}</b>")
         msg.append("")
 
         regime, _ = await get_regime()
