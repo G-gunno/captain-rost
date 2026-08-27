@@ -14,6 +14,7 @@ KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "news_pos", "hyp
 SAT_LIMIT_BASE = 20.0
 SAT_LIMIT_MAX = 30.0
 SAT_LIMIT_MIN = 10.0
+SAT_SIZE_BASE = 2.0
 
 
 class Learner:
@@ -124,6 +125,10 @@ class Learner:
             if avg_sat < avg_core - 0.5:
                 return SAT_LIMIT_MIN
         return SAT_LIMIT_BASE
+
+    def satellite_size_pct(self):
+        """Адаптивный размер ОДНОЙ сателлит-позиции: 1.0–3.0% пропорционально лимиту."""
+        return round(SAT_SIZE_BASE * self.satellite_limit() / SAT_LIMIT_BASE, 2)
 
     def reset(self):
         self.weights = {k: 1.0 for k in KEYS}
