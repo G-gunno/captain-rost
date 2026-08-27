@@ -9,7 +9,7 @@ TIERS = [
 ]
 
 RISK_PER_TRADE_PCT = 1.0
-SAT_SIZE_PCT = 2.0
+SAT_SIZE_PCT = 2.0   # базовый размер сателлита (факт приходит через sat_size_pct)
 SAT_RISK_PCT = 0.5
 
 
@@ -31,12 +31,12 @@ def portfolio_limits(equity):
     if equity <= 500:
         return 4, 3
     if equity <= 1000:
-        return 6, 8   # Other увеличен с 4 до 8
+        return 6, 8
     if equity <= 2500:
-        return 8, 10  # Other увеличен с 5 до 10
+        return 8, 10
     if equity <= 5000:
-        return 10, 12 # Other увеличен с 6 до 12
-    return 12, 15     # Other увеличен с 8 до 15
+        return 10, 12
+    return 12, 15
 
 
 def kelly_multiplier(realized):
@@ -58,10 +58,10 @@ def kelly_multiplier(realized):
 
 
 def buy_size(equity, score, liquidity, free_usdt, sl_dist_pct=1.0,
-             kind="core", realized=None):
-    # --- САТЕЛЛИТ: маленькая позиция, широкий стоп ---
+             kind="core", realized=None, sat_size_pct=2.0):
+    # --- САТЕЛЛИТ: адаптивный размер (приходит из learner), широкий стоп ---
     if kind == "satellite":
-        size = equity * SAT_SIZE_PCT / 100
+        size = equity * sat_size_pct / 100
         if sl_dist_pct > 0:
             size = min(size, equity * SAT_RISK_PCT / sl_dist_pct)
         size = min(size, free_usdt * 0.95)
