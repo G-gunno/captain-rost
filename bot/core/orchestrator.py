@@ -144,7 +144,7 @@ async def run_cycle():
     pf = metrics["profit_factor"]
     pf_txt = "∞" if pf == float("inf") else (f"{pf:.2f}" if pf is not None else "—")
     logger.info(f"METRICS: PF={pf_txt} | DD={metrics['max_drawdown_pct']:.1f}% | "
-                f"mode={mode} | thr_adj=+{new_thr_adj}")
+                f"mode={mode} | thr_adj={new_thr_adj:+d}")
 
     news_items = await fetch_news_cache()
 
@@ -374,7 +374,7 @@ async def run_cycle():
         if open_count >= max_positions:
             logger.info(f"{sym}: пропущен — портфель полон ({open_count}/{max_positions})")
             continue
-        
+
         # Дополнительная проверка: если позиций БОЛЬШЕ лимита (старые позиции), не добавляем
         if len(paper.positions) >= max_positions:
             logger.info(f"{sym}: пропущен — слишком много открытых позиций ({len(paper.positions)}/{max_positions})")
