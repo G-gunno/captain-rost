@@ -381,7 +381,7 @@ async def cmd_learn(update, context):
                 avg = sum(v) / len(v)
                 wrk = sum(1 for p in v if p > 0) / len(v)
                 lines.append(f"   {pnl_emoji(avg)} {label} · {len(v)} · wr {wrk:.0%} · ср. {avg:+.2f}%")
-        lines.append(f"   🛰 Лимит сателлитов сейчас: <b>{learner.satellite_limit():.0f}%</b>")
+        lines.append(f"   🛰 Лимит сателлитов: <b>{learner.satellite_limit():.0f}%</b> · размер {learner.satellite_size_pct():.1f}%")
     else:
         lines.append("   (пока нет данных)")
     await reply(update, "\n".join(lines))
@@ -527,7 +527,7 @@ async def cmd_status(update, context):
             o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite"
         )
         sat_pct = sat_exposure / eq * 100 if eq else 0
-        msg.append(f"🛰 Сателлиты: <b>{sat_pct:.1f}%</b> / {learner.satellite_limit():.0f}%")
+        msg.append(f"🛰 Сателлиты: <b>{sat_pct:.1f}%</b> / {learner.satellite_limit():.0f}% · размер {learner.satellite_size_pct():.1f}%")
         msg.append(f"💵 Суммарный PnL: {pnl_emoji(metrics['total_pnl'])} <b>{usd(metrics['total_pnl'])}</b>")
         msg.append("")
 
