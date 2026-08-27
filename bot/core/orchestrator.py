@@ -21,7 +21,6 @@ MAX_SL_PCT = 3.0
 MIN_RR = 1.5
 SAT_MAX_SL_PCT = 5.0
 MIN_RR_SAT = 2.0
-SAT_MAX_TOTAL_PCT = 20.0
 MIN_EARLY_EXIT_PCT = 1.0
 _notify_cb = None
 _reconciled = False
@@ -375,8 +374,10 @@ async def run_cycle():
 
     equity = paper.equity(tickers)
     sec_lim, other_lim = portfolio_limits(equity)
+    sat_limit = learner.satellite_limit()
     logger.info(f"PORTFOLIO LIMITS: equity={equity:.0f} | "
-                f"лимит на сектор={sec_lim} | лимит Other={other_lim} | всего позиций: без лимита")
+                f"лимит на сектор={sec_lim} | лимит Other={other_lim} | "
+                f"лимит сателлитов={sat_limit:.0f}% | всего позиций: без лимита")
 
     if paper.usdt < 10 and candidates and paper.positions:
         best = candidates[0]
@@ -459,6 +460,7 @@ async def run_cycle():
                 logger.info(f"{sym}: пропущен — сектор {sector} переполнен ({sector_count}/{lim}, {reason})")
                 continue
 
+        # ЛИМИТ САТЕЛЛИТОВ — адаптивный (10–30%)
         if kind == "satellite":
             sat_exposure = sum(
                 p["qty"] * tickers.get(s, {}).get("last", 0)
@@ -466,8 +468,8 @@ async def run_cycle():
             ) + sum(
                 o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite"
             )
-            if sat_exposure >= equity * SAT_MAX_TOTAL_PCT / 100:
-                logger.info(f"{sym}: пропущен — лимит сателлитов исчерпан")
+            if sat_exposure >= equity * sat_limit / 100:
+                logger.info(f"{sym}: пропущен — лимит сателлитов исчерпан ({sat_limit:.0f}%)")
                 continue
 
         entry = cand["last"] * 0.998
