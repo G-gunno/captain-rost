@@ -40,6 +40,7 @@ async def notify(text):
             logger.error(f"notify error: {e}")
 
 
+# ==================== СВЕРКА СОСТОЯНИЯ ПРИ СТАРТЕ ====================
 async def startup_reconciliation():
     logger.info("=== RECONCILE START ===")
     prices = await market_data.get_tickers()
@@ -64,12 +65,23 @@ async def startup_reconciliation():
             d = max(min(2.0 * a / entry * 100, MAX_SL_PCT * 2), MIN_TP_PCT)
             pos["tp"] = round(entry * (1 + d / 100), 10)
             fixed.append(f"TP {fmt_price(pos['tp'])}")
-        sl_dist = (entry - pos.get("sl", 0)) / entry * 100 if pos.get("sl") else 0
-        max_sl = SAT_MAX_SL_PCT if pos.get("kind") == "satellite" else MAX_SL_PCT
-        if not pos.get("sl") or pos["sl"] >= entry or sl_dist > max_sl or sl_dist < MIN_SL_PCT:
-            d = max(min(1.2 * a / entry * 100, max_sl), MIN_SL_PCT)
-            pos["sl"] = round(entry * (1 - d / 100), 10)
-            fixed.append(f"SL {fmt_price(pos['sl'])}")
+
+        # === ИСПРАВЛЕНИЕ БАГА: не ломаем трейлинг-стопы и безубыток раннеров ===
+        if pos.get("tp1_done"):
+            # РАННЕР: стоп никогда не опускается ниже входа (безубыток)
+            if pos.get("sl", 0) < entry:
+                pos["sl"] = round(entry, 10)
+                fixed.append(f"SL {fmt_price(pos['sl'])} (безубыток)")
+            # не трогаем трейлинг выше входа — это корректное поведение
+        else:
+            sl = pos.get("sl", 0)
+            sl_dist = (entry - sl) / entry * 100 if sl else 0
+            max_sl = SAT_MAX_SL_PCT if pos.get("kind") == "satellite" else MAX_SL_PCT
+            # чиним только битые стопы ниже входа; трейлинг выше входа НЕ трогаем
+            if not sl or (sl < entry and (sl_dist > max_sl or sl_dist < MIN_SL_PCT)):
+                d = max(min(1.2 * a / entry * 100, max_sl), MIN_SL_PCT)
+                pos["sl"] = round(entry * (1 - d / 100), 10)
+                fixed.append(f"SL {fmt_price(pos['sl'])}")
         if fixed:
             actions.append(f"{sym}: {' и '.join(fixed)} пересчитаны по новой логике")
     paper.save()
@@ -118,6 +130,7 @@ async def maybe_reconcile():
         logger.exception(f"Reconcile error: {e}")
 
 
+# ==================== ТОРГОВЫЙ ЦИКЛ ====================
 async def run_cycle():
     await maybe_reconcile()
 
@@ -195,7 +208,6 @@ async def run_cycle():
         if a <= 0:
             continue
         last = t["last"]
-        # Трекинг максимума цены — для метрики "пробежки" раннера
         pos["max_price"] = max(pos.get("max_price", 0.0), last)
         pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
         e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
@@ -372,14 +384,58 @@ async def run_cycle():
         kind = cand.get("kind", "core")
         sector = cand.get("sector", "Other")
 
+        # === АДАПТИВНЫЙ ЛИМИТ НА СЕКТОР + РОТАЦИЯ ВНУТРИ СЕКТОРА ===
         lim = other_lim if sector == "Other" else sec_lim
         sector_count = sum(
             1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector
         ) + sum(1 for o in paper.orders if (o.get("sector") or "Other") == sector)
-        if sector_count >= lim:
-            logger.info(f"{sym}: пропущен — сектор {sector} переполнен ({sector_count}/{lim})")
-            continue
 
+        if sector_count >= lim:
+            # Пытаемся ротацию внутри сектора: заменить слабейшую позицию на сильную
+            sector_positions = [
+                (s, p) for s, p in paper.positions.items()
+                if (p.get("sector") or "Other") == sector
+            ]
+            rotated = False
+            if sector_positions:
+                weakest_sym, weakest_pos = min(
+                    sector_positions, key=lambda kv: kv[1].get("score", 0)
+                )
+                weakest_score = weakest_pos.get("score", 0)
+                t_weak = tickers.get(weakest_sym)
+                if t_weak:
+                    weak_pnl = (t_weak["last"] - weakest_pos["avg"]) / weakest_pos["avg"] * 100
+                    # Условия ротации:
+                    # - новый сигнал сильнее на 1.5+ балла
+                    # - слабая позиция НЕ раннер (tp1_done)
+                    # - слабая позиция не в большом минусе (>-0.5%)
+                    # - слабая позиция не в большой прибыли (<2%) — не режем хороший профит
+                    can_rotate = (
+                        cand["score"] >= weakest_score + 1.5
+                        and not weakest_pos.get("tp1_done")
+                        and weak_pnl >= -0.5
+                        and weak_pnl < 2.0
+                    )
+                    if can_rotate:
+                        ex = paper._sell(weakest_sym, t_weak["last"], "РОТАЦИЯ СЕКТОРА 🔄")
+                        sector_count -= 1
+                        await notify(
+                            f"🔄 РОТАЦИЯ СЕКТОРА {sector} · {fmt_sym(weakest_sym)} → {fmt_sym(sym)}\n"
+                            f"Слабый сигнал (⭐ {weakest_score:.1f}, {fmt_pct(weak_pnl)}) заменён на "
+                            f"сильный (⭐ {cand['score']:.1f})\n"
+                            f"Продано: {ex['pnl']:+.2f} USDT"
+                        )
+                        logger.info(f"{sym}: ротация сектора — продан {weakest_sym} "
+                                    f"(score {weakest_score:.1f}, pnl {weak_pnl:+.2f}%) "
+                                    f"для {sym} (score {cand['score']:.1f})")
+                        rotated = True
+            if sector_count >= lim:
+                reason = ("слабых кандидатов для ротации нет" if not rotated
+                          else "после ротации лимит всё ещё заполнен")
+                logger.info(f"{sym}: пропущен — сектор {sector} переполнен ({sector_count}/{lim}, {reason})")
+                continue
+
+        # ЛИМИТ САТЕЛЛИТОВ
         if kind == "satellite":
             sat_exposure = sum(
                 p["qty"] * tickers.get(s, {}).get("last", 0)
@@ -423,9 +479,10 @@ async def run_cycle():
         if size < 5:
             continue
 
+        # КОНТРОЛЬ СВОБОДНЫХ СРЕДСТВ + РОТАЦИЯ ОРДЕРОВ
         pending_amount = sum(o["qty"] * o["price"] for o in paper.orders)
         if pending_amount + size > paper.usdt:
-            rotated = False
+            rotated_order = False
             while paper.orders and pending_amount + size > paper.usdt:
                 worst = min(paper.orders, key=lambda o: o.get("score", 0))
                 worst_score = worst.get("score", 0)
@@ -438,11 +495,11 @@ async def run_cycle():
                     )
                     logger.info(f"{sym}: ротация — снят {worst['symbol']} "
                                 f"(score {worst_score:.1f}) для {sym} (score {cand['score']:.1f})")
-                    rotated = True
+                    rotated_order = True
                 else:
                     break
             if pending_amount + size > paper.usdt:
-                reason = "не хватает свободных средств" if not rotated else "новый сигнал слабее худшего"
+                reason = "не хватает свободных средств" if not rotated_order else "новый сигнал слабее худшего"
                 logger.info(f"{sym}: пропущен — {reason} "
                             f"(pending {pending_amount:.0f} + {size:.0f} > free {paper.usdt:.0f})")
                 continue
