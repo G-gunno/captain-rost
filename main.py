@@ -29,7 +29,6 @@ WEBHOOK_PATH = "/telegram-webhook"
 
 # ==================== Хелперы ====================
 def usd(x):
-    """USDT = $: единый формат денег."""
     return f"${x:,.2f}"
 
 
@@ -489,17 +488,21 @@ async def cmd_status(update, context):
 
         pf = metrics["profit_factor"]
         if pf is None:
-            pf_text = "—"
+            pf_text, pf_mark = "—", ""
         elif pf == float("inf"):
-            pf_text = "∞"
+            pf_text, pf_mark = "∞", "🎯"
         else:
             pf_text = f"{pf:.2f}"
+            pf_mark = "🎯" if pf >= 1.3 else ("⚠️" if pf >= 1.0 else "❌")
         dd = metrics["max_drawdown_pct"]
-        msg.append(f"📈 PF: <b>{pf_text}</b> · 📉 DD: <b>{dd:.1f}%</b>")
+        dd_mark = "✅" if dd < 5 else ("⚠️" if dd < 15 else "🔴")
+        msg.append(f"📈 PF: <b>{pf_text}</b> {pf_mark} (цель ≥ 1.3) · 📉 DD: <b>{dd:.1f}%</b> {dd_mark} (лимит 15%)")
 
         exp = metrics["expectancy"]
         rf = metrics["recovery_factor"]
-        msg.append(f"💹 {pnl_emoji(exp)} {exp:+.2f} · 🔄 RF: {rf:.1f}")
+        exp_mark = "🎯" if exp > 0 else "❌"
+        rf_mark = "🎯" if rf > 2 else ("⚠️" if rf > 1 else "❌")
+        msg.append(f"💹 {pnl_emoji(exp)} {exp:+.2f} {exp_mark} (цель > 0) · 🔄 RF: {rf:.1f} {rf_mark} (цель ≥ 2)")
 
         sat_exposure = sum(
             p["qty"] * prices.get(s, {}).get("last", 0)
