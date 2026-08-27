@@ -21,21 +21,22 @@ def tier_limits(equity):
 
 
 def portfolio_limits(equity):
-    """Адаптивные лимиты портфеля: (макс. позиций, лимит сектора, лимит Other).
-    Растут вместе с балансом, как сетка размеров позиций."""
+    """Адаптивные лимиты НА СЕКТОР (включая Other) в зависимости от баланса.
+    Общее число позиций НЕ ограничено — только свободными средствами
+    и размером позиции (buy_size) + лимитом сателлитов."""
     if equity <= 150:
-        return 2, 1, 1
+        return 2, 2
     if equity <= 250:
-        return 3, 2, 1
+        return 3, 2
     if equity <= 500:
-        return 4, 2, 2
+        return 4, 3
     if equity <= 1000:
-        return 6, 3, 3
+        return 6, 4
     if equity <= 2500:
-        return 8, 4, 4
+        return 8, 5
     if equity <= 5000:
-        return 10, 5, 5
-    return 12, 6, 6
+        return 10, 6
+    return 12, 8
 
 
 def kelly_multiplier(realized):
