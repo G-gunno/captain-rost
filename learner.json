@@ -1,1 +1,1 @@
-{"weights": {"ema50": 1.1, "ema21": 1.1, "impulse": 1.1, "rsi": 1.15, "volume": 1.1, "chg24h": 0.95, "news_pos": 0.95, "hype": 1.0, "indep": 1.1}, "results": [0, 1, 1], "threshold_adj": -1}
+{"weights": {"ema50": 1.15, "ema21": 1.15, "impulse": 1.1, "rsi": 1.2, "volume": 1.15, "chg24h": 1.0, "news_pos": 1.0, "hype": 1.0, "indep": 1.15}, "results": [0, 1, 1, 1], "threshold_adj": -1}
