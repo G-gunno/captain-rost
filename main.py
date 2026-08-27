@@ -538,7 +538,7 @@ async def cmd_status(update, context):
         btc = prices.get("BTCUSDT", {}).get("last", 0)
         msg.append(f"₿ <b>${fmt_price(btc)}</b> · {regime_emoji} {regime_text} · 🎯 порог {threshold(regime):g}")
         if SCAN_SUMMARY.get("text"):
-            msg.append(f"🔎 {_html.escape(SCAN_SUMMARY['text'])}")
+            msg.append(f"🔎 {SCAN_SUMMARY['text']}")
         wr, n = learner.winrate()
         top = sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True)[:3]
         top_txt = " · ".join(f"{k} {v:.2f}" for k, v in top)
