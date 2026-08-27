@@ -50,6 +50,7 @@ class PaperExchange:
             logger.info(f"Paper state загружен: USDT={self.usdt:.2f}, позиций={len(self.positions)}")
 
     def _migrate_sectors(self):
+        """Миграция: позициям и ордерам без сектора определяем сектор через sector_of."""
         try:
             from bot.news.cmc import sector_of
         except ImportError:
@@ -92,6 +93,7 @@ class PaperExchange:
             upload_state(REMOTE_PATH, payload)
 
     def _resolve_sector(self, symbol, fallback_sector=None):
+        """Определяет сектор монеты: из fallback -> из sector_of -> Other."""
         if fallback_sector and fallback_sector != "Other":
             return fallback_sector
         try:
@@ -186,6 +188,7 @@ class PaperExchange:
         pnl = (proceeds - fee_sell) - (cost_part + fee_buy)
         pnl_pct = pnl / (cost_part + fee_buy) * 100 if cost_part else 0.0
 
+        # Накапливаем частичный PnL для объединения на финальном выходе
         pos["partial_pnl"] = pos.get("partial_pnl", 0.0) + pnl
         pos["partial_cost"] = pos.get("partial_cost", 0.0) + (cost_part + fee_buy)
         pos["tp1_price"] = price
@@ -210,6 +213,8 @@ class PaperExchange:
         return {
             "symbol": sym, "price": price, "pnl": pnl,
             "pnl_pct": pnl_pct, "reason": reason, "transferred": transferred,
+            "sector": self._resolve_sector(sym, pos.get("sector")),
+            "kind": pos.get("kind", "core"),
         }
 
     def _sell(self, sym, price, reason):
@@ -222,12 +227,14 @@ class PaperExchange:
         pnl_final = (proceeds - fee_sell) - (cost + fee_buy)
         pnl_final_pct = pnl_final / (cost + fee_buy) * 100 if (cost + fee_buy) else 0.0
 
+        # Объединённый результат всей позиции (TP1 + остаток)
         partial_pnl = pos.get("partial_pnl", 0.0)
         partial_cost = pos.get("partial_cost", 0.0)
         total_pnl = partial_pnl + pnl_final
         total_cost = partial_cost + (cost + fee_buy)
         total_pnl_pct = total_pnl / total_cost * 100 if total_cost else pnl_final_pct
 
+        # Тип выхода для аналитики
         if reason.startswith("TP"):
             exit_type = "TP1_RUN" if pos.get("tp1_done") else "TP"
         elif reason.startswith("SL"):
@@ -235,6 +242,7 @@ class PaperExchange:
         else:
             exit_type = "EARLY"
 
+        # ПРОБЕЖКА: насколько остаток убежал выше TP1
         runner_bonus = 0.0
         tp1_price = pos.get("tp1_price")
         max_price = pos.get("max_price", 0.0)
@@ -269,6 +277,7 @@ class PaperExchange:
             "symbol": sym, "price": price, "pnl": total_pnl,
             "pnl_pct": total_pnl_pct, "reason": reason, "transferred": transferred,
             "exit_type": exit_type, "runner_bonus": runner_bonus,
+            "sector": sector, "kind": pos.get("kind", "core"),
         }
 
     def sell_all(self, prices):
@@ -282,6 +291,7 @@ class PaperExchange:
         return results
 
     def reset_stats(self):
+        """Сбросить торговую статистику (историю закрытых сделок)."""
         self.realized = []
         self.trades = []
         self.save()
@@ -309,6 +319,7 @@ class PaperExchange:
         else:
             profit_factor = sum_win / sum_loss
 
+        # Max Drawdown по кривой закрытых позиций
         eq = self.start_usdt
         peak = eq
         max_dd = 0.0
