@@ -374,6 +374,11 @@ async def run_cycle():
         if open_count >= max_positions:
             logger.info(f"{sym}: пропущен — портфель полон ({open_count}/{max_positions})")
             continue
+        
+        # Дополнительная проверка: если позиций БОЛЬШЕ лимита (старые позиции), не добавляем
+        if len(paper.positions) >= max_positions:
+            logger.info(f"{sym}: пропущен — слишком много открытых позиций ({len(paper.positions)}/{max_positions})")
+            continue
 
         lim = other_lim if sector == "Other" else sec_lim
         sector_count = sum(
