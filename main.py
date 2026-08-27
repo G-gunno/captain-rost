@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import aiohttp.web as web
 from loguru import logger
 from telegram import BotCommand, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import Conflict as TelegramConflict
+from telegram.error import Conflict as TelegramConflict, BadRequest
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
 from bot.exchange.market_data import market_data
@@ -17,7 +17,7 @@ from bot.core.orchestrator import run_cycle, set_notifier, CYCLE_SECONDS
 from bot.core.state import bot_state
 from bot.core.remote_state import ensure_branch
 from bot.services.reports import build_report
-from bot.strategy.scanner import SCAN_SUMMARY, FILTERED_BY_NEWS, get_regime
+from bot.strategy.scanner import SCAN_SUMMARY, FILTERED_BY_NEWS, get_regime, threshold
 from bot.strategy.learner import learner
 from bot.utils.format import fmt_price, fmt_usdt, fmt_pct, fmt_sym
 
@@ -130,10 +130,9 @@ async def action_resetstats(context):
     learner.reset_stats()
     return (
         "📊 СТАТИСТИКА СБРОШЕНА.\n"
-        "История сделок очищена, PF / DD / Expectancy считаются с нуля.\n"
-        "🧠 Веса обучения сохранены (знания не потеряны).\n"
-        "Режим STRICT снят, порог вернулся к базовому.\n\n"
-        "Полный сброс включая веса — /resetlearn."
+        "История сделок и winrate очищены, PF / DD / Expectancy с нуля.\n"
+        "🧠 Веса-знания сохранены.\n"
+        "Режим STRICT снят, порог вернулся к базовому."
     )
 
 
@@ -159,27 +158,48 @@ async def ask_confirmation(update, context, key):
 
 
 async def confirm_handler(update, context):
+    """Обработка кнопок подтверждения. Защищена от двойных нажатий."""
     query = update.callback_query
     await query.answer()
     data = query.data
 
     if data == "cancel":
-        await query.edit_message_text("❌ Действие отменено.")
+        try:
+            await query.edit_message_text("❌ Действие отменено.",
+                                          reply_markup=InlineKeyboardMarkup([]))
+        except BadRequest:
+            pass
         return
 
     if data.startswith("confirm:"):
         key = data.split(":", 1)[1]
         entry = ACTIONS.get(key)
         if not entry:
-            await query.edit_message_text("⚠️ Неизвестное действие.")
             return
         fn, _ = entry
         try:
             result = await fn(context)
-            await query.edit_message_text(f"✅ Подтверждено.\n\n{result}")
+            # Убираем кнопки после подтверждения — повторное нажатие невозможно
+            await query.edit_message_text(
+                f"✅ Подтверждено.\n\n{result}",
+                reply_markup=InlineKeyboardMarkup([]),
+            )
+        except BadRequest as e:
+            # Двойное нажатие: сообщение уже изменено — просто игнорируем
+            if "Message is not modified" in str(e):
+                return
+            try:
+                await query.edit_message_text(f"⚠️ Ошибка выполнения: {e}",
+                                              reply_markup=InlineKeyboardMarkup([]))
+            except BadRequest:
+                pass
         except Exception as e:
             logger.exception(f"confirm action error: {e}")
-            await query.edit_message_text(f"⚠️ Ошибка выполнения: {e}")
+            try:
+                await query.edit_message_text(f"⚠️ Ошибка выполнения: {e}",
+                                              reply_markup=InlineKeyboardMarkup([]))
+            except BadRequest:
+                pass
 
 
 # ==================== Главный запуск ====================
@@ -415,7 +435,9 @@ async def cmd_status(update, context):
 
         msg.append("")
         metrics = paper.get_metrics(prices)
-        mode, _ = learner.risk_mode(metrics["profit_factor"], metrics["max_drawdown_pct"])
+        mode, _ = learner.risk_mode(
+            metrics["profit_factor"], metrics["max_drawdown_pct"], metrics["total_trades"]
+        )
         mode_emoji = {"NORMAL": "🟢", "CAUTIOUS": "🟡", "STRICT": "🔴", "AGGRESSIVE": "🚀"}.get(mode, "⚪")
 
         msg.append(f"📊 МЕТРИКИ · режим {mode_emoji} {mode}")
@@ -482,8 +504,10 @@ async def cmd_status(update, context):
         btc = prices.get("BTCUSDT", {}).get("last", 0)
         msg.append("")
         msg.append(f"₿ BTC: {fmt_price(btc)} $ · {regime_emoji} {regime_text}")
+        msg.append(f"🎯 Порог входа сейчас: {threshold(regime)} "
+                   f"(режим рынка: {regime_text}, строгость +{learner.threshold_adj})")
         if SCAN_SUMMARY.get("text"):
-            msg.append(f"🔎 Сканирование: {SCAN_SUMMARY['text']}")
+            msg.append(f"🔎 Сканирование (посл. цикл): {SCAN_SUMMARY['text']}")
         msg.append(f"🧠 Обучение: {learner.summary()}")
 
         await update.message.reply_text("\n".join(msg))
