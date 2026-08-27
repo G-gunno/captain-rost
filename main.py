@@ -21,15 +21,24 @@ from bot.services.reports import build_report
 from bot.strategy.scanner import SCAN_SUMMARY, FILTERED_BY_NEWS, get_regime, threshold
 from bot.strategy.learner import learner
 from bot.news.cmc import sector_of
-from bot.utils.format import fmt_price, fmt_usdt, fmt_pct, fmt_sym
+from bot.utils.format import fmt_price, fmt_pct, fmt_sym
 
 _app = None
 WEBHOOK_PATH = "/telegram-webhook"
 
 
-# ==================== HTML-хелперы ====================
+# ==================== Хелперы ====================
+def usd(x):
+    """USDT = $: единый формат денег."""
+    return f"${x:,.2f}"
+
+
 def pnl_emoji(x):
     return "🟢" if x > 0.05 else ("🔴" if x < -0.05 else "🟡")
+
+
+def weight_emoji(v):
+    return "🔥" if v >= 1.1 else ("🟢" if v >= 0.9 else ("🟡" if v >= 0.7 else "🔻"))
 
 
 async def reply(update, text, markup=None):
@@ -127,8 +136,8 @@ async def action_exitall(context):
     total = sum(r["pnl"] for r in results)
     return (
         f"🛑 <b>Торговля остановлена</b>\n"
-        f"Позиций закрыто: {len(results)} · {pnl_emoji(total)} {total:+.2f} USDT\n"
-        f"💰 Баланс: <b>{fmt_usdt(paper.usdt)} USDT</b>\n"
+        f"Позиций закрыто: {len(results)} · {pnl_emoji(total)} {total:+.2f}%\n"
+        f"💰 Баланс: <b>{usd(paper.usdt)}</b>\n"
         f"🧠 Опыт обучения сохранён."
     )
 
@@ -332,8 +341,8 @@ async def cmd_learn(update, context):
     lines.append("")
     lines.append("<b>Веса сигналов</b>")
     for k, v in sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True):
-        bar = "▮" * max(1, int(round(v * 5)))
-        lines.append(f"   <i>{k}</i>: {v:.2f} {bar}")
+        bar = "⚡" * max(1, int(round(v * 5)))
+        lines.append(f"   {weight_emoji(v)} <i>{k}</i> · {v:.2f} {bar}")
     lines.append("")
     lines.append("<b>Типы выходов</b>")
     if learner.exit_stats:
@@ -346,7 +355,7 @@ async def cmd_learn(update, context):
             rows.append((t, twr, len(hist), avg))
         rows.sort(key=lambda r: r[3], reverse=True)
         for t, twr, cnt, avg in rows:
-            lines.append(f"   {pnl_emoji(avg)} <i>{t}</i>: {cnt} · wr {twr:.0%} · ср. {avg:+.2f}%")
+            lines.append(f"   {pnl_emoji(avg)} <i>{t}</i> · {cnt} · wr {twr:.0%} · {avg:+.2f}%")
     else:
         lines.append("   (пока нет данных)")
     lines.append("")
@@ -361,7 +370,7 @@ async def cmd_learn(update, context):
             rows.append((s, swr, len(hist), avg, learner.sector_bias(s)))
         rows.sort(key=lambda r: r[1], reverse=True)
         for s, swr, cnt, avg, bias in rows[:8]:
-            lines.append(f"   {pnl_emoji(avg)} <i>{s}</i>: wr {swr:.0%} ({cnt}) · ср. {avg:+.2f}% · бонус {bias:+.2f}")
+            lines.append(f"   {pnl_emoji(avg)} <i>{s}</i> · wr {swr:.0%} ({cnt}) · {avg:+.2f}% · бонус {bias:+.2f}")
     else:
         lines.append("   (пока нет данных)")
     await reply(update, "\n".join(lines))
@@ -421,8 +430,9 @@ async def cmd_status(update, context):
         free_pct = paper.usdt / eq * 100 if eq else 0
 
         msg = ["📊 <b>Капитан Рост</b> · <i>тренировка</i> 🎓", ""]
-        msg.append(f"💰 Свободно: <b>{fmt_usdt(paper.usdt)} USDT</b> ({free_pct:.0f}%)")
-        msg.append(f"🏦 Funding: <b>{fmt_usdt(paper.funding)}</b> · 📈 Equity: <b>{fmt_usdt(eq)} $</b>")
+        msg.append(f"💰 Свободно: <b>{usd(paper.usdt)}</b> ({free_pct:.0f}%)")
+        msg.append(f"🏦 Накопления: <b>{usd(paper.funding)}</b>")
+        msg.append(f"📈 Капитал: <b>{usd(eq)}</b>")
         msg.append("")
 
         if paper.positions:
@@ -434,32 +444,32 @@ async def cmd_status(update, context):
             msg.append(f"📦 <b>Позиции ({len(paper.positions)})</b> · {inv_pct:.0f}% портфеля")
             for sym, pos in paper.positions.items():
                 last = prices.get(sym, {}).get("last", 0)
-                w = pos["qty"] * last / eq * 100 if eq else 0
+                val = pos["qty"] * last
+                w = val / eq * 100 if eq else 0
                 pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
                 kind = "🛰" if pos.get("kind") == "satellite" else "🏛"
                 sector = pos.get("sector") or sector_of(sym[:-4])
-                tp1 = " · ✅TP1" if pos.get("tp1_done") else ""
-                msg.append(
-                    f"{kind} <b>{sym[:-4]}</b> · <i>{sector}</i> · "
-                    f"{pnl_emoji(pnl_pct)} {fmt_pct(pnl_pct)}{tp1} · 💼 {w:.1f}%"
-                )
-                msg.append(
-                    f"   📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)} · "
-                    f"🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])}"
-                )
+                ind = "🔥" if pos.get("tp1_done") else pnl_emoji(pnl_pct)
+                tp1 = " · TP1" if pos.get("tp1_done") else ""
+                msg.append(f"{kind} <b>{sym[:-4]}</b> · <i>{sector}</i> · {ind} {fmt_pct(pnl_pct)}{tp1}")
+                msg.append(f"   💼 {usd(val)} · {w:.1f}%")
+                msg.append(f"   📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)}")
+                msg.append(f"   🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])}")
         else:
             msg.append("📦 <b>Позиции</b>: нет")
         msg.append("")
 
         if paper.orders:
             orders_sum = sum(o["qty"] * o["price"] for o in paper.orders)
-            msg.append(f"📋 <b>Ордера ({len(paper.orders)})</b> · {fmt_usdt(orders_sum)} USDT")
+            msg.append(f"📋 <b>Ордера ({len(paper.orders)})</b> · {usd(orders_sum)}")
             for o in paper.orders:
-                w = o["qty"] * o["price"] / eq * 100 if eq else 0
+                val = o["qty"] * o["price"]
+                w = val / eq * 100 if eq else 0
                 kind = "🛰" if o.get("kind") == "satellite" else "🏛"
                 sector = o.get("sector") or sector_of(o["symbol"][:-4])
                 msg.append(f"{kind} <b>{o['symbol'][:-4]}</b> · <i>{sector}</i> · {w:.1f}%")
-                msg.append(f"   📥 {fmt_price(o['price'])} · 🎯 {fmt_price(o['tp'])} · 🛡 {fmt_price(o['sl'])}")
+                msg.append(f"   💼 {usd(val)} · 📥 {fmt_price(o['price'])}")
+                msg.append(f"   🎯 {fmt_price(o['tp'])} · 🛡 {fmt_price(o['sl'])}")
         else:
             msg.append("📋 <b>Ордера</b>: нет")
         msg.append("")
@@ -495,6 +505,7 @@ async def cmd_status(update, context):
         )
         sat_pct = sat_exposure / eq * 100 if eq else 0
         msg.append(f"🛰 Сателлиты: {sat_pct:.1f}% / 20%")
+        msg.append(f"💵 Суммарный PnL: {pnl_emoji(metrics['total_pnl'])} {usd(metrics['total_pnl'])}")
         msg.append("")
 
         regime, _ = await get_regime()
@@ -502,7 +513,7 @@ async def cmd_status(update, context):
         regime_text = {"bull": "бычий", "neutral": "нейтральный", "bear": "медвежий"}.get(regime, regime)
 
         btc = prices.get("BTCUSDT", {}).get("last", 0)
-        msg.append(f"₿ <b>{fmt_price(btc)} $</b> · {regime_emoji} {regime_text} · 🎯 порог {threshold(regime):g}")
+        msg.append(f"₿ <b>${fmt_price(btc)}</b> · {regime_emoji} {regime_text} · 🎯 порог {threshold(regime):g}")
         if SCAN_SUMMARY.get("text"):
             msg.append(f"🔎 {_html.escape(SCAN_SUMMARY['text'])}")
         wr, n = learner.winrate()
