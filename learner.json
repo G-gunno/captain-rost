@@ -1,1 +1,1 @@
-{"weights": {"ema50": 0.66, "ema21": 0.66, "impulse": 0.61, "rsi": 0.76, "volume": 0.96, "chg24h": 0.71, "news_pos": 0.81, "hype": 0.83, "indep": 0.82}, "results": [0, 1, 1, 0], "threshold_adj": -0.5, "sector_stats": {"Other": [-0.2], "L1": [1.77, 1.89], "DeFi": [-0.2]}, "exit_stats": {"SL": [-0.2, -0.2], "TP1_RUN": [1.77, 1.89]}}
+{"weights": {"ema50": 0.66, "ema21": 0.66, "impulse": 0.61, "rsi": 0.76, "volume": 0.96, "chg24h": 0.71, "news_pos": 0.81, "hype": 0.83, "indep": 0.82}, "results": [], "threshold_adj": 0.0, "sector_stats": {}, "exit_stats": {}}
