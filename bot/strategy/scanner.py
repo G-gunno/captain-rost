@@ -6,7 +6,7 @@ from loguru import logger
 from bot.exchange.market_data import market_data
 from bot.strategy.indicators import ema, rsi, atr
 from bot.strategy.learner import learner
-from bot.news.cmc import get_coin_name
+from bot.news.cmc import get_coin_name, get_sectors_for_pool
 from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sentiment
 
 SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
@@ -14,100 +14,12 @@ FILTERED_BY_NEWS = []
 
 SAT_ATR_PCT = 1.2  # порог волатильности: выше — монета идёт в сателлиты
 
-_instruments_cache = {"data": None, "ts": 0}  # кэш инструментов Bybit на 1 час
+_instruments_cache = {"data": None, "ts": 0}
 
 STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
                 "USD1", "USDD", "EUR", "EURT", "AEUR", "USDT",
                 "RLUSD", "PYUSD", "EURI", "USDS", "USD0", "FRAX",
                 "LUSD", "GUSD", "XUSD", "USDX", "CUSD", "SUSD"}
-
-SECTORS = {
-    # ===== L1 =====
-    "BTC": "L1", "ETH": "L1", "SOL": "L1", "BNB": "L1", "AVAX": "L1",
-    "ADA": "L1", "DOT": "L1", "NEAR": "L1", "APT": "L1", "SUI": "L1",
-    "SEI": "L1", "TON": "L1", "TRX": "L1", "KAS": "L1", "HBAR": "L1",
-    "XLM": "L1", "XRP": "L1", "ALGO": "L1", "ATOM": "L1", "INJ": "L1",
-    "TIA": "L1", "ICP": "L1", "FTM": "L1", "S": "L1", "CSPR": "L1",
-    "MINA": "L1", "HYPE": "L1", "MOVE": "L1", "MON": "L1", "KAVA": "L1",
-    "CELO": "L1", "EGLD": "L1", "VET": "L1", "EOS": "L1", "XTZ": "L1",
-    "NEO": "L1", "QTUM": "L1", "WAVES": "L1", "XEM": "L1", "ZEC": "L1",
-    "LTC": "L1", "BCH": "L1", "ETC": "L1", "XMR": "L1", "DASH": "L1",
-    "ZIL": "L1", "RVN": "L1", "ERG": "L1", "CFX": "L1", "FLR": "L1",
-    "KDA": "L1", "ROSE": "L1", "GLMR": "L1", "ASTR": "L1", "METIS": "L1",
-    "MERL": "L1", "OBT": "L1", "BR": "L1", "XAN": "L1", "CAP": "L1",
-    "TAC": "L1", "FF": "L1", "BLIFE": "L1", "ASTR": "L1", "ASTER": "L1",
-    # ===== L2 =====
-    "ARB": "L2", "OP": "L2", "STRK": "L2", "ZK": "L2", "MANTA": "L2",
-    "SCROLL": "L2", "BLAST": "L2", "POL": "L2", "MATIC": "L2", "ZRO": "L2",
-    "MANTLE": "L2", "LINEA": "L2", "IMX": "L2", "LRC": "L2", "STX": "L2",
-    # ===== DeFi =====
-    "UNI": "DeFi", "AAVE": "DeFi", "LINK": "DeFi", "MKR": "DeFi",
-    "SNX": "DeFi", "CRV": "DeFi", "COMP": "DeFi", "LDO": "DeFi",
-    "DYDX": "DeFi", "GMX": "DeFi", "JUP": "DeFi", "RAY": "DeFi",
-    "PENDLE": "DeFi", "ENA": "DeFi", "ONDO": "DeFi", "PYTH": "DeFi",
-    "JTO": "DeFi", "CAKE": "DeFi", "SUSHI": "DeFi", "FLUID": "DeFi",
-    "EIGEN": "DeFi", "ETHFI": "DeFi", "RSR": "DeFi", "YFI": "DeFi",
-    "BAL": "DeFi", "BNT": "DeFi", "1INCH": "DeFi", "BIFI": "DeFi",
-    "KP3R": "DeFi", "RPL": "DeFi", "SSV": "DeFi", "BLUR": "DeFi",
-    "MAGIC": "DeFi", "TORN": "DeFi", "AZERO": "DeFi", "BICO": "DeFi",
-    "TWT": "DeFi",
-    # ===== AI =====
-    "FET": "AI", "OCEAN": "AI", "RNDR": "AI", "RENDER": "AI",
-    "GRT": "AI", "TAO": "AI", "ARKM": "AI", "WLD": "AI", "VIRTUAL": "AI",
-    "FLOCK": "AI", "GRASS": "AI", "SQD": "AI", "AI16Z": "AI",
-    "ZEREBRO": "AI", "AGIX": "AI", "AKT": "AI", "NMR": "AI", "PHB": "AI",
-    "OLAS": "AI", "PAAL": "AI", "AIOZ": "AI", "CTXC": "AI", "ALCH": "AI",
-    "AI": "AI", "COOKIE": "AI", "METAX": "AI",
-    # ===== Meme =====
-    "DOGE": "Meme", "SHIB": "Meme", "PEPE": "Meme", "BONK": "Meme",
-    "FLOKI": "Meme", "WIF": "Meme", "BRETT": "Meme", "POPCAT": "Meme",
-    "MEW": "Meme", "TURBO": "Meme", "PENGU": "Meme", "SPX": "Meme",
-    "MOODENG": "Meme", "PUMP": "Meme", "NEIRO": "Meme", "BOME": "Meme",
-    "FARTCOIN": "Meme", "PNUT": "Meme", "GOAT": "Meme", "ACT": "Meme",
-    "MOTHER": "Meme", "DADDY": "Meme", "GIGA": "Meme",
-    "MOG": "Meme", "TOSHI": "Meme", "MYRO": "Meme", "SLERF": "Meme",
-    "BODEN": "Meme", "TREMP": "Meme", "HARAMBE": "Meme", "MAGA": "Meme",
-    "TRUMP": "Meme", "HAT": "Meme",
-    # ===== Gaming =====
-    "AXS": "Gaming", "SAND": "Gaming", "MANA": "Gaming", "GALA": "Gaming",
-    "RONIN": "Gaming", "PIXEL": "Gaming", "PORTAL": "Gaming",
-    "XAI": "Gaming", "NOT": "Gaming", "HMSTR": "Gaming", "CATI": "Gaming",
-    "ENJ": "Gaming", "CHZ": "Gaming", "WEMIX": "Gaming", "SUPER": "Gaming",
-    "YGG": "Gaming", "BEAM": "Gaming", "GHST": "Gaming",
-    "PRIME": "Gaming", "ALT": "Gaming", "ALICE": "Gaming", "BIGTIME": "Gaming",
-    # ===== Infra =====
-    "FIL": "Infra", "AR": "Infra", "LPT": "Infra",
-    "IOTA": "Infra", "API3": "Infra", "BAND": "Infra",
-    "TRB": "Infra", "HNT": "Infra", "IOTX": "Infra", "XDB": "Infra",
-    "WAXP": "Infra", "STORJ": "Infra", "GTC": "Infra", "ANKR": "Infra",
-    "HONEY": "Infra", "RAD": "Infra", "MOBILE": "Infra",
-    "MNT": "Infra",
-    # ===== RWA =====
-    "MPL": "RWA", "CFG": "RWA", "TOKEN": "RWA", "POLYX": "RWA",
-    "CHEX": "RWA", "TRADE": "RWA", "IXT": "RWA", "LPOOL": "RWA",
-    # ===== Privacy =====
-    "FIRO": "Privacy", "SCRT": "Privacy", "NYM": "Privacy", "OASIS": "Privacy",
-    # ===== Storage =====
-    "SIA": "Storage",
-    # ===== Exchange tokens =====
-    "KCS": "Exchange", "OKB": "Exchange", "HT": "Exchange",
-    "CRO": "Exchange", "GT": "Exchange", "MX": "Exchange", "BGB": "Exchange",
-}
-
-SECTOR_LIMITS = {
-    "L1": 3, "L2": 3, "DeFi": 3, "AI": 3, "Meme": 3,
-    "Gaming": 3, "Infra": 3, "RWA": 2, "Privacy": 2,
-    "Storage": 2, "DEX": 3, "Launchpad": 2, "Exchange": 2,
-    "Other": 5,
-}
-
-
-def sector_of(base):
-    return SECTORS.get(base, "Other")
-
-
-def sector_limit(sector):
-    return SECTOR_LIMITS.get(sector, 3)
 
 
 def is_tradable(symbol):
@@ -123,7 +35,7 @@ def is_tradable(symbol):
 
 def threshold(regime):
     base = {"bull": 5, "neutral": 6, "bear": 8}.get(regime, 6)
-    return max(4, base + learner.threshold_adj)
+    return max(5, base + learner.threshold_adj)  # минимальный порог 5
 
 
 def _returns(closes):
@@ -169,7 +81,7 @@ async def fetch_new_listings():
         try:
             async with httpx.AsyncClient(timeout=15) as c:
                 cursor = ""
-                for page in range(5):  # максимум 5 страниц по 1000
+                for page in range(5):
                     params = {"category": "spot", "limit": 1000}
                     if cursor:
                         params["cursor"] = cursor
@@ -243,12 +155,10 @@ async def scan(regime, tickers, limit=5):
     tradable = [s for s, t in tickers.items()
                 if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
 
-    # Базовый пул: ликвидные + растущие за сутки
     by_vol = sorted(tradable, key=lambda s: tickers[s]["quote_volume"], reverse=True)[:40]
     by_chg = sorted([s for s in tradable if 0 < tickers[s]["change_pct"] < 25],
                     key=lambda s: tickers[s]["change_pct"], reverse=True)[:20]
 
-    # Momentum: сильный тренд за неделю
     by_momentum = []
     for sym in tradable[:50]:
         candles = await market_data.get_kline(sym, "60", 168)
@@ -258,7 +168,6 @@ async def scan(regime, tickers, limit=5):
                 by_momentum.append((sym, chg_7d))
     by_momentum = [s for s, _ in sorted(by_momentum, key=lambda x: x[1], reverse=True)][:15]
 
-    # Volatility: высоковолатильные для сателлитов
     by_volatility = []
     for sym in tradable[:50]:
         candles = await market_data.get_kline(sym, "15", 60)
@@ -270,7 +179,6 @@ async def scan(regime, tickers, limit=5):
                 by_volatility.append((sym, atr_pct))
     by_volatility = [s for s, _ in sorted(by_volatility, key=lambda x: x[1], reverse=True)][:10]
 
-    # NEW LISTINGS: Bybit API (launchTime) + RSS как дополнение
     sources = await fetch_new_listings()
     try:
         rss = await fetch_listings_cache()
@@ -282,7 +190,7 @@ async def scan(regime, tickers, limit=5):
     by_listings = []
     seen = set()
     for sym, age_h in sorted(sources, key=lambda x: x[1]):
-        if sym in seen or not (24 <= age_h <= 336):  # 24ч – 14 дней
+        if sym in seen or not (24 <= age_h <= 336):
             continue
         seen.add(sym)
         if sym in tickers and is_tradable(sym) and tickers[sym]["quote_volume"] >= 500_000:
@@ -290,9 +198,11 @@ async def scan(regime, tickers, limit=5):
             logger.info(f"NEW LISTING: {sym} ({age_h:.1f}h old)")
     by_listings = by_listings[:10]
 
-    # Объединяем пул
     pool = list(dict.fromkeys(by_vol + by_chg + by_momentum + by_volatility +
                               [s for s, _ in by_listings]))
+
+    # АВТО-СЕКТОРА: ручной словарь -> кэш -> теги CMC
+    sectors_map = await get_sectors_for_pool(list({s[:-4] for s in pool}))
 
     news_items = await fetch_news_cache()
     btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
@@ -310,7 +220,6 @@ async def scan(regime, tickers, limit=5):
             continue
         score, reasons, keys = score_symbol(candles, tickers[sym], regime)
 
-        # Корреляция с BTC
         corr = _corr(_returns([c["close"] for c in candles]), btc_ret)
         if corr > 0.85 and regime == "neutral":
             score -= 1
@@ -321,7 +230,7 @@ async def scan(regime, tickers, limit=5):
             keys.append("indep")
 
         kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
-        sector = sector_of(sym[:-4])
+        sector = sectors_map.get(sym[:-4], "Other")
 
         scored.append({"symbol": sym, "score": score, "reasons": reasons,
                        "reason_keys": keys, "atr": a, "last": last_price,
