@@ -12,7 +12,7 @@ from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sent
 SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
 FILTERED_BY_NEWS = []
 
-SAT_ATR_PCT = 1.2  # порог волатильности: выше — монета идёт в сателлиты
+SAT_ATR_PCT = 1.2
 
 _instruments_cache = {"data": None, "ts": 0}
 
@@ -34,8 +34,8 @@ def is_tradable(symbol):
 
 
 def threshold(regime):
-    base = {"bull": 5, "neutral": 6, "bear": 8}.get(regime, 6)
-    return max(5, base + learner.threshold_adj)  # минимальный порог 5
+    base = {"bull": 5.0, "neutral": 6.0, "bear": 8.0}.get(regime, 6.0)
+    return min(9.5, max(5.0, base + learner.threshold_adj))
 
 
 def _returns(closes):
@@ -72,7 +72,6 @@ async def get_regime():
 
 
 async def fetch_new_listings():
-    """Новые листинги через Bybit API (launchTime) — надёжный источник. Кэш 1 час."""
     now = time.time()
     if _instruments_cache["data"] is not None and now - _instruments_cache["ts"] < 3600:
         raw = _instruments_cache["data"]
@@ -85,8 +84,7 @@ async def fetch_new_listings():
                     params = {"category": "spot", "limit": 1000}
                     if cursor:
                         params["cursor"] = cursor
-                    url = "https://api.bybit.com/v5/market/instruments-info"
-                    r = await c.get(url, params=params)
+                    r = await c.get("https://api.bybit.com/v5/market/instruments-info", params=params)
                     if r.status_code != 200:
                         logger.error(f"Bybit API returned status {r.status_code}")
                         break
@@ -115,8 +113,7 @@ async def fetch_new_listings():
         sym = ins.get("symbol", "")
         if not sym.endswith("USDT"):
             continue
-        status = ins.get("status", "")
-        if status != "Trading":
+        if ins.get("status", "") != "Trading":
             continue
         try:
             launch = int(ins.get("launchTime", 0) or 0)
@@ -201,7 +198,6 @@ async def scan(regime, tickers, limit=5):
     pool = list(dict.fromkeys(by_vol + by_chg + by_momentum + by_volatility +
                               [s for s, _ in by_listings]))
 
-    # АВТО-СЕКТОРА: ручной словарь -> кэш -> теги CMC
     sectors_map = await get_sectors_for_pool(list({s[:-4] for s in pool}))
 
     news_items = await fetch_news_cache()
@@ -232,7 +228,6 @@ async def scan(regime, tickers, limit=5):
         kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
         sector = sectors_map.get(sym[:-4], "Other")
 
-        # СЕКТОРНОЕ САМООБУЧЕНИЕ: бонус/штраф по истории сектора
         bias = learner.sector_bias(sector)
         if bias:
             score += bias
@@ -248,7 +243,7 @@ async def scan(regime, tickers, limit=5):
 
     thr = threshold(regime)
     SCAN_SUMMARY["text"] = " · ".join(
-        f"{c['symbol']} {c['score']:.1f}/{thr}" for c in scored[:3]
+        f"{c['symbol']} {c['score']:.1f}/{thr:g}" for c in scored[:3]
     ) or "сигналов нет"
     SCAN_SUMMARY["thr"] = thr
     SCAN_SUMMARY["ts"] = time.time()
