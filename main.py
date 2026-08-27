@@ -26,14 +26,11 @@ _app = None
 WEBHOOK_PATH = "/telegram-webhook"
 
 
-# ==================== HTTP handlers ====================
 async def health_handler(request):
-    """Ответ для Render health check (GET /)."""
     return web.Response(text="OK")
 
 
 async def webhook_handler(request):
-    """Принимаем апдейты от Telegram (POST /telegram-webhook)."""
     try:
         data = await request.json()
         update = Update.de_json(data, bot=_app.bot)
@@ -43,7 +40,6 @@ async def webhook_handler(request):
     return web.Response(text="OK")
 
 
-# ==================== Уведомления и циклы ====================
 async def send_chat(text):
     chat = os.getenv("TELEGRAM_CHAT_ID")
     if chat and _app:
@@ -89,7 +85,6 @@ async def error_handler(update, context):
     logger.exception(f"Unhandled error: {err}")
 
 
-# ==================== ДЕЙСТВИЯ С ПОДТВЕРЖДЕНИЕМ ====================
 async def action_pause(context):
     if bot_state.paused:
         return "⏸ Уже на паузе."
@@ -159,7 +154,6 @@ async def ask_confirmation(update, context, key):
 
 
 async def confirm_handler(update, context):
-    """Обработка кнопок подтверждения. Защищена от двойных нажатий."""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -180,13 +174,11 @@ async def confirm_handler(update, context):
         fn, _ = entry
         try:
             result = await fn(context)
-            # Убираем кнопки после подтверждения — повторное нажатие невозможно
             await query.edit_message_text(
                 f"✅ Подтверждено.\n\n{result}",
                 reply_markup=InlineKeyboardMarkup([]),
             )
         except BadRequest as e:
-            # Двойное нажатие: сообщение уже изменено — просто игнорируем
             if "Message is not modified" in str(e):
                 return
             try:
@@ -203,7 +195,6 @@ async def confirm_handler(update, context):
                 pass
 
 
-# ==================== Главный запуск ====================
 async def run_all(application):
     global _app
     _app = application
@@ -234,7 +225,7 @@ async def run_all(application):
         BotCommand("pause", "⏸ Пауза (с подтверждением)"),
         BotCommand("resume", "▶️ Возобновить (с подтверждением)"),
         BotCommand("exitall", "🛑 Продать всё и остановить (с подтверждением)"),
-        BotCommand("learn", "🧠 Обучение: веса и winrate"),
+        BotCommand("learn", "🧠 Обучение: веса, winrate, типы выходов"),
         BotCommand("resetlearn", "🧠♻️ Сбросить опыт обучения (с подтверждением)"),
         BotCommand("resetstats", "📊 Сбросить статистику (с подтверждением)"),
         BotCommand("news", "📰 Статус новостной аналитики"),
@@ -273,7 +264,6 @@ async def run_all(application):
         await runner.cleanup()
 
 
-# ==================== Команды Telegram ====================
 async def cmd_start(update, context):
     bot_state.fresh_start()
     await update.message.reply_text(
@@ -289,7 +279,7 @@ async def cmd_help(update, context):
         "/pause — пауза (ордера запомнить и снять) · с подтверждением\n"
         "/resume — возобновить (ордера вернуть) · с подтверждением\n"
         "/exitall — остановить и продать всё · с подтверждением\n"
-        "/learn — показать обучение: веса сигналов, winrate и секторная аналитика\n"
+        "/learn — обучение: веса, winrate, сектора и типы выходов\n"
         "/resetlearn — сбросить опыт обучения в ноль · с подтверждением\n"
         "/resetstats — сбросить только торговую статистику · с подтверждением\n"
         "/news — статус новостной аналитики (CMC + RSS)\n"
@@ -322,12 +312,27 @@ async def cmd_learn(update, context):
     wr, n = learner.winrate()
     lines = ["🧠 ОБУЧЕНИЕ БОТА", ""]
     lines.append(f"Winrate: {wr:.0%} (последних сделок: {n})")
-    lines.append(f"Строгость входа: {learner.threshold_adj:+d}")
+    lines.append(f"Строгость входа: {learner.threshold_adj:+.1f}")
     lines.append("")
     lines.append("Веса сигналов:")
     for k, v in sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True):
         bar = "▮" * max(1, int(round(v * 5)))
         lines.append(f"   {k}: {v:.2f} {bar}")
+    lines.append("")
+    lines.append("Типы выходов:")
+    if learner.exit_stats:
+        rows = []
+        for t, hist in learner.exit_stats.items():
+            if not hist:
+                continue
+            twr = sum(1 for p in hist if p > 0) / len(hist)
+            avg = sum(hist) / len(hist)
+            rows.append((t, twr, len(hist), avg))
+        rows.sort(key=lambda r: r[3], reverse=True)
+        for t, twr, cnt, avg in rows:
+            lines.append(f"   {t}: {cnt} · winrate {twr:.0%} · ср. {avg:+.2f}%")
+    else:
+        lines.append("   (пока нет данных)")
     lines.append("")
     lines.append("Секторная аналитика:")
     if learner.sector_stats:
@@ -369,7 +374,7 @@ async def cmd_news(update, context):
     lines.append("")
     lines.append("🏷 COINMARKETCAP:")
     lines.append(f"   {'✅' if cmc['api_key_set'] else '❌'} API ключ: {'настроен' if cmc['api_key_set'] else 'НЕ НАСТРОЕН'}")
-    lines.append(f"   📊 В кэше: {cmc['cache_count']} монет")
+    lines.append(f"   📊 В кэше: {cmc['cache_count']} монет · выучено секторов: {cmc['sectors_learned']}")
 
     lines.append("")
     lines.append("🚫 ОТФИЛЬТРОВАНО (последние 5):")
@@ -522,8 +527,8 @@ async def cmd_status(update, context):
         btc = prices.get("BTCUSDT", {}).get("last", 0)
         msg.append("")
         msg.append(f"₿ BTC: {fmt_price(btc)} $ · {regime_emoji} {regime_text}")
-        msg.append(f"🎯 Порог входа сейчас: {threshold(regime)} "
-                   f"(режим рынка: {regime_text}, строгость {learner.threshold_adj:+d})")
+        msg.append(f"🎯 Порог входа сейчас: {threshold(regime):g} "
+                   f"(режим рынка: {regime_text}, строгость {learner.threshold_adj:+.1f})")
         if SCAN_SUMMARY.get("text"):
             msg.append(f"🔎 Сканирование (посл. цикл): {SCAN_SUMMARY['text']}")
         msg.append(f"🧠 Обучение: {learner.summary()}")
