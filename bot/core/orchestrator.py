@@ -141,8 +141,12 @@ async def run_cycle():
 
     # АДАПТИВНАЯ СТРАТЕГИЯ: корректируем порог входа на основе метрик
     metrics = paper.get_metrics(tickers)
-    new_thr_adj = learner.update_threshold(metrics["profit_factor"], metrics["max_drawdown_pct"])
-    mode, _ = learner.risk_mode(metrics["profit_factor"], metrics["max_drawdown_pct"])
+    new_thr_adj = learner.update_threshold(
+        metrics["profit_factor"], metrics["max_drawdown_pct"], metrics["total_trades"]
+    )
+    mode, _ = learner.risk_mode(
+        metrics["profit_factor"], metrics["max_drawdown_pct"], metrics["total_trades"]
+    )
     pf = metrics["profit_factor"]
     pf_txt = "∞" if pf == float("inf") else (f"{pf:.2f}" if pf is not None else "—")
     logger.info(f"METRICS: PF={pf_txt} | DD={metrics['max_drawdown_pct']:.1f}% | "
@@ -394,7 +398,6 @@ async def run_cycle():
             continue
 
         if kind == "satellite":
-            # Широкий SL (даём "дышать"), дальний TP, R:R >= 2
             sl_dist_pct = max(min(1.5 * a / entry * 100, SAT_MAX_SL_PCT), 2.0)
             tp_dist_pct = max(min(2.5 * a / entry * 100, 12.0), sl_dist_pct * MIN_RR_SAT)
             sl = entry * (1 - sl_dist_pct / 100)
