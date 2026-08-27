@@ -13,7 +13,7 @@ KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "news_pos", "hyp
 
 
 class Learner:
-    """Самообучение: взвешенное по силе сделок + адаптивная стратегия на основе PF и Max Drawdown."""
+    """Самообучение: взвешенное по силе сделок + адаптивная стратегия по PF и Max Drawdown."""
 
     def __init__(self):
         self.weights = {k: 1.0 for k in KEYS}
@@ -91,18 +91,28 @@ class Learner:
         last = self.results[-20:]
         return (sum(last) / len(last), len(last)) if last else (0.0, 0)
 
-    # --- АДАПТИВНАЯ СТРАТЕГИЯ НА ОСНОВЕ PF И MAX DD ---
-    def risk_mode(self, profit_factor, max_dd_pct):
-        """Возвращает (mode_name, динамический сдвиг порога)."""
+    # --- АДАПТИВНАЯ СТРАТЕГИЯ НА ОСНОВЕ PF И MAX DD (СМЯГЧЁННАЯ) ---
+    def risk_mode(self, profit_factor, max_dd_pct, total_trades=0):
+        """Возвращает (mode_name, динамический сдвиг порога).
+
+        Мягкая логика без мёртвой петли:
+        - штрафы по PF только после 5+ сделок (раньше — шум);
+        - PF < 0.5   -> STRICT (+2);
+        - PF 0.5–1.0 -> CAUTIOUS (+1), а не STRICT как раньше;
+        - DD > 15%   -> +1 (защита капитала, всегда);
+        - PF > 1.5 и DD < 8% -> -1 (AGGRESSIVE).
+        """
         adj = 0
-        if profit_factor is not None and profit_factor < 1.0:
-            adj += 2
-        elif profit_factor is not None and profit_factor < 1.3:
-            adj += 1
+        enough = total_trades >= 5
+        if enough and profit_factor is not None:
+            if profit_factor < 0.5:
+                adj += 2
+            elif profit_factor < 1.0:
+                adj += 1
+            elif profit_factor > 1.5 and max_dd_pct and max_dd_pct < 8:
+                adj -= 1
         if max_dd_pct and max_dd_pct > 15:
             adj += 1
-        if profit_factor is not None and profit_factor > 1.5 and max_dd_pct and max_dd_pct < 8:
-            adj -= 1
         if adj >= 2:
             mode = "STRICT"
         elif adj == 1:
@@ -113,18 +123,16 @@ class Learner:
             mode = "NORMAL"
         return mode, adj
 
-    def update_threshold(self, profit_factor, max_dd_pct):
+    def update_threshold(self, profit_factor, max_dd_pct, total_trades=0):
         """Обновляет динамическую корректировку порога на основе метрик."""
-        _, dyn_adj = self.risk_mode(profit_factor, max_dd_pct)
-        wr, n = self.winrate()
+        _, dyn_adj = self.risk_mode(profit_factor, max_dd_pct, total_trades)
         wr_adj = 0
-        if n >= 10:
+        if total_trades >= 10:
             last = self.results[-20:]
-            wr = sum(last) / len(last)
-            if wr < 0.35:
-                wr_adj = 1
-            elif wr > 0.55:
-                wr_adj = 0
+            if last:
+                wr = sum(last) / len(last)
+                if wr < 0.35:
+                    wr_adj = 1
         self.threshold_adj = dyn_adj + wr_adj
         self.save()
         return self.threshold_adj
