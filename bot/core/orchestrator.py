@@ -83,7 +83,9 @@ async def startup_reconciliation():
                 pos["sl"] = round(entry * (1 - d / 100), 10)
                 fixed.append(f"SL {fmt_price(pos['sl'])}")
         if fixed:
-            actions.append(f"{sym}: {' и '.join(fixed)}")
+            kind_tag = "🛰" if pos.get("kind") == "satellite" else "🏛"
+            sector = pos.get("sector") or "Other"
+            actions.append(f"{kind_tag} <b>{sym[:-4]}</b> · <i>{sector}</i> · {' · '.join(fixed)}")
     paper.save()
 
     regime, _ = await get_regime()
@@ -91,9 +93,11 @@ async def startup_reconciliation():
     for order in list(paper.orders):
         sym = order["symbol"]
         t = prices.get(sym)
+        kind_tag = "🛰" if order.get("kind") == "satellite" else "🏛"
+        sector = order.get("sector") or "Other"
         if not t:
             paper.cancel_order(order["id"])
-            actions.append(f"{sym}: ордер снят (нет данных)")
+            actions.append(f"{kind_tag} <b>{sym[:-4]}</b> · <i>{sector}</i> · ордер снят (нет данных)")
             continue
         candles = await market_data.get_kline(sym, "15", 120)
         if len(candles) < 60:
@@ -102,14 +106,14 @@ async def startup_reconciliation():
         score, _, _ = score_symbol(candles, t, regime)
         if score < thr - 1:
             paper.cancel_order(order["id"])
-            actions.append(f"{sym}: ордер снят (score {score:.1f} < {thr:g})")
+            actions.append(f"{kind_tag} <b>{sym[:-4]}</b> · <i>{sector}</i> · ордер снят · ⭐ {score:.1f} ниже {thr:g}")
         elif a > 0:
             order["price"] = t["last"] * 0.998
             order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
             order["sl"] = min(order["price"] - 1.2 * a, order["price"] * (1 - MIN_SL_PCT / 100))
             order["created"] = int(time.time())
             order["requotes"] = 0
-            actions.append(f"{sym}: ордер перевыставлен (score {score:.1f})")
+            actions.append(f"{kind_tag} <b>{sym[:-4]}</b> · <i>{sector}</i> · ордер перевыставлен · ⭐ {score:.1f}")
     paper.save()
 
     for line in actions:
@@ -165,9 +169,11 @@ async def run_cycle():
             pos["kind"] = f.get("kind", "core")
             pos["sector"] = f.get("sector", "Other")
             paper.save()
+        kind_tag = "🛰" if (pos and pos.get("kind") == "satellite") else "🏛"
+        sector = (pos.get("sector") if pos else None) or f.get("sector") or "Other"
         await notify(
-            f"📥 <b>Покупка исполнена</b> · {f['symbol'][:-4]}\n"
-            f"💵 {fmt_usdt(f['qty'] * f['price'])} USDT @ {fmt_price(f['price'])}\n"
+            f"📥 <b>Покупка исполнена</b> · {f['symbol'][:-4]} · {kind_tag} <i>{sector}</i>\n"
+            f"💵 {fmt_usdt(f['qty'] * f['price'])} USDT · 📥 {fmt_price(f['price'])}\n"
             f"🎯 {fmt_price(f['tp'])} · 🛡 {fmt_price(f['sl'])}"
         )
 
@@ -309,16 +315,14 @@ async def run_cycle():
         neg, pos_news, _, _ = check_sentiment(news_items, [base, name])
         if neg > 0 and neg > pos_news:
             paper.cancel_order(order["id"])
-            await notify(
-                f"⚠️ <b>Ордер снят</b> · {order['symbol'][:-4]} · негатив {neg}"
-            )
+            await notify(f"⚠️ <b>Ордер снят</b> · {base} · негатив {neg}")
             continue
 
         if (now - order["created"]) < 900:
             continue
         if order.get("requotes", 0) >= 2:
             paper.cancel_order(order["id"])
-            await notify(f"❌ <b>Ордер снят</b> · {order['symbol'][:-4]} · 3 попытки без исполнения")
+            await notify(f"❌ <b>Ордер снят</b> · {base} · 3 попытки без исполнения")
             continue
         candles = await market_data.get_kline(order["symbol"], "15", 60)
         a = atr(candles) if candles else 0
@@ -333,7 +337,7 @@ async def run_cycle():
         paper.orders.append(order)
         paper.save()
         await notify(
-            f"🔁 <b>Ордер перевыставлен</b> · {order['symbol'][:-4]}\n"
+            f"🔁 <b>Ордер перевыставлен</b> · {base}\n"
             f"📥 {fmt_price(order['price'])} · попытка {order['requotes'] + 1}"
         )
 
