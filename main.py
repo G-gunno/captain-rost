@@ -1,6 +1,7 @@
 import os
 import asyncio
 import calendar
+import html as _html
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -26,6 +27,28 @@ _app = None
 WEBHOOK_PATH = "/telegram-webhook"
 
 
+# ==================== HTML-хелперы ====================
+def pnl_emoji(x):
+    """Цветной индикатор PnL."""
+    return "🟢" if x > 0.05 else ("🔴" if x < -0.05 else "🟡")
+
+
+async def _safe_send(bot, chat_id, text):
+    """HTML с фолбэком на plain text."""
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+    except BadRequest:
+        await bot.send_message(chat_id=chat_id, text=text)
+
+
+async def reply(update, text):
+    try:
+        await update.message.reply_text(text, parse_mode="HTML")
+    except BadRequest:
+        await update.message.reply_text(text)
+
+
+# ==================== HTTP handlers ====================
 async def health_handler(request):
     return web.Response(text="OK")
 
@@ -40,13 +63,11 @@ async def webhook_handler(request):
     return web.Response(text="OK")
 
 
+# ==================== Уведомления и циклы ====================
 async def send_chat(text):
     chat = os.getenv("TELEGRAM_CHAT_ID")
     if chat and _app:
-        try:
-            await _app.bot.send_message(chat_id=chat, text=text)
-        except Exception as e:
-            logger.error(f"send_chat error: {e}")
+        await _safe_send(_app.bot, chat, text)
 
 
 async def cycle_loop():
@@ -85,6 +106,7 @@ async def error_handler(update, context):
     logger.exception(f"Unhandled error: {err}")
 
 
+# ==================== ДЕЙСТВИЯ С ПОДТВЕРЖДЕНИЕМ ====================
 async def action_pause(context):
     if bot_state.paused:
         return "⏸ Уже на паузе."
@@ -92,7 +114,7 @@ async def action_pause(context):
     paper.orders = []
     paper.save()
     bot_state.pause(orders)
-    return f"⏸ ПАУЗА. Ордеров запомнено и снято: {len(orders)}. Открытые позиции остались."
+    return f"⏸ <b>Пауза</b>: ордеров снято {len(orders)}, позиции открыты."
 
 
 async def action_resume(context):
@@ -101,7 +123,7 @@ async def action_resume(context):
     orders = bot_state.resume()
     paper.orders.extend(orders)
     paper.save()
-    return f"▶️ ВОЗОБНОВЛЕНО. Ордеров восстановлено: {len(orders)}."
+    return f"▶️ <b>Возобновлено</b>: ордеров восстановлено {len(orders)}."
 
 
 async def action_exitall(context):
@@ -110,34 +132,34 @@ async def action_exitall(context):
     results = paper.sell_all(prices)
     total = sum(r["pnl"] for r in results)
     return (
-        f"🛑 ТОРГОВЛЯ ОСТАНОВЛЕНА.\nПозиций закрыто: {len(results)}\n"
-        f"Суммарный PnL: {total:+.2f} USDT\nБаланс: {fmt_usdt(paper.usdt)} USDT\n"
+        f"🛑 <b>Торговля остановлена</b>\n"
+        f"Позиций закрыто: {len(results)} · {pnl_emoji(total)} {total:+.2f} USDT\n"
+        f"💰 Баланс: <b>{fmt_usdt(paper.usdt)} USDT</b>\n"
         f"🧠 Опыт обучения сохранён."
     )
 
 
 async def action_resetlearn(context):
     learner.reset()
-    return "🧠♻️ Опыт обучения сброшен: все веса = 1.0, история очищена."
+    return "🧠♻️ <b>Опыт сброшен</b>: веса = 1.0, история очищена."
 
 
 async def action_resetstats(context):
     paper.reset_stats()
     learner.reset_stats()
     return (
-        "📊 СТАТИСТИКА СБРОШЕНА.\n"
-        "История сделок и winrate очищены, PF / DD / Expectancy с нуля.\n"
-        "🧠 Веса-знания сохранены.\n"
-        "Режим STRICT снят, порог вернулся к базовому."
+        "📊 <b>Статистика сброшена</b>\n"
+        "PF / DD / Expectancy — с нуля, веса-знания сохранены.\n"
+        "Режим вернулся к базовому."
     )
 
 
 ACTIONS = {
-    "pause": (action_pause, "⏸ поставить торговлю на паузу?"),
-    "resume": (action_resume, "▶️ возобновить торговлю?"),
-    "exitall": (action_exitall, "🛑 продать ВСЕ позиции и остановить торговлю?"),
-    "resetlearn": (action_resetlearn, "🧠♻️ сбросить опыт обучения (веса и историю)?"),
-    "resetstats": (action_resetstats, "📊 сбросить торговую статистику (историю и метрики)?"),
+    "pause": (action_pause, "поставить торговлю на паузу?"),
+    "resume": (action_resume, "возобновить торговлю?"),
+    "exitall": (action_exitall, "продать ВСЕ позиции и остановить торговлю?"),
+    "resetlearn": (action_resetlearn, "сбросить опыт обучения (веса и историю)?"),
+    "resetstats": (action_resetstats, "сбросить торговую статистику?"),
 }
 
 
@@ -147,10 +169,9 @@ async def ask_confirmation(update, context, key):
         InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm:{key}"),
         InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
     ]]
-    await update.message.reply_text(
-        f"⚠️ Требуется подтверждение: {question}",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+    await reply(update, f"⚠️ <b>Подтвердите:</b> {_html.escape(question)}")
+    # кнопки прикрепляем отдельно, т.к. reply уже отправлен
+    await update.message.reply_text("👇", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def confirm_handler(update, context):
@@ -160,7 +181,7 @@ async def confirm_handler(update, context):
 
     if data == "cancel":
         try:
-            await query.edit_message_text("❌ Действие отменено.",
+            await query.edit_message_text("❌ Отменено.",
                                           reply_markup=InlineKeyboardMarkup([]))
         except BadRequest:
             pass
@@ -174,27 +195,34 @@ async def confirm_handler(update, context):
         fn, _ = entry
         try:
             result = await fn(context)
-            await query.edit_message_text(
-                f"✅ Подтверждено.\n\n{result}",
-                reply_markup=InlineKeyboardMarkup([]),
-            )
+            try:
+                await query.edit_message_text(
+                    f"✅ <b>Подтверждено</b>\n\n{result}",
+                    reply_markup=InlineKeyboardMarkup([]),
+                )
+            except BadRequest:
+                await query.edit_message_text(
+                    f"✅ Подтверждено\n\n{result}",
+                    reply_markup=InlineKeyboardMarkup([]),
+                )
         except BadRequest as e:
             if "Message is not modified" in str(e):
                 return
             try:
-                await query.edit_message_text(f"⚠️ Ошибка выполнения: {e}",
+                await query.edit_message_text(f"⚠️ Ошибка: {e}",
                                               reply_markup=InlineKeyboardMarkup([]))
             except BadRequest:
                 pass
         except Exception as e:
             logger.exception(f"confirm action error: {e}")
             try:
-                await query.edit_message_text(f"⚠️ Ошибка выполнения: {e}",
+                await query.edit_message_text(f"⚠️ Ошибка: {e}",
                                               reply_markup=InlineKeyboardMarkup([]))
             except BadRequest:
                 pass
 
 
+# ==================== Главный запуск ====================
 async def run_all(application):
     global _app
     _app = application
@@ -226,8 +254,8 @@ async def run_all(application):
         BotCommand("resume", "▶️ Возобновить (с подтверждением)"),
         BotCommand("exitall", "🛑 Продать всё и остановить (с подтверждением)"),
         BotCommand("learn", "🧠 Обучение: веса, winrate, типы выходов"),
-        BotCommand("resetlearn", "🧠♻️ Сбросить опыт обучения (с подтверждением)"),
-        BotCommand("resetstats", "📊 Сбросить статистику (с подтверждением)"),
+        BotCommand("resetlearn", "🧠♻️ Сбросить опыт обучения"),
+        BotCommand("resetstats", "📊 Сбросить статистику"),
         BotCommand("news", "📰 Статус новостной аналитики"),
         BotCommand("log", "📄 Файл лога"),
         BotCommand("help", "📖 Справка"),
@@ -264,27 +292,23 @@ async def run_all(application):
         await runner.cleanup()
 
 
+# ==================== Команды Telegram ====================
 async def cmd_start(update, context):
     bot_state.fresh_start()
-    await update.message.reply_text(
-        "🤖 Капитан Рост на связи! Торговля запущена, цикл начат заново, временный файл ордеров удалён."
-    )
+    await reply(update, "🤖 <b>Капитан Рост</b> на связи! Торговля запущена, цикл начат заново.")
 
 
 async def cmd_help(update, context):
-    await update.message.reply_text(
-        "📖 МОИ КОМАНДЫ:\n"
-        "/start — запустить торговлю, новый цикл\n"
-        "/status — балансы, позиции с весами, активные ордера, метрики, статистика\n"
-        "/pause — пауза (ордера запомнить и снять) · с подтверждением\n"
-        "/resume — возобновить (ордера вернуть) · с подтверждением\n"
-        "/exitall — остановить и продать всё · с подтверждением\n"
-        "/learn — обучение: веса, winrate, сектора и типы выходов\n"
-        "/resetlearn — сбросить опыт обучения в ноль · с подтверждением\n"
-        "/resetstats — сбросить только торговую статистику · с подтверждением\n"
-        "/news — статус новостной аналитики (CMC + RSS)\n"
-        "/log — прислать файл лога\n"
-        "/help — эта справка"
+    await reply(update,
+        "📖 <b>Мои команды</b>\n"
+        "/status — балансы, позиции, метрики\n"
+        "/pause · /resume — пауза и возврат\n"
+        "/exitall — продать всё и остановить\n"
+        "/learn — веса, winrate, сектора, типы выходов\n"
+        "/resetstats — сброс статистики (веса сохранятся)\n"
+        "/resetlearn — полный сброс обучения\n"
+        "/news — новостная аналитика\n"
+        "/log — файл лога"
     )
 
 
@@ -310,16 +334,16 @@ async def cmd_resetstats(update, context):
 
 async def cmd_learn(update, context):
     wr, n = learner.winrate()
-    lines = ["🧠 ОБУЧЕНИЕ БОТА", ""]
-    lines.append(f"Winrate: {wr:.0%} (последних сделок: {n})")
-    lines.append(f"Строгость входа: {learner.threshold_adj:+.1f}")
+    lines = ["🧠 <b>Обучение бота</b>", ""]
+    lines.append(f"Winrate: <b>{wr:.0%}</b> (последних сделок: {n})")
+    lines.append(f"Строгость входа: <b>{learner.threshold_adj:+.1f}</b>")
     lines.append("")
-    lines.append("Веса сигналов:")
+    lines.append("<b>Веса сигналов</b>")
     for k, v in sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True):
         bar = "▮" * max(1, int(round(v * 5)))
-        lines.append(f"   {k}: {v:.2f} {bar}")
+        lines.append(f"   <i>{k}</i>: {v:.2f} {bar}")
     lines.append("")
-    lines.append("Типы выходов:")
+    lines.append("<b>Типы выходов</b>")
     if learner.exit_stats:
         rows = []
         for t, hist in learner.exit_stats.items():
@@ -330,11 +354,11 @@ async def cmd_learn(update, context):
             rows.append((t, twr, len(hist), avg))
         rows.sort(key=lambda r: r[3], reverse=True)
         for t, twr, cnt, avg in rows:
-            lines.append(f"   {t}: {cnt} · winrate {twr:.0%} · ср. {avg:+.2f}%")
+            lines.append(f"   {pnl_emoji(avg)} <i>{t}</i>: {cnt} · wr {twr:.0%} · ср. {avg:+.2f}%")
     else:
         lines.append("   (пока нет данных)")
     lines.append("")
-    lines.append("Секторная аналитика:")
+    lines.append("<b>Секторная аналитика</b>")
     if learner.sector_stats:
         rows = []
         for s, hist in learner.sector_stats.items():
@@ -345,10 +369,10 @@ async def cmd_learn(update, context):
             rows.append((s, swr, len(hist), avg, learner.sector_bias(s)))
         rows.sort(key=lambda r: r[1], reverse=True)
         for s, swr, cnt, avg, bias in rows[:8]:
-            lines.append(f"   {s}: {swr:.0%} ({cnt}) · ср. {avg:+.2f}% · бонус {bias:+.2f}")
+            lines.append(f"   {pnl_emoji(avg)} <i>{s}</i>: wr {swr:.0%} ({cnt}) · ср. {avg:+.2f}% · бонус {bias:+.2f}")
     else:
-        lines.append("   (пока нет данных по секторам)")
-    await update.message.reply_text("\n".join(lines))
+        lines.append("   (пока нет данных)")
+    await reply(update, "\n".join(lines))
 
 
 async def cmd_news(update, context):
@@ -358,39 +382,38 @@ async def cmd_news(update, context):
     cmc = cmc_stats()
     rss = rss_stats()
 
-    lines = ["📰 НОВОСТНАЯ АНАЛИТИКА", ""]
+    lines = ["📰 <b>Новостная аналитика</b>", ""]
 
-    lines.append("📡 RSS-ЛЕНТЫ:")
+    lines.append("📡 <b>RSS-ленты</b>")
     if rss["feeds_working"]:
-        lines.append(f"   ✅ Работают · {rss['items_count']} новостей")
-        lines.append(f"   ⏱ Кэш обновлён {rss['cache_age_min']} мин назад")
+        lines.append(f"   ✅ работают · {rss['items_count']} новостей")
+        lines.append(f"   ⏱ кэш обновлён {rss['cache_age_min']} мин назад")
         if rss["neg_examples"]:
-            lines.append(f"   ⚠️ Негатив: {rss['neg_examples'][0][:60]}...")
+            lines.append(f"   ⚠️ негатив: {_html.escape(rss['neg_examples'][0][:60])}…")
         if rss["pos_examples"]:
-            lines.append(f"   ✅ Позитив: {rss['pos_examples'][0][:60]}...")
+            lines.append(f"   ✅ позитив: {_html.escape(rss['pos_examples'][0][:60])}…")
     else:
-        lines.append("   ❌ Ленты недоступны (проверь сеть)")
+        lines.append("   ❌ ленты недоступны")
 
     lines.append("")
-    lines.append("🏷 COINMARKETCAP:")
-    lines.append(f"   {'✅' if cmc['api_key_set'] else '❌'} API ключ: {'настроен' if cmc['api_key_set'] else 'НЕ НАСТРОЕН'}")
-    lines.append(f"   📊 В кэше: {cmc['cache_count']} монет · выучено секторов: {cmc['sectors_learned']}")
+    lines.append("🏷 <b>CoinMarketCap</b>")
+    lines.append(f"   {'✅' if cmc['api_key_set'] else '❌'} API ключ · 📚 выучено секторов: {cmc['sectors_learned']}")
 
     lines.append("")
-    lines.append("🚫 ОТФИЛЬТРОВАНО (последние 5):")
+    lines.append("🚫 <b>Отфильтровано новостями</b>")
     if FILTERED_BY_NEWS:
         for item in FILTERED_BY_NEWS[-5:]:
-            lines.append(f"   • {fmt_sym(item['symbol'])} (негатив {item['neg_count']})")
+            lines.append(f"   • {_html.escape(fmt_sym(item['symbol']))} · негатив {item['neg_count']}")
     else:
-        lines.append("   (пока ничего не отфильтровано)")
+        lines.append("   (пока пусто)")
 
-    await update.message.reply_text("\n".join(lines))
+    await reply(update, "\n".join(lines))
 
 
 async def cmd_log(update, context):
     src = Path("logs/bot.log")
     if not src.exists():
-        await update.message.reply_text("⚠️ Файл лога не найден.")
+        await reply(update, "⚠️ Файл лога не найден.")
         return
     name = f"log_{datetime.now().strftime('%H%M%S')}.txt"
     tmp = Path("logs") / name
@@ -403,68 +426,55 @@ async def cmd_status(update, context):
     try:
         prices = await market_data.get_tickers()
         eq = paper.equity(prices)
-
-        msg = ["📊 СТАТУС (РЕЖИМ: ТРЕНИРОВКА 🎓)", ""]
         free_pct = paper.usdt / eq * 100 if eq else 0
-        msg.append(f"💰 Свободно: {fmt_usdt(paper.usdt)} USDT ({free_pct:.0f}%)")
-        msg.append(f"🏦 Funding: {fmt_usdt(paper.funding)} USDT")
-        msg.append(f"📈 Total Equity: {fmt_usdt(eq)} $")
 
+        msg = ["📊 <b>Капитан Рост</b> · <i>тренировка</i> 🎓", ""]
+        msg.append(f"💰 Свободно: <b>{fmt_usdt(paper.usdt)} USDT</b> ({free_pct:.0f}%)")
+        msg.append(f"🏦 Funding: <b>{fmt_usdt(paper.funding)}</b> · 📈 Equity: <b>{fmt_usdt(eq)} $</b>")
         msg.append("")
+
         if paper.positions:
             invested = sum(
                 p["qty"] * prices.get(s, {}).get("last", 0)
                 for s, p in paper.positions.items()
             )
             inv_pct = invested / eq * 100 if eq else 0
-            msg.append(
-                f"📦 ПОЗИЦИИ ({len(paper.positions)}) · "
-                f"занято {fmt_usdt(invested)} USDT ({inv_pct:.0f}% портфеля):"
-            )
+            msg.append(f"📦 <b>Позиции ({len(paper.positions)})</b> · {inv_pct:.0f}% портфеля")
             for sym, pos in paper.positions.items():
                 last = prices.get(sym, {}).get("last", 0)
-                val = pos["qty"] * last
-                w = val / eq * 100 if eq else 0
+                w = pos["qty"] * last / eq * 100 if eq else 0
                 pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
-                tp1 = " · TP1✅" if pos.get("tp1_done") else ""
-                kind_tag = " 🛰" if pos.get("kind") == "satellite" else " 🏛"
-                sector_tag = pos.get("sector") or sector_of(sym[:-4])
-                msg.append(f"   • {fmt_sym(sym)} · {fmt_pct(pnl_pct)}{tp1}{kind_tag} · 🧭 {sector_tag}")
-                msg.append(f"      💼 Вес: {fmt_usdt(val)} USDT ({w:.1f}% портфеля)")
-                msg.append(f"      📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)}")
-                msg.append(f"      🎯 {fmt_price(pos['tp'])} | 🛡 {fmt_price(pos['sl'])}")
+                kind = "🛰" if pos.get("kind") == "satellite" else "🏛"
+                sector = pos.get("sector") or sector_of(sym[:-4])
+                tp1 = " · ✅TP1" if pos.get("tp1_done") else ""
+                msg.append(f"{kind} <b>{sym[:-4]}</b> · <i>{sector}</i> · {pnl_emoji(pnl_pct)} {fmt_pct(pnl_pct)}{tp1}")
+                msg.append(f"   📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)}")
+                msg.append(f"   🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])} · 💼 {w:.1f}%")
         else:
-            msg.append("📦 ПОЗИЦИИ: нет")
-
+            msg.append("📦 <b>Позиции</b>: нет")
         msg.append("")
+
         if paper.orders:
             orders_sum = sum(o["qty"] * o["price"] for o in paper.orders)
-            msg.append(
-                f"📋 АКТИВНЫЕ ОРДЕРА ({len(paper.orders)}) · "
-                f"на {fmt_usdt(orders_sum)} USDT:"
-            )
+            msg.append(f"📋 <b>Ордера ({len(paper.orders)})</b> · {fmt_usdt(orders_sum)} USDT")
             for o in paper.orders:
-                val = o["qty"] * o["price"]
-                w = val / eq * 100 if eq else 0
-                kind_tag = " 🛰" if o.get("kind") == "satellite" else " 🏛"
-                sector_tag = o.get("sector") or sector_of(o["symbol"][:-4])
-                msg.append(
-                    f"   • {fmt_sym(o['symbol'])}: {fmt_usdt(val)} USDT "
-                    f"({w:.1f}%) @ {fmt_price(o['price'])}{kind_tag} · 🧭 {sector_tag}"
-                )
-                msg.append(f"      🎯 {fmt_price(o['tp'])} | 🛡 {fmt_price(o['sl'])}")
+                w = o["qty"] * o["price"] / eq * 100 if eq else 0
+                kind = "🛰" if o.get("kind") == "satellite" else "🏛"
+                sector = o.get("sector") or sector_of(o["symbol"][:-4])
+                msg.append(f"{kind} <b>{o['symbol'][:-4]}</b> · <i>{sector}</i> · {w:.1f}%")
+                msg.append(f"   📥 {fmt_price(o['price'])} · 🎯 {fmt_price(o['tp'])} · 🛡 {fmt_price(o['sl'])}")
         else:
-            msg.append("📋 АКТИВНЫЕ ОРДЕРА: нет")
-
+            msg.append("📋 <b>Ордера</b>: нет")
         msg.append("")
+
         metrics = paper.get_metrics(prices)
         mode, _ = learner.risk_mode(
             metrics["profit_factor"], metrics["max_drawdown_pct"], metrics["total_trades"]
         )
         mode_emoji = {"NORMAL": "🟢", "CAUTIOUS": "🟡", "STRICT": "🔴", "AGGRESSIVE": "🚀"}.get(mode, "⚪")
 
-        msg.append(f"📊 МЕТРИКИ · режим {mode_emoji} {mode}")
-        msg.append(f"   🧾 Сделок: {metrics['total_trades']} (✅ {metrics['win_count']} / ❌ {metrics['loss_count']})")
+        msg.append(f"📊 <b>Метрики</b> · {mode_emoji} {mode}")
+        msg.append(f"🧾 {metrics['total_trades']} сделок (✅ {metrics['win_count']} / ❌ {metrics['loss_count']})")
 
         pf = metrics["profit_factor"]
         if pf is None:
@@ -473,35 +483,12 @@ async def cmd_status(update, context):
             pf_text = "∞"
         else:
             pf_text = f"{pf:.2f}"
-            if pf < 1.0:
-                pf_text += " ❌"
-            elif pf < 1.3:
-                pf_text += " ⚠️"
-            else:
-                pf_text += " 🎯"
-        msg.append(f"   📈 Profit Factor: {pf_text}  (цель ≥ 1.3)")
-
         dd = metrics["max_drawdown_pct"]
-        if dd < 5:
-            dd_text = f"{dd:.1f}% ✅"
-        elif dd < 15:
-            dd_text = f"{dd:.1f}% ⚠️"
-        else:
-            dd_text = f"{dd:.1f}% 🔴"
-        msg.append(f"   📉 Max Drawdown: {dd_text}  (лимит 15%)")
+        msg.append(f"📈 PF: <b>{pf_text}</b> · 📉 DD: <b>{dd:.1f}%</b>")
 
         exp = metrics["expectancy"]
-        exp_text = f"{exp:+.2f} USDT 🎯" if exp > 0 else f"{exp:+.2f} USDT ❌"
-        msg.append(f"   💹 Expectancy: {exp_text}  (мат. ожидание на сделку)")
-
         rf = metrics["recovery_factor"]
-        if rf > 2:
-            rf_text = f"{rf:.1f} 🎯"
-        elif rf > 1:
-            rf_text = f"{rf:.1f} ⚠️"
-        else:
-            rf_text = f"{rf:.1f} ❌"
-        msg.append(f"   🔄 Recovery Factor: {rf_text}  (скорость восстановления)")
+        msg.append(f"💹 {pnl_emoji(exp)} {exp:+.2f} · 🔄 RF: {rf:.1f}")
 
         sat_exposure = sum(
             p["qty"] * prices.get(s, {}).get("last", 0)
@@ -510,33 +497,24 @@ async def cmd_status(update, context):
             o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite"
         )
         sat_pct = sat_exposure / eq * 100 if eq else 0
-        msg.append(f"   🛰 Сателлиты: {sat_pct:.1f}% из 20% лимита")
-
-        msg.append(f"   💵 Суммарный PnL: {metrics['total_pnl']:+.2f} USDT")
-
-        if paper.realized:
-            best = max(paper.realized, key=lambda r: r["pnl_pct"])
-            worst = min(paper.realized, key=lambda r: r["pnl_pct"])
-            msg.append(f"   🏆 Лучшая: {fmt_sym(best['symbol'])} {fmt_pct(best['pnl_pct'])}")
-            msg.append(f"   📉 Худшая: {fmt_sym(worst['symbol'])} {fmt_pct(worst['pnl_pct'])}")
+        msg.append(f"🛰 Сателлиты: {sat_pct:.1f}% / 20%")
+        msg.append("")
 
         regime, _ = await get_regime()
         regime_emoji = {"bull": "🟢", "neutral": "🟡", "bear": "🔴"}.get(regime, "⚪")
-        regime_text = {"bull": "Бычий", "neutral": "Нейтральный", "bear": "Медвежий"}.get(regime, regime)
+        regime_text = {"bull": "бычий", "neutral": "нейтральный", "bear": "медвежий"}.get(regime, regime)
 
         btc = prices.get("BTCUSDT", {}).get("last", 0)
-        msg.append("")
-        msg.append(f"₿ BTC: {fmt_price(btc)} $ · {regime_emoji} {regime_text}")
-        msg.append(f"🎯 Порог входа сейчас: {threshold(regime):g} "
-                   f"(режим рынка: {regime_text}, строгость {learner.threshold_adj:+.1f})")
+        msg.append(f"₿ <b>{fmt_price(btc)} $</b> · {regime_emoji} {regime_text} · 🎯 порог {threshold(regime):g}")
         if SCAN_SUMMARY.get("text"):
-            msg.append(f"🔎 Сканирование (посл. цикл): {SCAN_SUMMARY['text']}")
-        msg.append(f"🧠 Обучение: {learner.summary()}")
+            msg.append(f"🔎 {_html.escape(SCAN_SUMMARY['text'])}")
+        wr, n = learner.winrate()
+        msg.append(f"🧠 wr {wr:.0%} ({n}) · строгость {learner.threshold_adj:+.1f}")
 
-        await update.message.reply_text("\n".join(msg))
+        await reply(update, "\n".join(msg))
     except Exception as e:
         logger.exception("Ошибка в /status")
-        await update.message.reply_text(f"⚠️ Ошибка: {e}")
+        await reply(update, f"⚠️ Ошибка: {e}")
 
 
 def main():
