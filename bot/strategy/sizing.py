@@ -8,9 +8,9 @@ TIERS = [
     (10000, 125, 600),
 ]
 
-RISK_PER_TRADE_PCT = 1.0   # риск на сделку (при срабатывании SL) <= 1% от equity (Core)
-SAT_SIZE_PCT = 2.0         # базовый размер сателлита: 2% от equity
-SAT_RISK_PCT = 0.5         # риск сателлита при SL <= 0.5% от equity
+RISK_PER_TRADE_PCT = 1.0
+SAT_SIZE_PCT = 2.0
+SAT_RISK_PCT = 0.5
 
 
 def tier_limits(equity):
@@ -18,6 +18,24 @@ def tier_limits(equity):
         if equity <= bound:
             return mn, mx
     return max(150.0, equity * 0.008), equity * 0.02
+
+
+def portfolio_limits(equity):
+    """Адаптивные лимиты портфеля: (макс. позиций, лимит сектора, лимит Other).
+    Растут вместе с балансом, как сетка размеров позиций."""
+    if equity <= 150:
+        return 2, 1, 1
+    if equity <= 250:
+        return 3, 2, 1
+    if equity <= 500:
+        return 4, 2, 2
+    if equity <= 1000:
+        return 6, 3, 3
+    if equity <= 2500:
+        return 8, 4, 4
+    if equity <= 5000:
+        return 10, 5, 5
+    return 12, 6, 6
 
 
 def kelly_multiplier(realized):
@@ -56,7 +74,7 @@ def buy_size(equity, score, liquidity, free_usdt, sl_dist_pct=1.0,
         size = lo
     km = kelly_multiplier(realized or [])
     if km is not None:
-        size *= (0.5 + 0.5 * km)   # от 50% до 100% базового размера по Kelly
+        size *= (0.5 + 0.5 * km)
     if sl_dist_pct > 0:
         size_risk = equity * RISK_PER_TRADE_PCT / sl_dist_pct
         size = min(size, size_risk)
