@@ -398,6 +398,12 @@ async def run_cycle():
                 if (p.get("sector") or "Other") == sector
             ]
             rotated = False
+            
+            # Диагностика: какие монеты в этом секторе
+            if sector == "Other" and sector_positions:
+                other_symbols = [s[:-4] for s, _ in sector_positions]
+                logger.info(f"Other позиции: {', '.join(other_symbols)}")
+            
             if sector_positions:
                 weakest_sym, weakest_pos = min(
                     sector_positions, key=lambda kv: kv[1].get("score", 0)
@@ -406,12 +412,25 @@ async def run_cycle():
                 t_weak = tickers.get(weakest_sym)
                 if t_weak:
                     weak_pnl = (t_weak["last"] - weakest_pos["avg"]) / weakest_pos["avg"] * 100
-                    can_rotate = (
-                        cand["score"] >= weakest_score + 1.5
-                        and not weakest_pos.get("tp1_done")
-                        and weak_pnl >= -0.5
-                        and weak_pnl < 2.0
-                    )
+                    
+                    # Для Other — более агрессивная ротация
+                    if sector == "Other":
+                        # Other: продаём если новый сильнее на 1.0+ и позиция не раннер
+                        # Допускаем минус до -2% (вместо -0.5%)
+                        can_rotate = (
+                            cand["score"] >= weakest_score + 1.0
+                            and not weakest_pos.get("tp1_done")
+                            and weak_pnl >= -2.0
+                        )
+                    else:
+                        # Обычные сектора: строгие условия
+                        can_rotate = (
+                            cand["score"] >= weakest_score + 1.5
+                            and not weakest_pos.get("tp1_done")
+                            and weak_pnl >= -0.5
+                            and weak_pnl < 2.0
+                        )
+                    
                     if can_rotate:
                         ex = paper._sell(weakest_sym, t_weak["last"], "РОТАЦИЯ СЕКТОРА 🔄")
                         sector_count -= 1
