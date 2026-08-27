@@ -40,9 +40,7 @@ async def notify(text):
             logger.error(f"notify error: {e}")
 
 
-# ==================== СВЕРКА СОСТОЯНИЯ ПРИ СТАРТЕ ====================
 async def startup_reconciliation():
-    """После деплоя/рестарта: привести позиции и ордера к ТЕКУЩЕЙ логике."""
     logger.info("=== RECONCILE START ===")
     prices = await market_data.get_tickers()
     if not prices:
@@ -92,7 +90,7 @@ async def startup_reconciliation():
         score, _, _ = score_symbol(candles, t, regime)
         if score < thr - 1:
             paper.cancel_order(order["id"])
-            actions.append(f"{sym}: ордер снят (score {score:.1f} ниже порога {thr})")
+            actions.append(f"{sym}: ордер снят (score {score:.1f} ниже порога {thr:g})")
         elif a > 0:
             order["price"] = t["last"] * 0.998
             order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
@@ -120,7 +118,6 @@ async def maybe_reconcile():
         logger.exception(f"Reconcile error: {e}")
 
 
-# ==================== ТОРГОВЫЙ ЦИКЛ ====================
 async def run_cycle():
     await maybe_reconcile()
 
@@ -144,7 +141,7 @@ async def run_cycle():
     pf = metrics["profit_factor"]
     pf_txt = "∞" if pf == float("inf") else (f"{pf:.2f}" if pf is not None else "—")
     logger.info(f"METRICS: PF={pf_txt} | DD={metrics['max_drawdown_pct']:.1f}% | "
-                f"mode={mode} | thr_adj={new_thr_adj:+d}")
+                f"mode={mode} | thr_adj={new_thr_adj:+.1f}")
 
     news_items = await fetch_news_cache()
 
@@ -185,7 +182,7 @@ async def run_cycle():
             await notify("🚨 Риск-менеджмент: резкий дамп рынка. Все позиции закрыты в USDT.")
         return
 
-    # 4. УПРАВЛЕНИЕ ПОЗИЦИЯМИ (включая новостную проверку)
+    # 4. УПРАВЛЕНИЕ ПОЗИЦИЯМИ
     for sym, pos in list(paper.positions.items()):
         t = tickers.get(sym)
         if not t:
@@ -198,6 +195,8 @@ async def run_cycle():
         if a <= 0:
             continue
         last = t["last"]
+        # Трекинг максимума цены — для метрики "пробежки" раннера
+        pos["max_price"] = max(pos.get("max_price", 0.0), last)
         pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
         e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
         score_pos, _, _ = score_symbol(candles, t, regime)
@@ -247,7 +246,7 @@ async def run_cycle():
                 ex = paper._sell(sym, last, "СИГНАЛ ИСЯК 📉")
                 await notify(
                     f"📉 РАННИЙ ВЫХОД · {fmt_sym(sym)}\n"
-                    f"Сигнал ослаб (score {score_pos:.1f} при пороге {thr}) — "
+                    f"Сигнал ослаб (score {score_pos:.1f} при пороге {thr:g}) — "
                     f"фиксируем {fmt_pct(ex['pnl_pct'])} ({ex['pnl']:+.2f} USDT)"
                 )
                 continue
@@ -285,11 +284,15 @@ async def run_cycle():
 
     # 5. Выходы остатка по TP/SL
     for ex in paper.check_exits(tickers):
+        runner_txt = ""
+        if ex.get("runner_bonus", 0) > 5:
+            runner_txt = f"\n🏃 Пробежка раннера: +{ex['runner_bonus']:.1f}% выше TP1"
         await notify(
             f"📤 ПРОДАЖА · {fmt_sym(ex['symbol'])} · {ex['reason']}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"💰 Цена: {fmt_price(ex['price'])} ({fmt_pct(ex['pnl_pct'])})\n"
-            f"💵 PnL: {ex['pnl']:+.2f} USDT\n"
+            f"💵 PnL позиции: {ex['pnl']:+.2f} USDT\n"
+            f"🧾 Тип выхода: {ex.get('exit_type', '—')}{runner_txt}\n"
             f"🏦 В Funding: {fmt_usdt(ex['transferred'])} USDT"
         )
 
@@ -369,7 +372,6 @@ async def run_cycle():
         kind = cand.get("kind", "core")
         sector = cand.get("sector", "Other")
 
-        # АДАПТИВНЫЙ ЛИМИТ НА СЕКТОР (общее число позиций ограничено только деньгами)
         lim = other_lim if sector == "Other" else sec_lim
         sector_count = sum(
             1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector
@@ -378,7 +380,6 @@ async def run_cycle():
             logger.info(f"{sym}: пропущен — сектор {sector} переполнен ({sector_count}/{lim})")
             continue
 
-        # ЛИМИТ САТЕЛЛИТОВ: суммарно не более 20% equity
         if kind == "satellite":
             sat_exposure = sum(
                 p["qty"] * tickers.get(s, {}).get("last", 0)
@@ -422,16 +423,12 @@ async def run_cycle():
         if size < 5:
             continue
 
-        # === КОНТРОЛЬ СВОБОДНЫХ СРЕДСТВ + РОТАЦИЯ ОРДЕРОВ ===
-        # Сумма уже выставленных ордеров не должна превышать free_usdt
         pending_amount = sum(o["qty"] * o["price"] for o in paper.orders)
         if pending_amount + size > paper.usdt:
-            # Пытаемся ротацию: снять самый слабый ордер, если новый сигнал сильнее
             rotated = False
             while paper.orders and pending_amount + size > paper.usdt:
                 worst = min(paper.orders, key=lambda o: o.get("score", 0))
                 worst_score = worst.get("score", 0)
-                # Ротируем только если новый сигнал сильнее минимум на 1 балл
                 if cand["score"] >= worst_score + 1.0:
                     paper.cancel_order(worst["id"])
                     pending_amount -= worst["qty"] * worst["price"]
