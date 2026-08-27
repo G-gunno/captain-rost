@@ -29,23 +29,14 @@ WEBHOOK_PATH = "/telegram-webhook"
 
 # ==================== HTML-хелперы ====================
 def pnl_emoji(x):
-    """Цветной индикатор PnL."""
     return "🟢" if x > 0.05 else ("🔴" if x < -0.05 else "🟡")
 
 
-async def _safe_send(bot, chat_id, text):
-    """HTML с фолбэком на plain text."""
+async def reply(update, text, markup=None):
     try:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
     except BadRequest:
-        await bot.send_message(chat_id=chat_id, text=text)
-
-
-async def reply(update, text):
-    try:
-        await update.message.reply_text(text, parse_mode="HTML")
-    except BadRequest:
-        await update.message.reply_text(text)
+        await update.message.reply_text(text, reply_markup=markup)
 
 
 # ==================== HTTP handlers ====================
@@ -67,7 +58,10 @@ async def webhook_handler(request):
 async def send_chat(text):
     chat = os.getenv("TELEGRAM_CHAT_ID")
     if chat and _app:
-        await _safe_send(_app.bot, chat, text)
+        try:
+            await _app.bot.send_message(chat_id=chat, text=text, parse_mode="HTML")
+        except BadRequest:
+            await _app.bot.send_message(chat_id=chat, text=text)
 
 
 async def cycle_loop():
@@ -165,13 +159,11 @@ ACTIONS = {
 
 async def ask_confirmation(update, context, key):
     _, question = ACTIONS[key]
-    keyboard = [[
+    keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm:{key}"),
         InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
-    ]]
-    await reply(update, f"⚠️ <b>Подтвердите:</b> {_html.escape(question)}")
-    # кнопки прикрепляем отдельно, т.к. reply уже отправлен
-    await update.message.reply_text("👇", reply_markup=InlineKeyboardMarkup(keyboard))
+    ]])
+    await reply(update, f"⚠️ <b>Подтвердите:</b> {_html.escape(question)}", markup=keyboard)
 
 
 async def confirm_handler(update, context):
@@ -447,9 +439,14 @@ async def cmd_status(update, context):
                 kind = "🛰" if pos.get("kind") == "satellite" else "🏛"
                 sector = pos.get("sector") or sector_of(sym[:-4])
                 tp1 = " · ✅TP1" if pos.get("tp1_done") else ""
-                msg.append(f"{kind} <b>{sym[:-4]}</b> · <i>{sector}</i> · {pnl_emoji(pnl_pct)} {fmt_pct(pnl_pct)}{tp1}")
-                msg.append(f"   📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)}")
-                msg.append(f"   🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])} · 💼 {w:.1f}%")
+                msg.append(
+                    f"{kind} <b>{sym[:-4]}</b> · <i>{sector}</i> · "
+                    f"{pnl_emoji(pnl_pct)} {fmt_pct(pnl_pct)}{tp1} · 💼 {w:.1f}%"
+                )
+                msg.append(
+                    f"   📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)} · "
+                    f"🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])}"
+                )
         else:
             msg.append("📦 <b>Позиции</b>: нет")
         msg.append("")
