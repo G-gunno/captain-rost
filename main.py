@@ -20,7 +20,7 @@ from bot.core.remote_state import ensure_branch
 from bot.services.reports import build_report
 from bot.strategy.scanner import SCAN_SUMMARY, FILTERED_BY_NEWS, get_regime, threshold
 from bot.strategy.learner import learner, TIERS
-from bot.news.cmc import sector_of, TIER_EMOJI, TIER_NAMES
+from bot.news.cmc import sector_of, TIER_EMOJI, TIER_NAMES, memory_stats
 from bot.utils.format import fmt_price, fmt_pct, fmt_sym
 
 _app = None
@@ -253,7 +253,7 @@ async def run_all(application):
         BotCommand("pause", "⏸ Пауза (с подтверждением)"),
         BotCommand("resume", "▶️ Возобновить (с подтверждением)"),
         BotCommand("exitall", "🛑 Продать всё и остановить (с подтверждением)"),
-        BotCommand("learn", "🧠 Обучение: веса, winrate, тиры, сектора"),
+        BotCommand("learn", "🧠 Обучение: параметры, сектора, веса, память"),
         BotCommand("resetlearn", "🧠♻️ Сбросить опыт обучения"),
         BotCommand("resetstats", "📊 Сбросить статистику"),
         BotCommand("news", "📰 Статус новостной аналитики"),
@@ -304,7 +304,7 @@ async def cmd_help(update, context):
         "/status — балансы, позиции, метрики\n"
         "/pause · /resume — пауза и возврат\n"
         "/exitall — продать всё и остановить\n"
-        "/learn — веса, winrate, кап-тиры, сектора, типы выходов\n"
+        "/learn — параметры, сектора, веса, типы выходов, память\n"
         "/resetstats — сброс статистики (веса сохранятся)\n"
         "/resetlearn — полный сброс обучения\n"
         "/news — новостная аналитика\n"
@@ -334,31 +334,33 @@ async def cmd_resetstats(update, context):
 
 async def cmd_learn(update, context):
     wr, n = learner.winrate()
+    regime, _ = await get_regime()
     lines = ["🧠 <b>Обучение бота</b>", ""]
-    lines.append(f"Winrate: <b>{wr:.0%}</b> (последних сделок: {n})")
-    lines.append(f"Строгость входа: <b>{learner.threshold_adj:+.1f}</b>")
+
+    # 📌 ТЕКУЩИЕ ПАРАМЕТРЫ
+    lines.append("📌 <b>Текущие параметры</b>")
+    lines.append(
+        f"🎯 Winrate <b>{wr:.0%}</b> ({n}) · строгость <b>{learner.threshold_adj:+.1f}</b> · "
+        f"порог <b>{threshold(regime):g}</b>"
+    )
+    lines.append(
+        f"🛰 Сателлиты: лимит <b>{learner.satellite_limit():.0f}%</b> · "
+        f"размер <b>{learner.satellite_size_pct():.1f}%</b>"
+    )
+    core_hist = learner.kind_stats.get("core") or []
+    sat_hist = learner.kind_stats.get("satellite") or []
+    if core_hist:
+        cwr = sum(1 for p in core_hist if p > 0) / len(core_hist)
+        cavg = sum(core_hist) / len(core_hist)
+        lines.append(f"🏛 Core: {len(core_hist)} · wr {cwr:.0%} · ср. {cavg:+.2f}%")
+    if sat_hist:
+        swr = sum(1 for p in sat_hist if p > 0) / len(sat_hist)
+        savg = sum(sat_hist) / len(sat_hist)
+        lines.append(f"🛰 Сателлиты: {len(sat_hist)} · wr {swr:.0%} · ср. {savg:+.2f}%")
     lines.append("")
-    lines.append("<b>Веса сигналов</b>")
-    for k, v in sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True):
-        bar = "⚡" * max(1, int(round(v * 5)))
-        lines.append(f"   {weight_emoji(v)} <i>{k}</i> · {v:.2f} {bar}")
-    lines.append("")
-    lines.append("<b>Кап-тиры (CMC rank)</b>")
-    if learner.tier_stats:
-        for t in TIERS:
-            hist = learner.tier_stats.get(t) or []
-            if not hist:
-                continue
-            twr = sum(1 for p in hist if p > 0) / len(hist)
-            avg = sum(hist) / len(hist)
-            lines.append(
-                f"   {TIER_EMOJI[t]} <i>{TIER_NAMES[t]}</i> · {len(hist)} · "
-                f"wr {twr:.0%} · ср. {avg:+.2f}% · бонус {learner.tier_bias(t):+.2f}"
-            )
-    else:
-        lines.append("   (пока нет данных)")
-    lines.append("")
-    lines.append("<b>Секторная аналитика</b>")
+
+    # 🧭 ГДЕ ДЕНЬГИ · сектора и тиры (сортировка по бонусу)
+    lines.append("🧭 <b>Где деньги</b> · сектора и тиры")
     if learner.sector_stats:
         rows = []
         for s, hist in learner.sector_stats.items():
@@ -367,13 +369,39 @@ async def cmd_learn(update, context):
             swr = sum(1 for p in hist if p > 0) / len(hist)
             avg = sum(hist) / len(hist)
             rows.append((s, swr, len(hist), avg, learner.sector_bias(s)))
-        rows.sort(key=lambda r: r[1], reverse=True)
-        for s, swr, cnt, avg, bias in rows[:8]:
-            lines.append(f"   {pnl_emoji(avg)} <i>{s}</i> · wr {swr:.0%} ({cnt}) · {avg:+.2f}% · бонус {bias:+.2f}")
+        rows.sort(key=lambda r: r[4], reverse=True)
+        for s, swr, cnt, avg, bias in rows:
+            lines.append(
+                f"   {pnl_emoji(avg)} <i>{s}</i> · wr {swr:.0%} ({cnt}) · "
+                f"{avg:+.2f}% → бонус {bias:+.2f}"
+            )
     else:
         lines.append("   (пока нет данных)")
+    tier_shown = False
+    for t in TIERS:
+        hist = learner.tier_stats.get(t) or []
+        if not hist:
+            continue
+        tier_shown = True
+        twr = sum(1 for p in hist if p > 0) / len(hist)
+        tavg = sum(hist) / len(hist)
+        lines.append(
+            f"   {TIER_EMOJI[t]} <i>{TIER_NAMES[t]}</i> · wr {twr:.0%} ({len(hist)}) · "
+            f"{tavg:+.2f}% → бонус {learner.tier_bias(t):+.2f}"
+        )
+    if not tier_shown:
+        lines.append("   🐘 Кап-тиры: накапливается")
     lines.append("")
-    lines.append("<b>Типы выходов</b>")
+
+    # 🎯 ЧЕМУ ВЕРИТ БОТ · веса сигналов
+    lines.append("🎯 <b>Чему верит бот</b> · веса сигналов")
+    for k, v in sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True):
+        bar = "⚡" * max(1, int(round(v * 5)))
+        lines.append(f"   {weight_emoji(v)} <i>{k}</i> · {v:.2f} {bar}")
+    lines.append("")
+
+    # 🧾 КАК ВЫХОДИМ · типы выходов
+    lines.append("🧾 <b>Как выходим</b> · типы выходов")
     if learner.exit_stats:
         rows = []
         for t, hist in learner.exit_stats.items():
@@ -388,17 +416,23 @@ async def cmd_learn(update, context):
     else:
         lines.append("   (пока нет данных)")
     lines.append("")
-    lines.append("<b>Стиль (core vs сателлиты)</b>")
-    if learner.kind_stats:
-        for k, label in (("core", "🏛 Core"), ("satellite", "🛰 Сателлиты")):
-            v = learner.kind_stats.get(k) or []
-            if v:
-                avg = sum(v) / len(v)
-                wrk = sum(1 for p in v if p > 0) / len(v)
-                lines.append(f"   {pnl_emoji(avg)} {label} · {len(v)} · wr {wrk:.0%} · ср. {avg:+.2f}%")
-        lines.append(f"   🛰 Лимит сателлитов: <b>{learner.satellite_limit():.0f}%</b> · размер {learner.satellite_size_pct():.1f}%")
-    else:
-        lines.append("   (пока нет данных)")
+
+    # 🗂 ПАМЯТЬ ПО МОНЕТАМ
+    mem = memory_stats()
+    lines.append("🗂 <b>Память по монетам</b>")
+    lines.append(
+        f"   📚 База {mem['base']} + выучено {mem['learned']} = "
+        f"<b>{mem['total']}</b> монет"
+    )
+    sec_txt = " | ".join(
+        f"{s} · {c}" for s, c in sorted(mem["sectors"].items(), key=lambda kv: kv[1], reverse=True)
+    )
+    lines.append(f"   🧭 {sec_txt}")
+    tier_txt = " · ".join(
+        f"{TIER_EMOJI[t]} {c}" for t, c in sorted(mem["tiers"].items(), key=lambda kv: kv[1], reverse=True)
+    )
+    lines.append(f"   🏆 {tier_txt}")
+
     await reply(update, "\n".join(lines))
 
 
