@@ -248,18 +248,19 @@ async def run_all(application):
     )
     logger.info(f"✅ Webhook установлен: {webhook_url}")
 
+    # Меню в порядке пользователя
     await application.bot.set_my_commands([
         BotCommand("start", "🚀 Запустить торговлю"),
-        BotCommand("status", "📊 Статус: балансы и позиции"),
-        BotCommand("info", "📖 Информация о боте"),
         BotCommand("pause", "⏸ Пауза (с подтверждением)"),
         BotCommand("resume", "▶️ Возобновить (с подтверждением)"),
-        BotCommand("exitall", "🛑 Продать всё и остановить (с подтверждением)"),
+        BotCommand("status", "📊 Статус: балансы и позиции"),
         BotCommand("learn", "🧠 Обучение: параметры, сектора, веса, память"),
-        BotCommand("resetlearn", "🧠♻️ Сбросить опыт обучения"),
-        BotCommand("resetstats", "📊 Сбросить статистику"),
         BotCommand("news", "📰 Статус новостной аналитики"),
+        BotCommand("exitall", "🛑 Продать всё и остановить (с подтверждением)"),
+        BotCommand("resetstats", "📊 Сбросить статистику"),
+        BotCommand("resetlearn", "🧠♻️ Сбросить опыт обучения"),
         BotCommand("log", "📄 Файл лога"),
+        BotCommand("info", "📖 Информация о боте"),
         BotCommand("help", "📖 Справка"),
     ])
 
