@@ -6,13 +6,14 @@ from loguru import logger
 from bot.exchange.market_data import market_data
 from bot.strategy.indicators import ema, rsi, atr
 from bot.strategy.learner import learner
-from bot.news.cmc import get_coin_name, get_sectors_for_pool
+from bot.news.cmc import (get_coin_name, get_sectors_for_pool,
+                          get_ranks_for_pool, tier_of, TIER_EMOJI)
 from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sentiment
 
 SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
 FILTERED_BY_NEWS = []
 
-SAT_ATR_PCT = 1.2  # порог волатильности: выше — монета идёт в сателлиты
+SAT_ATR_PCT = 1.2
 
 _instruments_cache = {"data": None, "ts": 0}
 
@@ -72,7 +73,6 @@ async def get_regime():
 
 
 async def fetch_new_listings():
-    """Новые листинги через Bybit API (launchTime) — надёжный источник. Кэш 1 час."""
     now = time.time()
     if _instruments_cache["data"] is not None and now - _instruments_cache["ts"] < 3600:
         raw = _instruments_cache["data"]
@@ -198,9 +198,10 @@ async def scan(regime, tickers, limit=5):
 
     pool = list(dict.fromkeys(by_vol + by_chg + by_momentum + by_volatility +
                               [s for s, _ in by_listings]))
+    pool_bases = list({s[:-4] for s in pool})
 
-    # АВТО-СЕКТОРА: ручной словарь -> кэш -> теги CMC
-    sectors_map = await get_sectors_for_pool(list({s[:-4] for s in pool}))
+    sectors_map = await get_sectors_for_pool(pool_bases)
+    ranks_map = await get_ranks_for_pool(pool_bases)
 
     news_items = await fetch_news_cache()
     btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
@@ -228,30 +229,34 @@ async def scan(regime, tickers, limit=5):
             keys.append("indep")
 
         kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
-        sector = sectors_map.get(sym[:-4], "Other")
+        base = sym[:-4]
+        sector = sectors_map.get(base, "Other")
+        tier = tier_of(ranks_map.get(base))
 
-        # СЕКТОРНОЕ САМООБУЧЕНИЕ: бонус/штраф по истории сектора
-        bias = learner.sector_bias(sector)
-        if bias:
-            score += bias
-            reasons.append(f"сектор {sector}: {bias:+.2f}")
+        sb = learner.sector_bias(sector)
+        if sb:
+            score += sb
+            reasons.append(f"сектор {sector}: {sb:+.2f}")
+        tb = learner.tier_bias(tier)
+        if tb:
+            score += tb
+            reasons.append(f"тир {TIER_EMOJI[tier]}: {tb:+.2f}")
 
         scored.append({"symbol": sym, "score": score, "reasons": reasons,
                        "reason_keys": keys, "atr": a, "last": last_price,
                        "liquidity": tickers[sym]["quote_volume"],
                        "corr": round(corr, 2), "atr_pct": round(atr_pct, 2),
-                       "kind": kind, "sector": sector})
+                       "kind": kind, "sector": sector, "tier": tier})
 
     scored.sort(key=lambda c: c["score"], reverse=True)
 
     thr = threshold(regime)
-    # Топ-5 в единой стилистике (HTML для Telegram) + plain для логов
-    parts_html = []
-    parts_plain = []
+    parts_html, parts_plain = [], []
     for c in scored[:5]:
         k_tag = "🛰" if c.get("kind") == "satellite" else "🏛"
         parts_html.append(
-            f"{k_tag} <b>{c['symbol'][:-4]}</b> · <i>{c['sector']}</i> · {c['score']:.1f}/{thr:g}"
+            f"{k_tag} <b>{c['symbol'][:-4]}</b> {TIER_EMOJI.get(c['tier'], '🐭')} · "
+            f"<i>{c['sector']}</i> · {c['score']:.1f}/{thr:g}"
         )
         parts_plain.append(f"{c['symbol']} {c['score']:.1f}/{thr:g}")
     SCAN_SUMMARY["text"] = " | ".join(parts_html) or "сигналов нет"
