@@ -16,15 +16,18 @@ SAT_LIMIT_MAX = 30.0
 SAT_LIMIT_MIN = 10.0
 SAT_SIZE_BASE = 2.0
 
+TIERS = ["TOP20", "MID", "SMALL", "MICRO"]
+
 
 class Learner:
-    """Самообучение: веса + адаптив + сектора + типы выходов + стиль (core/satellite)."""
+    """Самообучение: веса + адаптив + сектора + кап-тиры + типы выходов + стиль."""
 
     def __init__(self):
         self.weights = {k: 1.0 for k in KEYS}
         self.results = []
         self.threshold_adj = 0.0
         self.sector_stats = {}
+        self.tier_stats = {}
         self.exit_stats = {}
         self.kind_stats = {}
         self._last_upload = 0.0
@@ -44,6 +47,7 @@ class Learner:
             self.results = data.get("results", [])
             self.threshold_adj = float(data.get("threshold_adj", 0))
             self.sector_stats = data.get("sector_stats", {})
+            self.tier_stats = data.get("tier_stats", {})
             self.exit_stats = data.get("exit_stats", {})
             self.kind_stats = data.get("kind_stats", {})
             logger.info("learner: опыт загружен")
@@ -54,6 +58,7 @@ class Learner:
             "results": self.results[-200:],
             "threshold_adj": self.threshold_adj,
             "sector_stats": {k: v[-50:] for k, v in self.sector_stats.items()},
+            "tier_stats": {k: v[-50:] for k, v in self.tier_stats.items()},
             "exit_stats": {k: v[-50:] for k, v in self.exit_stats.items()},
             "kind_stats": {k: v[-50:] for k, v in self.kind_stats.items()},
         }
@@ -69,7 +74,7 @@ class Learner:
     def weight(self, key):
         return self.weights.get(key, 1.0)
 
-    def record(self, keys, win, pnl_pct=0.0, sector=None,
+    def record(self, keys, win, pnl_pct=0.0, sector=None, tier=None,
                exit_type=None, runner_bonus=0.0, kind=None):
         """Одна запись на позицию (TP1+финал объединены в paper_exchange)."""
         self.results.append(1 if win else 0)
@@ -78,6 +83,10 @@ class Learner:
             hist = self.sector_stats.setdefault(sector, [])
             hist.append(round(pnl_pct, 2))
             self.sector_stats[sector] = hist[-50:]
+        if tier:
+            hist = self.tier_stats.setdefault(tier, [])
+            hist.append(round(pnl_pct, 2))
+            self.tier_stats[tier] = hist[-50:]
         if exit_type:
             eh = self.exit_stats.setdefault(exit_type, [])
             eh.append(round(pnl_pct, 2))
@@ -102,7 +111,7 @@ class Learner:
         self.save()
         logger.info(f"learner: win={win} pnl={pnl_pct:+.2f}% delta={delta:+.2f} "
                     f"exit={exit_type} runner={runner_bonus:.1f}% keys={keys} "
-                    f"sector={sector} kind={kind}")
+                    f"sector={sector} tier={tier} kind={kind}")
 
     def sector_bias(self, sector):
         hist = self.sector_stats.get(sector) or []
@@ -113,8 +122,17 @@ class Learner:
         bias = (wr - 0.5) + max(-0.5, min(0.5, avg * 0.25))
         return round(max(-1.0, min(1.0, bias)), 2)
 
+    def tier_bias(self, tier):
+        """Бонус/штраф кап-тира: ±0.5, включается после ≥5 сделок."""
+        hist = self.tier_stats.get(tier) or []
+        if len(hist) < 5:
+            return 0.0
+        wr = sum(1 for p in hist if p > 0) / len(hist)
+        avg = sum(hist) / len(hist)
+        bias = (wr - 0.5) + max(-0.25, min(0.25, avg * 0.25))
+        return round(max(-0.5, min(0.5, bias)), 2)
+
     def satellite_limit(self):
-        """Адаптивный лимит сателлитов: 10–30% по перформансу против core."""
         core = self.kind_stats.get("core") or []
         sat = self.kind_stats.get("satellite") or []
         if len(core) >= 3 and len(sat) >= 3:
@@ -127,7 +145,6 @@ class Learner:
         return SAT_LIMIT_BASE
 
     def satellite_size_pct(self):
-        """Адаптивный размер ОДНОЙ сателлит-позиции: 1.0–3.0% пропорционально лимиту."""
         return round(SAT_SIZE_BASE * self.satellite_limit() / SAT_LIMIT_BASE, 2)
 
     def reset(self):
@@ -135,6 +152,7 @@ class Learner:
         self.results = []
         self.threshold_adj = 0.0
         self.sector_stats = {}
+        self.tier_stats = {}
         self.exit_stats = {}
         self.kind_stats = {}
         self.save()
@@ -144,6 +162,7 @@ class Learner:
         self.results = []
         self.threshold_adj = 0.0
         self.sector_stats = {}
+        self.tier_stats = {}
         self.exit_stats = {}
         self.kind_stats = {}
         self.save()
@@ -153,7 +172,6 @@ class Learner:
         last = self.results[-20:]
         return (sum(last) / len(last), len(last)) if last else (0.0, 0)
 
-    # --- АДАПТИВ: дробная сетка 0.5, диапазон порога 5.0–9.5 ---
     def risk_mode(self, profit_factor, max_dd_pct, total_trades=0):
         adj = 0.0
         enough = total_trades >= 5
