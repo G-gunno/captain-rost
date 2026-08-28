@@ -13,7 +13,7 @@ from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sent
 SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
 FILTERED_BY_NEWS = []
 
-SAT_ATR_PCT = 1.2
+SAT_ATR_PCT = 1.2  # порог волатильности: выше — монета идёт в сателлиты
 
 _instruments_cache = {"data": None, "ts": 0}
 
@@ -73,6 +73,7 @@ async def get_regime():
 
 
 async def fetch_new_listings():
+    """Новые листинги через Bybit API (launchTime) — надёжный источник. Кэш 1 час."""
     now = time.time()
     if _instruments_cache["data"] is not None and now - _instruments_cache["ts"] < 3600:
         raw = _instruments_cache["data"]
@@ -256,9 +257,9 @@ async def scan(regime, tickers, limit=5):
         k_tag = "🛰" if c.get("kind") == "satellite" else "🏛"
         parts_html.append(
             f"{k_tag} <b>{c['symbol'][:-4]}</b> {TIER_EMOJI.get(c['tier'], '🐭')} · "
-            f"<i>{c['sector']}</i> · {c['score']:.1f}/{thr:g}"
+            f"<i>{c['sector']}</i> · {c['score']:.1f}/{thr:g} · ₿ {c['corr']:.2f}"
         )
-        parts_plain.append(f"{c['symbol']} {c['score']:.1f}/{thr:g}")
+        parts_plain.append(f"{c['symbol']} {c['score']:.1f}/{thr:g} (btc {c['corr']:.2f})")
     SCAN_SUMMARY["text"] = " | ".join(parts_html) or "сигналов нет"
     SCAN_SUMMARY["thr"] = thr
     SCAN_SUMMARY["ts"] = time.time()
