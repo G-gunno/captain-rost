@@ -18,6 +18,7 @@ from bot.core.orchestrator import run_cycle, set_notifier, CYCLE_SECONDS
 from bot.core.state import bot_state
 from bot.core.remote_state import ensure_branch
 from bot.services.reports import build_report
+from bot.services.info import info_full_text
 from bot.strategy.scanner import SCAN_SUMMARY, FILTERED_BY_NEWS, get_regime, threshold
 from bot.strategy.learner import learner, TIERS
 from bot.news.cmc import sector_of, TIER_EMOJI, TIER_NAMES, memory_stats
@@ -250,6 +251,7 @@ async def run_all(application):
     await application.bot.set_my_commands([
         BotCommand("start", "🚀 Запустить торговлю"),
         BotCommand("status", "📊 Статус: балансы и позиции"),
+        BotCommand("info", "📖 Информация о боте"),
         BotCommand("pause", "⏸ Пауза (с подтверждением)"),
         BotCommand("resume", "▶️ Возобновить (с подтверждением)"),
         BotCommand("exitall", "🛑 Продать всё и остановить (с подтверждением)"),
@@ -298,16 +300,20 @@ async def cmd_start(update, context):
     await reply(update, "🤖 <b>Капитан Рост</b> на связи! Торговля запущена, цикл начат заново.")
 
 
+async def cmd_info(update, context):
+    """Паспорт бота — всё одним текстовым сообщением, без кнопок."""
+    await reply(update, info_full_text())
+
+
 async def cmd_help(update, context):
     await reply(update,
         "📖 <b>Мои команды</b>\n"
-        "/status — балансы, позиции, метрики\n"
-        "/pause · /resume — пауза и возврат\n"
-        "/exitall — продать всё и остановить\n"
-        "/learn — параметры, сектора, веса, типы выходов, память\n"
-        "/resetstats — сброс статистики (веса сохранятся)\n"
-        "/resetlearn — полный сброс обучения\n"
+        "/status — позиции и метрики\n"
+        "/info — информация о боте\n"
+        "/learn — обучение\n"
         "/news — новостная аналитика\n"
+        "/pause, /resume, /exitall — с подтверждением\n"
+        "/resetstats, /resetlearn — сбросы\n"
         "/log — файл лога"
     )
 
@@ -337,7 +343,6 @@ async def cmd_learn(update, context):
     regime, _ = await get_regime()
     lines = ["🧠 <b>Обучение бота</b>", ""]
 
-    # 📌 ТЕКУЩИЕ ПАРАМЕТРЫ
     lines.append("📌 <b>Текущие параметры</b>")
     lines.append(
         f"🎯 Winrate <b>{wr:.0%}</b> ({n}) · строгость <b>{learner.threshold_adj:+.1f}</b> · "
@@ -359,7 +364,6 @@ async def cmd_learn(update, context):
         lines.append(f"🛰 Сателлиты: {len(sat_hist)} · wr {swr:.0%} · ср. {savg:+.2f}%")
     lines.append("")
 
-    # 🧭 ГДЕ ДЕНЬГИ · сектора и тиры (сортировка по бонусу)
     lines.append("🧭 <b>Где деньги</b> · сектора и тиры")
     if learner.sector_stats:
         rows = []
@@ -393,14 +397,12 @@ async def cmd_learn(update, context):
         lines.append("   🐘 Кап-тиры: накапливается")
     lines.append("")
 
-    # 🎯 ЧЕМУ ВЕРИТ БОТ · веса сигналов
     lines.append("🎯 <b>Чему верит бот</b> · веса сигналов")
     for k, v in sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True):
         bar = "⚡" * max(1, int(round(v * 5)))
         lines.append(f"   {weight_emoji(v)} <i>{k}</i> · {v:.2f} {bar}")
     lines.append("")
 
-    # 🧾 КАК ВЫХОДИМ · типы выходов
     lines.append("🧾 <b>Как выходим</b> · типы выходов")
     if learner.exit_stats:
         rows = []
@@ -417,7 +419,6 @@ async def cmd_learn(update, context):
         lines.append("   (пока нет данных)")
     lines.append("")
 
-    # 🗂 ПАМЯТЬ ПО МОНЕТАМ
     mem = memory_stats()
     lines.append("🗂 <b>Память по монетам</b>")
     lines.append(
@@ -620,17 +621,18 @@ def main():
     app = Application.builder().token(token).build()
     app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
-    app.add_handler(CommandHandler("exitall", cmd_exitall))
+    app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("learn", cmd_learn))
-    app.add_handler(CommandHandler("resetlearn", cmd_resetlearn))
-    app.add_handler(CommandHandler("resetstats", cmd_resetstats))
     app.add_handler(CommandHandler("news", cmd_news))
+    app.add_handler(CommandHandler("exitall", cmd_exitall))
+    app.add_handler(CommandHandler("resetstats", cmd_resetstats))
+    app.add_handler(CommandHandler("resetlearn", cmd_resetlearn))
     app.add_handler(CommandHandler("log", cmd_log))
+    app.add_handler(CommandHandler("info", cmd_info))
     app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CallbackQueryHandler(confirm_handler))
+    app.add_handler(CallbackQueryHandler(confirm_handler, pattern="^(confirm:|cancel)"))
 
     logger.info("Бот собран, запускаем webhook-сервер...")
     asyncio.run(run_all(app))
