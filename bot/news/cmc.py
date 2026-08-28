@@ -7,6 +7,8 @@ from pathlib import Path
 import httpx
 from loguru import logger
 
+from bot.core.remote_state import download_state, upload_state
+
 CMC_BASE = "https://pro-api.coinmarketcap.com"
 
 _cache = {"info": {}}
@@ -56,8 +58,11 @@ def tier_of(rank):
     return "MICRO"
 
 
+# ===== КЭШ СЕКТОРОВ (локально + бэкап в GitHub) =====
 SECTOR_FILE = Path(os.getenv("STORAGE_DIR", "storage")) / "sectors.json"
+SECTOR_REMOTE = "sectors.json"
 _sector_cache = {}
+_last_upload = 0.0
 
 
 def _load_sectors():
@@ -68,14 +73,25 @@ def _load_sectors():
             logger.info(f"sectors: кэш загружен ({len(_sector_cache)} монет)")
     except Exception as e:
         logger.error(f"sectors load error: {e}")
+    # Если локального файла нет (свежий деплой) — восстанавливаем из GitHub
+    if not _sector_cache:
+        data = download_state(SECTOR_REMOTE)
+        if isinstance(data, dict) and data:
+            _sector_cache = data
+            logger.info(f"sectors: кэш восстановлен из GitHub ({len(_sector_cache)} монет)")
 
 
 def _save_sectors():
+    global _last_upload
     try:
         SECTOR_FILE.parent.mkdir(parents=True, exist_ok=True)
         SECTOR_FILE.write_text(json.dumps(_sector_cache, ensure_ascii=False))
     except Exception as e:
         logger.error(f"sectors save error: {e}")
+    # Бэкап в GitHub не чаще раза в 60 секунд
+    if time.time() - _last_upload > 60:
+        _last_upload = time.time()
+        upload_state(SECTOR_REMOTE, _sector_cache)
 
 
 _load_sectors()
