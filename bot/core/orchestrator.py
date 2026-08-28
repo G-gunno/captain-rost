@@ -308,10 +308,12 @@ async def run_cycle():
             new_sl = max(new_sl or pos["sl"], pos["avg"])
         if last >= pos["avg"] + 2.0 * a:
             new_sl = max(new_sl or pos["sl"], last - 0.8 * a)
-        if new_sl and new_sl > pos["sl"]:
-            pos["sl"] = round(new_sl, 10)
-            pos["max_sl"] = max(pos.get("max_sl", 0), pos["sl"])
-            logger.info(f"SL поднят {sym} -> {pos['sl']}")
+        if new_sl:
+            new_sl_r = round(new_sl, 10)
+            if new_sl_r > pos["sl"]:
+                pos["sl"] = new_sl_r
+                pos["max_sl"] = max(pos.get("max_sl", 0), pos["sl"])
+                logger.info(f"SL поднят {sym} -> {pos['sl']}")
         paper.save()
 
     # 5. Выходы остатка по TP/SL: 💸 Продажа с ценой, типом и накоплениями
