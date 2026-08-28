@@ -19,8 +19,8 @@ from bot.core.state import bot_state
 from bot.core.remote_state import ensure_branch
 from bot.services.reports import build_report
 from bot.strategy.scanner import SCAN_SUMMARY, FILTERED_BY_NEWS, get_regime, threshold
-from bot.strategy.learner import learner
-from bot.news.cmc import sector_of
+from bot.strategy.learner import learner, TIERS
+from bot.news.cmc import sector_of, TIER_EMOJI, TIER_NAMES
 from bot.utils.format import fmt_price, fmt_pct, fmt_sym
 
 _app = None
@@ -253,7 +253,7 @@ async def run_all(application):
         BotCommand("pause", "⏸ Пауза (с подтверждением)"),
         BotCommand("resume", "▶️ Возобновить (с подтверждением)"),
         BotCommand("exitall", "🛑 Продать всё и остановить (с подтверждением)"),
-        BotCommand("learn", "🧠 Обучение: веса, winrate, типы выходов"),
+        BotCommand("learn", "🧠 Обучение: веса, winrate, тиры, сектора"),
         BotCommand("resetlearn", "🧠♻️ Сбросить опыт обучения"),
         BotCommand("resetstats", "📊 Сбросить статистику"),
         BotCommand("news", "📰 Статус новостной аналитики"),
@@ -304,7 +304,7 @@ async def cmd_help(update, context):
         "/status — балансы, позиции, метрики\n"
         "/pause · /resume — пауза и возврат\n"
         "/exitall — продать всё и остановить\n"
-        "/learn — веса, winrate, сектора, типы выходов\n"
+        "/learn — веса, winrate, кап-тиры, сектора, типы выходов\n"
         "/resetstats — сброс статистики (веса сохранятся)\n"
         "/resetlearn — полный сброс обучения\n"
         "/news — новостная аналитика\n"
@@ -343,18 +343,18 @@ async def cmd_learn(update, context):
         bar = "⚡" * max(1, int(round(v * 5)))
         lines.append(f"   {weight_emoji(v)} <i>{k}</i> · {v:.2f} {bar}")
     lines.append("")
-    lines.append("<b>Типы выходов</b>")
-    if learner.exit_stats:
-        rows = []
-        for t, hist in learner.exit_stats.items():
+    lines.append("<b>Кап-тиры (CMC rank)</b>")
+    if learner.tier_stats:
+        for t in TIERS:
+            hist = learner.tier_stats.get(t) or []
             if not hist:
                 continue
             twr = sum(1 for p in hist if p > 0) / len(hist)
             avg = sum(hist) / len(hist)
-            rows.append((t, twr, len(hist), avg))
-        rows.sort(key=lambda r: r[3], reverse=True)
-        for t, twr, cnt, avg in rows:
-            lines.append(f"   {pnl_emoji(avg)} <i>{t}</i> · {cnt} · wr {twr:.0%} · {avg:+.2f}%")
+            lines.append(
+                f"   {TIER_EMOJI[t]} <i>{TIER_NAMES[t]}</i> · {len(hist)} · "
+                f"wr {twr:.0%} · ср. {avg:+.2f}% · бонус {learner.tier_bias(t):+.2f}"
+            )
     else:
         lines.append("   (пока нет данных)")
     lines.append("")
@@ -370,6 +370,21 @@ async def cmd_learn(update, context):
         rows.sort(key=lambda r: r[1], reverse=True)
         for s, swr, cnt, avg, bias in rows[:8]:
             lines.append(f"   {pnl_emoji(avg)} <i>{s}</i> · wr {swr:.0%} ({cnt}) · {avg:+.2f}% · бонус {bias:+.2f}")
+    else:
+        lines.append("   (пока нет данных)")
+    lines.append("")
+    lines.append("<b>Типы выходов</b>")
+    if learner.exit_stats:
+        rows = []
+        for t, hist in learner.exit_stats.items():
+            if not hist:
+                continue
+            twr = sum(1 for p in hist if p > 0) / len(hist)
+            avg = sum(hist) / len(hist)
+            rows.append((t, twr, len(hist), avg))
+        rows.sort(key=lambda r: r[3], reverse=True)
+        for t, twr, cnt, avg in rows:
+            lines.append(f"   {pnl_emoji(avg)} <i>{t}</i> · {cnt} · wr {twr:.0%} · {avg:+.2f}%")
     else:
         lines.append("   (пока нет данных)")
     lines.append("")
@@ -409,7 +424,7 @@ async def cmd_news(update, context):
 
     lines.append("")
     lines.append("🏷 <b>CoinMarketCap</b>")
-    lines.append(f"   {'✅' if cmc['api_key_set'] else '❌'} API ключ · 📚 выучено секторов: {cmc['sectors_learned']}")
+    lines.append(f"   {'✅' if cmc['api_key_set'] else '❌'} API ключ · 📚 секторов: {cmc['sectors_learned']} · 🏆 рангов: {cmc['ranks_cached']}")
 
     lines.append("")
     lines.append("🚫 <b>Отфильтровано новостями</b>")
@@ -460,9 +475,13 @@ async def cmd_status(update, context):
                 pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
                 kind = "🛰" if pos.get("kind") == "satellite" else "🏛"
                 sector = pos.get("sector") or sector_of(sym[:-4])
+                tier_em = TIER_EMOJI.get(pos.get("tier") or "", "")
                 ind = "🔥" if pos.get("tp1_done") else pnl_emoji(pnl_pct)
                 tp1 = " · TP1" if pos.get("tp1_done") else ""
-                msg.append(f"{kind} <b>{sym[:-4]}</b> · <i>{sector}</i> · {ind} {fmt_pct(pnl_pct)}{tp1}")
+                msg.append(
+                    f"{kind} <b>{sym[:-4]}</b>{' ' + tier_em if tier_em else ''} · "
+                    f"<i>{sector}</i> · {ind} {fmt_pct(pnl_pct)}{tp1}"
+                )
                 msg.append(f"   💼 {usd(val)} · {w:.1f}%")
                 msg.append(f"   📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)}")
                 tp_pct = (pos["tp"] - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
@@ -480,7 +499,11 @@ async def cmd_status(update, context):
                 w = val / eq * 100 if eq else 0
                 kind = "🛰" if o.get("kind") == "satellite" else "🏛"
                 sector = o.get("sector") or sector_of(o["symbol"][:-4])
-                msg.append(f"{kind} <b>{o['symbol'][:-4]}</b> · <i>{sector}</i> · {w:.1f}%")
+                tier_em = TIER_EMOJI.get(o.get("tier") or "", "")
+                msg.append(
+                    f"{kind} <b>{o['symbol'][:-4]}</b>{' ' + tier_em if tier_em else ''} · "
+                    f"<i>{sector}</i> · {w:.1f}%"
+                )
                 msg.append(f"   💼 {usd(val)} · 📥 {fmt_price(o['price'])}")
                 tp_pct = (o["tp"] - o["price"]) / o["price"] * 100 if o["price"] else 0
                 sl_pct = (o["sl"] - o["price"]) / o["price"] * 100 if o["price"] else 0
