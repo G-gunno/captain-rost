@@ -186,6 +186,31 @@ async def get_ranks_for_pool(bases):
     return {b: fetched.get(b, _ranks["data"].get(b)) for b in bases}
 
 
+# ===== ПАМЯТЬ ПО МОНЕТАМ (для /learn) =====
+def memory_stats():
+    """Сводка памяти: база + выученные монеты, раскладка по секторам и тирам."""
+    sector_counts = {}
+    for sec in SECTORS.values():
+        sector_counts[sec] = sector_counts.get(sec, 0) + 1
+    learned = 0
+    for base, sec in _sector_cache.items():
+        if base not in SECTORS:
+            sector_counts[sec] = sector_counts.get(sec, 0) + 1
+            learned += 1
+    all_bases = set(SECTORS.keys()) | set(_sector_cache.keys())
+    tier_counts = {}
+    for base in all_bases:
+        t = tier_of(_ranks["data"].get(base))
+        tier_counts[t] = tier_counts.get(t, 0) + 1
+    return {
+        "base": len(SECTORS),
+        "learned": learned,
+        "total": len(all_bases),
+        "sectors": sector_counts,
+        "tiers": tier_counts,
+    }
+
+
 async def _get(path, params):
     key = os.getenv("CMC_API_KEY", "").strip()
     if not key:
