@@ -11,22 +11,20 @@ CMC_BASE = "https://pro-api.coinmarketcap.com"
 
 _cache = {"info": {}}
 
-# ===== БАЗОВЫЙ СЛОВАРЬ (только ~20 топ-монет, которые никогда не поменяются) =====
-# Всё остальное выучивается автоматически из CMC тегов и сохраняется в sectors.json
+# ===== БАЗОВЫЙ СЛОВАРЬ СЕКТОРОВ (только оверрид; остальное учится само) =====
 SECTORS = {
-    # L1
     "BTC": "L1", "ETH": "L1", "SOL": "L1", "BNB": "L1", "AVAX": "L1",
     "ADA": "L1", "DOT": "L1", "NEAR": "L1", "APT": "L1", "SUI": "L1",
-    "XRP": "L1", "LTC": "L1", "BCH": "L1", "ATOM": "L1", "ETC": "L1",
-    # L2
-    "MATIC": "L2", "POL": "L2", "ARB": "L2", "OP": "L2",
-    # DeFi
-    "LINK": "DeFi", "UNI": "DeFi", "AAVE": "DeFi", "MKR": "DeFi",
-    # Meme
+    "XRP": "L1", "LTC": "L1", "BCH": "L1", "ATOM": "L1", "TON": "L1",
+    "ARB": "L2", "OP": "L2", "STRK": "L2", "POL": "L2", "ZRO": "L2",
+    "UNI": "DeFi", "AAVE": "DeFi", "LINK": "DeFi", "MKR": "DeFi",
+    "CRV": "DeFi", "LDO": "DeFi", "DYDX": "DeFi", "JUP": "DeFi",
     "DOGE": "Meme", "SHIB": "Meme", "PEPE": "Meme", "BONK": "Meme",
+    "WIF": "Meme", "FLOKI": "Meme", "PENGU": "Meme", "TRUMP": "Meme",
+    "AXS": "Gaming", "SAND": "Gaming", "GALA": "Gaming", "NOT": "Gaming",
+    "FET": "AI", "RNDR": "AI", "GRT": "AI", "WLD": "AI", "GRASS": "AI",
 }
 
-# ===== АВТО-ПЕРЕВОД ТЕГОВ CMC В НАШИ СЕКТОРА =====
 SECTOR_TAG_MAP = {
     "layer-1": "L1", "layer-2": "L2", "defi": "DeFi",
     "ai-big-data": "AI", "memes": "Meme", "gaming": "Gaming",
@@ -35,6 +33,28 @@ SECTOR_TAG_MAP = {
     "real-world-assets": "RWA", "dex": "DEX", "exchange-token": "Exchange",
     "interoperability": "Infra", "oracle": "Infra",
 }
+
+# ===== КАП-ТИРЫ CMC =====
+TIER_EMOJI = {"TOP20": "🐋", "MID": "🐘", "SMALL": "🐅", "MICRO": "🐭"}
+TIER_NAMES = {
+    "TOP20": "Топ-20 · киты",
+    "MID": "21–100 · слоны",
+    "SMALL": "101–500 · тигры",
+    "MICRO": "500+ · мыши",
+}
+
+
+def tier_of(rank):
+    if rank is None:
+        return "MICRO"
+    if rank <= 20:
+        return "TOP20"
+    if rank <= 100:
+        return "MID"
+    if rank <= 500:
+        return "SMALL"
+    return "MICRO"
+
 
 SECTOR_FILE = Path(os.getenv("STORAGE_DIR", "storage")) / "sectors.json"
 _sector_cache = {}
@@ -62,7 +82,6 @@ _load_sectors()
 
 
 def sector_of(base):
-    """Синхронная справка сектора: базовый словарь -> выученный кэш -> Other."""
     return SECTORS.get(base) or _sector_cache.get(base) or "Other"
 
 
@@ -75,8 +94,6 @@ def _tags_to_sector(tags):
 
 
 async def get_sectors_for_pool(bases):
-    """Сектора монет: базовый словарь -> кэш -> теги CMC -> Other.
-    Новые монеты выучиваются автоматически и сохраняются в sectors.json."""
     result = {}
     need = []
     for b in bases:
@@ -88,10 +105,7 @@ async def get_sectors_for_pool(bases):
             need.append(b)
     if not need:
         return result
-
-    # Защита от rate limit
     await asyncio.sleep(1.0)
-
     try:
         key = os.getenv("CMC_API_KEY", "").strip()
         headers = {"X-CMC_PRO_API_KEY": key} if key else {}
@@ -109,8 +123,6 @@ async def get_sectors_for_pool(bases):
             elif isinstance(arr, dict):
                 sector = _tags_to_sector(arr.get("tags")) or "Other"
             result[b] = sector
-            # В кэш записываем только реальные секторы, не Other
-            # (чтобы при следующем скане попытаться выучить снова)
             if sector != "Other":
                 _sector_cache[b] = sector
                 learned += 1
@@ -122,6 +134,56 @@ async def get_sectors_for_pool(bases):
         for b in need:
             result.setdefault(b, "Other")
     return result
+
+
+# ===== РАНГИ CMC (кэш 6 часов) =====
+RANKS_FILE = Path(os.getenv("STORAGE_DIR", "storage")) / "ranks.json"
+_ranks = {"data": {}, "ts": 0.0}
+
+
+def _load_ranks():
+    try:
+        if RANKS_FILE.exists():
+            d = json.loads(RANKS_FILE.read_text())
+            _ranks["data"] = d.get("data", {})
+            _ranks["ts"] = float(d.get("ts", 0.0))
+            logger.info(f"ranks: кэш загружен ({len(_ranks['data'])} рангов)")
+    except Exception as e:
+        logger.error(f"ranks load error: {e}")
+
+
+_load_ranks()
+
+
+async def get_ranks_for_pool(bases):
+    """Ранги CMC для пула; обновление раз в 6 часов (1 пакетный запрос)."""
+    now = time.time()
+    if _ranks["data"] and now - _ranks["ts"] < 21600:
+        return {b: _ranks["data"].get(b) for b in bases}
+    fetched = {}
+    try:
+        key = os.getenv("CMC_API_KEY", "").strip()
+        headers = {"X-CMC_PRO_API_KEY": key} if key else {}
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(
+                f"{CMC_BASE}/v1/cryptocurrency/listings/latest",
+                params={"symbol": ",".join(bases[:100]), "limit": 200},
+                headers=headers,
+            )
+            data = r.json().get("data", [])
+        for item in data:
+            fetched[item.get("symbol")] = item.get("cmc_rank")
+        _ranks["data"].update(fetched)
+        _ranks["ts"] = now
+        try:
+            RANKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            RANKS_FILE.write_text(json.dumps({"data": _ranks["data"], "ts": _ranks["ts"]}))
+        except Exception as e:
+            logger.error(f"ranks save error: {e}")
+        logger.info(f"ranks: обновлено {len(fetched)} рангов CMC")
+    except Exception as e:
+        logger.error(f"ranks fetch error: {e}")
+    return {b: fetched.get(b, _ranks["data"].get(b)) for b in bases}
 
 
 async def _get(path, params):
@@ -143,7 +205,6 @@ async def _get(path, params):
 
 
 async def get_coin_name(symbol: str) -> str:
-    """Название монеты по тику (кэш 24 часа)."""
     info = _cache["info"].get(symbol)
     if info and time.time() - info["ts"] < 86400:
         return info["name"]
@@ -160,10 +221,10 @@ async def get_coin_name(symbol: str) -> str:
 
 
 def get_stats():
-    """Статистика CMC API для мониторинга."""
     key = os.getenv("CMC_API_KEY", "").strip()
     return {
         "api_key_set": bool(key),
         "cache_count": len(_cache["info"]),
         "sectors_learned": len(_sector_cache),
+        "ranks_cached": len(_ranks["data"]),
     }
