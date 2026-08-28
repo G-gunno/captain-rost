@@ -47,6 +47,12 @@ def funding_line(x):
     return f"\n🏦 в накопления {usd(x)}" if x > 0 else ""
 
 
+def corr_txt(d):
+    """Корреляция с BTC в карточках — только если известна."""
+    v = d.get("corr") if isinstance(d, dict) else None
+    return f" · ₿ {v:.2f}" if v is not None else ""
+
+
 def set_notifier(cb):
     global _notify_cb
     _notify_cb = cb
@@ -189,7 +195,7 @@ async def run_cycle():
         sl_pct = (f["sl"] - f["price"]) / f["price"] * 100
         await notify(
             f"🛒 <b>Покупка</b> · {pair_html(f['symbol'][:-4], sector, kind_tag, tier)}\n"
-            f"💵 {usd(f['qty'] * f['price'])} · 📥 {fmt_price(f['price'])}\n"
+            f"💵 {usd(f['qty'] * f['price'])} · 📥 {fmt_price(f['price'])}{corr_txt(f)}\n"
             f"🎯 {fmt_price(f['tp'])} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(f['sl'])} ({fmt_pct(sl_pct)})"
         )
 
@@ -541,6 +547,7 @@ async def run_cycle():
         order["kind"] = kind
         order["sector"] = sector
         order["tier"] = cand.get("tier")
+        order["corr"] = cand.get("corr")
         paper.save()
         tp_pct = (tp - entry) / entry * 100
         sl_pct = (sl - entry) / entry * 100
@@ -548,7 +555,7 @@ async def run_cycle():
         new_tag = "· 🆕 " if cand.get("is_new") else ""
         await notify(
             f"📋 <b>Ордер</b> {new_tag}· {pair_html(sym[:-4], sector, kind_tag, cand.get('tier'))}\n"
-            f"💵 {usd(size)} · 📥 {fmt_price(entry)}\n"
+            f"💵 {usd(size)} · 📥 {fmt_price(entry)}{corr_txt(cand)}\n"
             f"🎯 {fmt_price(tp)} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
             f"⭐ {cand['score']:.1f} · 🧠 {'; '.join(cand['reasons'][:3])}"
         )
