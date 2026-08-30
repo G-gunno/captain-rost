@@ -38,8 +38,6 @@ class PaperExchange:
             logger.error(f"Paper load error: {e}")
         if data is None:
             data = download_state(REMOTE_PATH)
-            if data:
-                logger.info("Paper state восстановлен из GitHub (пережил деплой)")
         if data:
             self.usdt = data.get("usdt", self.start_usdt)
             self.funding = data.get("funding", 0.0)
@@ -146,6 +144,7 @@ class PaperExchange:
                     pos["kind"] = order.get("kind", "core")
                     pos["sector"] = self._resolve_sector(order["symbol"], order.get("sector"))
                     pos["tier"] = order.get("tier")
+                    pos["regime_entry"] = order.get("regime")
                     pos["max_price"] = order["price"]
                     pos["entry_time"] = int(time.time())
                     self.trades.append({
@@ -161,7 +160,7 @@ class PaperExchange:
         self.save()
         return fills
 
-    def check_exits(self, prices):
+    def check_exits(self, prices, regime_now=None):
         results = []
         for sym in list(self.positions):
             last = prices.get(sym, {}).get("last")
@@ -169,9 +168,9 @@ class PaperExchange:
                 continue
             pos = self.positions[sym]
             if last >= pos["tp"]:
-                results.append(self._sell(sym, pos["tp"], "TP ✅"))
+                results.append(self._sell(sym, pos["tp"], "TP ✅", regime_now=regime_now))
             elif last <= pos["sl"]:
-                results.append(self._sell(sym, pos["sl"], "SL 🛡"))
+                results.append(self._sell(sym, pos["sl"], "SL 🛡", regime_now=regime_now))
         return results
 
     def sell_partial(self, sym, qty_part, price, reason):
@@ -216,7 +215,7 @@ class PaperExchange:
             "tier": pos.get("tier"), "kind": pos.get("kind", "core"),
         }
 
-    def _sell(self, sym, price, reason):
+    def _sell(self, sym, price, reason, regime_now=None):
         pos = self.positions.pop(sym)
         proceeds = pos["qty"] * price
         cost = pos["qty"] * pos["avg"]
@@ -238,6 +237,17 @@ class PaperExchange:
         else:
             exit_type = "EARLY"
 
+        # Смена режима рынка: убыток не вина сигнала → мягкий штраф + тип SL_REGIME
+        soft = False
+        regime_changed = (
+            regime_now is not None
+            and pos.get("regime_entry")
+            and regime_now != pos["regime_entry"]
+        )
+        if regime_changed and total_pnl < 0 and exit_type in ("SL", "EARLY"):
+            exit_type = "SL_REGIME"
+            soft = True
+
         runner_bonus = 0.0
         tp1_price = pos.get("tp1_price")
         max_price = pos.get("max_price", 0.0)
@@ -251,7 +261,7 @@ class PaperExchange:
             learner.record(pos.get("reason_keys", []), total_pnl > 0,
                            total_pnl_pct, sector=sector, tier=tier,
                            exit_type=exit_type, runner_bonus=runner_bonus,
-                           kind=kind)
+                           kind=kind, soft=soft)
         except Exception as e:
             logger.error(f"learner record error: {e}")
 
