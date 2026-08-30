@@ -20,7 +20,7 @@ TIERS = ["TOP20", "MID", "SMALL", "MICRO"]
 
 
 class Learner:
-    """Самообучение: веса + адаптив + сектора + кап-тиры + типы выходов + стиль."""
+    """Самообучение: веса + адаптив + сектора + тиры + типы выходов + стиль."""
 
     def __init__(self):
         self.weights = {k: 1.0 for k in KEYS}
@@ -75,8 +75,9 @@ class Learner:
         return self.weights.get(key, 1.0)
 
     def record(self, keys, win, pnl_pct=0.0, sector=None, tier=None,
-               exit_type=None, runner_bonus=0.0, kind=None):
-        """Одна запись на позицию (TP1+финал объединены в paper_exchange)."""
+               exit_type=None, runner_bonus=0.0, kind=None, soft=False):
+        """Одна запись на позицию. soft=True → половинный штраф при убытке
+        (смена режима рынка — сигнал не виноват)."""
         self.results.append(1 if win else 0)
         self.results = self.results[-200:]
         if sector:
@@ -105,13 +106,15 @@ class Learner:
             delta = 0.03 if win else -0.03
         if runner_bonus > 5.0:
             delta += 0.05
+        if soft and not win:
+            delta *= 0.5
         for k in keys:
             if k in self.weights:
                 self.weights[k] = round(min(1.7, max(0.3, self.weights[k] + delta)), 3)
         self.save()
-        logger.info(f"learner: win={win} pnl={pnl_pct:+.2f}% delta={delta:+.2f} "
-                    f"exit={exit_type} runner={runner_bonus:.1f}% keys={keys} "
-                    f"sector={sector} tier={tier} kind={kind}")
+        logger.info(f"learner: win={win} pnl={pnl_pct:+.2f}% delta={delta:+.3f} "
+                    f"exit={exit_type} runner={runner_bonus:.1f}% soft={soft} "
+                    f"keys={keys} sector={sector} tier={tier} kind={kind}")
 
     def sector_bias(self, sector):
         hist = self.sector_stats.get(sector) or []
@@ -123,7 +126,6 @@ class Learner:
         return round(max(-1.0, min(1.0, bias)), 2)
 
     def tier_bias(self, tier):
-        """Бонус/штраф кап-тира: ±0.5, включается после ≥5 сделок."""
         hist = self.tier_stats.get(tier) or []
         if len(hist) < 5:
             return 0.0
