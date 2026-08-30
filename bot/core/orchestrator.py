@@ -197,6 +197,7 @@ async def run_cycle():
             pos["kind"] = f.get("kind", "core")
             pos["sector"] = f.get("sector", "Other")
             pos["tier"] = f.get("tier")
+            pos["regime_entry"] = f.get("regime")
             paper.save()
         kind_tag = kind_tag_of(f)
         sector = (pos.get("sector") if pos else None) or f.get("sector") or "Other"
@@ -292,8 +293,16 @@ async def run_cycle():
         regime_flipped = pos.get("regime_entry") == "bull" and regime != "bull"
         signal_weak = trend_broken or score_pos <= thr - 1
 
-        if signal_weak or (regime_flipped and pnl_pct
-                if pnl_pct <= -0.5:
+        if signal_weak or (regime_flipped and pnl_pct <= -0.5):
+            if pnl_pct >= MIN_EARLY_EXIT_PCT:
+                ex = paper._sell(sym, last, "СИГНАЛ ИСЯК 📉", regime_now=regime)
+                await notify(
+                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · сигнал ослаб 📉\n"
+                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}"
+                    f"{funding_line(ex.get('transferred', 0))}"
+                )
+                continue
+            if pnl_pct <= -0.5:
                 ex = paper._sell(sym, last, "ИНВАЛИДАЦИЯ 🛑", regime_now=regime)
                 await notify(
                     f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · резка убытка 🛑\n"
@@ -358,7 +367,6 @@ async def run_cycle():
             await notify(f"⚠️ <b>Ордер снят</b> · {o_pair} · негатив {neg}")
             continue
 
-        # Сигнал мог умереть, пока ордер висел — проверяем каждый цикл
         candles = await market_data.get_kline(order["symbol"], "15", 60)
         a = atr(candles) if candles else 0
         if a <= 0:
@@ -378,7 +386,6 @@ async def run_cycle():
             paper.cancel_order(order["id"])
             await notify(f"❌ <b>Ордер снят</b> · {o_pair} · 3 попытки без исполнения")
             continue
-        # Реквота — только если сигнал всё ещё проходит порог
         if score_now < thr:
             paper.cancel_order(order["id"])
             await notify(
