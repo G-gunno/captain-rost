@@ -53,11 +53,11 @@ def corr_txt(d):
 
 
 def entry_offset(score, thr, regime):
-    """Смещение входа от рынка по убеждённости (surplus над порогом)."""
+    """Смещение входа от рынка по убеждённости (surplus над порогом, 10-шкала)."""
     surplus = score - thr
-    if regime == "bull" and surplus >= 1.5:
+    if regime == "bull" and surplus >= 3.0:
         return +0.002    # захват: лимит чуть выше рынка (потолок проскальзывания)
-    if surplus >= 0.7:
+    if surplus >= 1.4:
         return -0.0015   # вплотную к рынку
     return -0.004        # охота вниз за откатом
 
@@ -131,9 +131,9 @@ async def startup_reconciliation():
             continue
         a = atr(candles)
         score, _, _ = score_symbol(candles, t, regime)
-        if score < thr - 1:
+        if score < thr - 2:
             paper.cancel_order(order["id"])
-            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер снят · ⭐ {score:.1f} ниже {thr - 1:g}")
+            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер снят · ⭐ {score:.1f} ниже {thr - 2:g}")
         elif a > 0:
             off = entry_offset(score, thr, regime)
             order["price"] = t["last"] * (1 + off)
@@ -289,9 +289,9 @@ async def run_cycle():
             )
             continue
 
-        # 4б. ИНВАЛИДАЦИЯ + серая зона + regime-инвалидация
+        # 4б. ИНВАЛИДАЦИЯ + серая зона + regime-инвалидация (10-шкала: зазор 2)
         regime_flipped = pos.get("regime_entry") == "bull" and regime != "bull"
-        signal_weak = trend_broken or score_pos <= thr - 1
+        signal_weak = trend_broken or score_pos <= thr - 2
 
         if signal_weak or (regime_flipped and pnl_pct <= -0.5):
             if pnl_pct >= MIN_EARLY_EXIT_PCT:
@@ -372,11 +372,11 @@ async def run_cycle():
         if a <= 0:
             continue
         score_now, _, _ = score_symbol(candles, t, regime)
-        if score_now < thr - 1:
+        if score_now < thr - 2:
             paper.cancel_order(order["id"])
             await notify(
                 f"📉 <b>Ордер снят</b> · {o_pair} · сигнал умер "
-                f"({score_now:.1f} < {thr - 1:.1f})"
+                f"({score_now:.1f} < {thr - 2:.1f})"
             )
             continue
 
