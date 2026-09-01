@@ -13,7 +13,8 @@ from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sent
 SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
 FILTERED_BY_NEWS = []
 
-SAT_ATR_PCT = 1.2  # порог волатильности: выше — монета идёт в сателлиты
+SAT_ATR_PCT = 1.2
+SCORE_MAX = 10.0
 
 _instruments_cache = {"data": None, "ts": 0}
 
@@ -34,12 +35,12 @@ def is_tradable(symbol):
     return True
 
 
-def max_score(regime):
-    """Теоретический максимум скорa при ТЕКУЩИХ весах (монета в лучшем случае)."""
+def raw_max_score(regime):
+    """Теоретический максимум «сырого» скора при ТЕКУЩИХ весах."""
     m = sum(learner.weight(k) for k in
             ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
-    m += learner.weight("indep")                                   # низкая корреляция
-    m += max(learner.weight("news_pos"), learner.weight("hype"))   # новости/хайп
+    m += learner.weight("indep")
+    m += max(learner.weight("news_pos"), learner.weight("hype"))
     m += 1.0   # потолок секторного бонуса
     m += 0.5   # потолок тир-бонуса
     if regime == "bull":
@@ -50,16 +51,14 @@ def max_score(regime):
 
 
 def threshold(regime):
-    """Порог адаптируется к текущей шкале весов.
+    """Порог на фиксированной 10-балльной шкале.
 
-    Зазор от максимума: bull 2.0 (лайтово) / neutral 1.2 / bear 0.5 (жёстко,
-    но идеальная монета всё равно запрыгнет). Предохранители:
-    не выше max−0.5 (всегда есть зазор) и не ниже 50% от max (не покупаем мусор).
+    bull 5.0 / neutral 6.5 / bear 8.0 + строгость, clamp [5.0 … 9.5].
+    При макс. строгости 9.5 у идеальной монеты (10) остаётся зазор 0.5.
     """
-    m = max_score(regime)
-    margin = {"bull": 2.0, "neutral": 1.2, "bear": 0.5}.get(regime, 1.2)
-    thr = m - margin + learner.threshold_adj
-    return round(max(min(thr, m - 0.5), m * 0.5), 2)
+    base = {"bull": 5.0, "neutral": 6.5, "bear": 8.0}.get(regime, 6.5)
+    thr = base + learner.threshold_adj
+    return round(max(min(thr, SCORE_MAX - 0.5), SCORE_MAX * 0.5), 2)
 
 
 def _returns(closes):
@@ -96,7 +95,6 @@ async def get_regime():
 
 
 async def fetch_new_listings():
-    """Новые листинги через Bybit API (launchTime) — надёжный источник. Кэш 1 час."""
     now = time.time()
     if _instruments_cache["data"] is not None and now - _instruments_cache["ts"] < 3600:
         raw = _instruments_cache["data"]
@@ -231,6 +229,8 @@ async def scan(regime, tickers, limit=5):
     btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
     btc_ret = _returns([c["close"] for c in btc_candles])
 
+    raw_max = raw_max_score(regime)
+
     scored = []
     for sym in pool:
         candles = await market_data.get_kline(sym, "15", 120)
@@ -266,7 +266,12 @@ async def scan(regime, tickers, limit=5):
             score += tb
             reasons.append(f"тир {TIER_EMOJI[tier]}: {tb:+.2f}")
 
-        scored.append({"symbol": sym, "score": score, "reasons": reasons,
+        # Нормализация к 10-балльной шкале
+        rm = raw_max(regime)
+        score10 = (score / rm * SCORE_MAX) if rm > 0 else 0.0
+        score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)
+
+        scored.append({"symbol": sym, "score": score10, "reasons": reasons,
                        "reason_keys": keys, "atr": a, "last": last_price,
                        "liquidity": tickers[sym]["quote_volume"],
                        "corr": round(corr, 2), "atr_pct": round(atr_pct, 2),
@@ -301,20 +306,21 @@ async def scan(regime, tickers, limit=5):
         if neg > 0 and neg > pos:
             logger.info(f"{c['symbol']}: пропущен из-за негативного новостного фона ({neg})")
             FILTERED_BY_NEWS.append({
-                "symbol": c['symbol'],
+                "symbol": c["symbol"],
                 "neg_count": neg,
                 "time": int(time.time()),
             })
             FILTERED_BY_NEWS[:] = FILTERED_BY_NEWS[-10:]
             continue
         if pos > neg:
-            c["score"] += learner.weight("news_pos")
+            c["score"] += learner.weight("news_pos") / rm * SCORE_MAX if rm > 0 else 0
             c["reason_keys"].append("news_pos")
             c["reasons"].append(f"позитивный новостной фон ({pos})")
         elif mentions >= 2:
-            c["score"] += learner.weight("hype")
+            c["score"] += learner.weight("hype") / rm * SCORE_MAX if rm > 0 else 0
             c["reason_keys"].append("hype")
             c["reasons"].append(f"медиа-хайп ({mentions} упом.)")
+        c["score"] = round(min(SCORE_MAX, c["score"]), 2)
         candidates.append(c)
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
