@@ -34,9 +34,32 @@ def is_tradable(symbol):
     return True
 
 
+def max_score(regime):
+    """Теоретический максимум скорa при ТЕКУЩИХ весах (монета в лучшем случае)."""
+    m = sum(learner.weight(k) for k in
+            ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
+    m += learner.weight("indep")                                   # низкая корреляция
+    m += max(learner.weight("news_pos"), learner.weight("hype"))   # новости/хайп
+    m += 1.0   # потолок секторного бонуса
+    m += 0.5   # потолок тир-бонуса
+    if regime == "bull":
+        m += 1
+    elif regime == "bear":
+        m -= 2
+    return m
+
+
 def threshold(regime):
-    base = {"bull": 5.0, "neutral": 6.0, "bear": 8.0}.get(regime, 6.0)
-    return min(9.5, max(5.0, base + learner.threshold_adj))
+    """Порог адаптируется к текущей шкале весов.
+
+    Зазор от максимума: bull 2.0 (лайтово) / neutral 1.2 / bear 0.5 (жёстко,
+    но идеальная монета всё равно запрыгнет). Предохранители:
+    не выше max−0.5 (всегда есть зазор) и не ниже 50% от max (не покупаем мусор).
+    """
+    m = max_score(regime)
+    margin = {"bull": 2.0, "neutral": 1.2, "bear": 0.5}.get(regime, 1.2)
+    thr = m - margin + learner.threshold_adj
+    return round(max(min(thr, m - 0.5), m * 0.5), 2)
 
 
 def _returns(closes):
