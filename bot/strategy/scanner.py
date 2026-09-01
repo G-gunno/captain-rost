@@ -267,7 +267,7 @@ async def scan(regime, tickers, limit=5):
             reasons.append(f"тир {TIER_EMOJI[tier]}: {tb:+.2f}")
 
         # Нормализация к 10-балльной шкале
-        rm = raw_max(regime)
+        rm = raw_max
         score10 = (score / rm * SCORE_MAX) if rm > 0 else 0.0
         score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)
 
