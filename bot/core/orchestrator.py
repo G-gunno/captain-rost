@@ -408,11 +408,9 @@ async def run_cycle():
         )
 
     # 7. Сканирование и покупки / ротация
-    candidates = []
-    if regime != "bear":
-        candidates = await scan(regime, tickers)
-    else:
-        logger.info("Медвежий рынок — новые покупки отключены (умный риск)")
+    # Сканируем ВСЕГДА (даже в bear), чтобы видеть рынок; строгость держит
+    # порог (в bear до 9.5 из 10) — он сам отсеивает слабые монеты.
+    candidates = await scan(regime, tickers)
 
     equity = paper.equity(tickers)
     thr = threshold(regime)
