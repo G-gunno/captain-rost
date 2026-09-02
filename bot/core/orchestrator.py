@@ -11,6 +11,7 @@ from bot.core.state import bot_state
 from bot.news.cmc import get_coin_name, TIER_EMOJI
 from bot.news.rss_news import fetch_news_cache, check_sentiment
 from bot.strategy.learner import learner
+from bot.strategy.shadow import shadow
 from bot.utils.format import fmt_price, fmt_pct, fmt_sym
 
 CYCLE_SECONDS = 300
@@ -56,10 +57,10 @@ def entry_offset(score, thr, regime):
     """Смещение входа от рынка по убеждённости (surplus над порогом, 10-шкала)."""
     surplus = score - thr
     if regime == "bull" and surplus >= 3.0:
-        return +0.002    # захват: лимит чуть выше рынка (потолок проскальзывания)
+        return shadow.capture()
     if surplus >= 1.4:
-        return -0.0015   # вплотную к рынку
-    return -0.004        # охота вниз за откатом
+        return shadow.near()
+    return shadow.hunt()
 
 
 def set_notifier(cb):
@@ -521,14 +522,14 @@ async def run_cycle():
             continue
 
         if kind == "satellite":
-            sl_dist_pct = max(min(1.5 * a / entry * 100, SAT_MAX_SL_PCT), 2.0)
-            tp_dist_pct = max(min(2.5 * a / entry * 100, 12.0), sl_dist_pct * MIN_RR_SAT)
+            sl_dist_pct = max(min(1.5 * a / entry * 100 * shadow.sl_mult(), SAT_MAX_SL_PCT), 2.0)
+            tp_dist_pct = max(min(2.5 * a / entry * 100 * shadow.tp_mult(), 12.0), sl_dist_pct * MIN_RR_SAT)
             sl = entry * (1 - sl_dist_pct / 100)
             tp = entry * (1 + tp_dist_pct / 100)
             min_rr = MIN_RR_SAT
         else:
-            sl = entry - 1.2 * a
-            tp = entry + 2.0 * a
+            sl = entry - 1.2 * a * shadow.sl_mult()
+            tp = entry + 2.0 * a * shadow.tp_mult()
             tp = max(tp, entry * (1 + MIN_TP_PCT / 100))
             sl = min(sl, entry * (1 - MIN_SL_PCT / 100))
             sl_dist_pct = (entry - sl) / entry * 100
