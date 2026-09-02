@@ -376,7 +376,7 @@ async def run_cycle():
             paper.cancel_order(order["id"])
             await notify(
                 f"📉 <b>Ордер снят</b> · {o_pair} · сигнал умер "
-                f"({score_now:.1f} < {thr - 2:.1f})"
+                f"({score_now:.1f} &lt; {thr - 2:.1f})"
             )
             continue
 
@@ -390,7 +390,7 @@ async def run_cycle():
             paper.cancel_order(order["id"])
             await notify(
                 f"📉 <b>Ордер снят</b> · {o_pair} · сигнал ослаб "
-                f"({score_now:.1f} < {thr:g})"
+                f"({score_now:.1f} &lt; {thr:g})"
             )
             continue
         paper.cancel_order(order["id"])
