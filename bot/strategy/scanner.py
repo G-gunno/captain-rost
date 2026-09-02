@@ -155,7 +155,7 @@ def score_symbol(candles, t, regime):
     if last > e50: score += learner.weight("ema50"); reasons.append("цена выше EMA50"); keys.append("ema50")
     if e21 > e50: score += learner.weight("ema21"); reasons.append("EMA21>EMA50"); keys.append("ema21")
     if e12 > e26: score += learner.weight("impulse"); reasons.append("импульс роста"); keys.append("impulse")
-    if 40 <= r <= 85: score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
+    if 40 <= r <= 90: score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
     if vol_ratio > 1.3: score += learner.weight("volume"); reasons.append(f"объём x{vol_ratio:.1f}"); keys.append("volume")
     if 0 < t["change_pct"] < 30: score += learner.weight("chg24h"); reasons.append(f"24ч +{t['change_pct']:.1f}%"); keys.append("chg24h")
     if t["quote_volume"] < 500_000: score -= 1
