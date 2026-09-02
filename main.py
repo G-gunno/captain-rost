@@ -19,6 +19,7 @@ from bot.core.state import bot_state
 from bot.core.remote_state import ensure_branch
 from bot.services.reports import build_report
 from bot.services.info import info_full_text
+from bot.strategy.shadow import shadow
 from bot.strategy.scanner import SCAN_SUMMARY, FILTERED_BY_NEWS, get_regime, threshold
 from bot.strategy.learner import learner, TIERS
 from bot.news.cmc import sector_of, TIER_EMOJI, TIER_NAMES, memory_stats
@@ -260,6 +261,7 @@ async def run_all(application):
         BotCommand("resetstats", "📊 Сбросить статистику"),
         BotCommand("resetlearn", "🧠♻️ Сбросить опыт обучения"),
         BotCommand("log", "📄 Файл лога"),
+        BotCommand("autotune", "🎛 Автотюн: статус и вкл/выкл"),
         BotCommand("info", "📖 Информация о боте"),
         BotCommand("help", "📖 Справка"),
     ])
@@ -434,6 +436,8 @@ async def cmd_learn(update, context):
         f"{TIER_EMOJI[t]} {c}" for t, c in sorted(mem["tiers"].items(), key=lambda kv: kv[1], reverse=True)
     )
     lines.append(f"   🏆 {tier_txt}")
+    lines.append("")
+    lines.extend(shadow.learn_lines())
 
     await reply(update, "\n".join(lines))
 
@@ -483,6 +487,14 @@ async def cmd_log(update, context):
     tmp.write_bytes(src.read_bytes())
     with open(tmp, "rb") as f:
         await update.message.reply_document(document=f, filename=name)
+
+async def cmd_autotune(update, context):
+    arg = (context.args or [None])[0]
+    if arg in ("on", "вкл"):
+        shadow.set_auto(True)
+    elif arg in ("off", "выкл"):
+        shadow.set_auto(False)
+    await reply(update, shadow.stats_text())
 
 
 async def cmd_status(update, context):
@@ -633,6 +645,7 @@ def main():
     app.add_handler(CommandHandler("log", cmd_log))
     app.add_handler(CommandHandler("info", cmd_info))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("autotune", cmd_autotune))
     app.add_handler(CallbackQueryHandler(confirm_handler, pattern="^(confirm:|cancel)"))
 
     logger.info("Бот собран, запускаем webhook-сервер...")
