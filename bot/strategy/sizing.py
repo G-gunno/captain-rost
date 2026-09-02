@@ -69,7 +69,7 @@ def buy_size(equity, score, liquidity, free_usdt, sl_dist_pct=1.0,
 
     # --- CORE: сетка по equity + сила сигнала + Kelly ---
     lo, hi = tier_limits(equity)
-    strength = max(0.0, min(1.0, (score - 4) / 4))
+    strength = max(0.0, min(1.0, (score - 5) / 3.5))
     size = lo + (hi - lo) * strength
     if liquidity < 500_000:
         size = lo
