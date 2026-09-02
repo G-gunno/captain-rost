@@ -155,11 +155,13 @@ def score_symbol(candles, t, regime):
     if last > e50: score += learner.weight("ema50"); reasons.append("цена выше EMA50"); keys.append("ema50")
     if e21 > e50: score += learner.weight("ema21"); reasons.append("EMA21>EMA50"); keys.append("ema21")
     if e12 > e26: score += learner.weight("impulse"); reasons.append("импульс роста"); keys.append("impulse")
-    if 40 <= r <= 90: score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
-    if vol_ratio > 1.3: score += learner.weight("volume"); reasons.append(f"объём x{vol_ratio:.1f}"); keys.append("volume")
-    if 0 < t["change_pct"] < 30: score += learner.weight("chg24h"); reasons.append(f"24ч +{t['change_pct']:.1f}%"); keys.append("chg24h")
+    w = shadow.signal_windows()
+    if 40 <= r <= w["rsi_hi"]: score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
+    if vol_ratio > w["vol_lo"]: score += learner.weight("volume"); reasons.append(f"объём x{vol_ratio:.1f}"); keys.append("volume")
+    if 0 < t["change_pct"] < w["chg_hi"]: score += learner.weight("chg24h"); reasons.append(f"24ч +{t['change_pct']:.1f}%"); keys.append("chg24h")
     if t["quote_volume"] < 500_000: score -= 1
-    return score, reasons, keys
+    signal_values = {"rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio}
+    return score, reasons, keys, signal_values
 
 
 def normalize(raw, regime):
@@ -260,7 +262,7 @@ async def scan(regime, tickers, limit=5):
         atr_pct = (a / last_price) * 100 if last_price else 0
         if a <= 0 or atr_pct < 0.25:
             continue
-        score, reasons, keys = score_symbol(candles, tickers[sym], regime)
+        score, reasons, keys, signal_values = score_symbol(candles, tickers[sym], regime)
 
         corr = _corr(_returns([c["close"] for c in candles]), btc_ret)
         if corr > 0.85 and regime == "neutral":
@@ -293,7 +295,8 @@ async def scan(regime, tickers, limit=5):
                        "reason_keys": keys, "atr": a, "last": last_price,
                        "liquidity": tickers[sym]["quote_volume"],
                        "corr": round(corr, 2), "atr_pct": round(atr_pct, 2),
-                       "kind": kind, "sector": sector, "tier": tier})
+                       "kind": kind, "sector": sector, "tier": tier,
+                       "signal_values": signal_values})
 
     scored.sort(key=lambda c: c["score"], reverse=True)
 
