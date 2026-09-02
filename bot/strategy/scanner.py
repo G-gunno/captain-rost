@@ -248,7 +248,8 @@ async def scan(regime, tickers, limit=5):
             score += learner.weight("indep")
             reasons.append(f"независима от BTC (corr {corr:.2f})")
             keys.append("indep")
-            kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
+
+        kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"       # ← уровень цикла
         base = sym[:-4]
         sector = sectors_map.get(base, "Other")
         tier = tier_of(ranks_map.get(base))
