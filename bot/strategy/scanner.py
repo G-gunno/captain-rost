@@ -312,7 +312,8 @@ async def scan(regime, tickers, limit=5):
             f"{k_tag} <b>{c['symbol'][:-4]}</b> {TIER_EMOJI.get(c['tier'], '🐭')} · "
             f"<i>{c['sector']}</i> · {c['score']:.1f}/{thr:g} · ₿ {c['corr']:.2f}"
         )
-        parts_plain.append(f"{c['symbol']} {c['score']:.1f}/{thr:g} (btc {c['corr']:.2f})")
+        keys_short = "+".join(c["reason_keys"][:5])
+        parts_plain.append(f"{c['symbol']} {c['score']:.1f}/{thr:g} [{keys_short}] btc{c['corr']:.2f}")
     SCAN_SUMMARY["text"] = " | ".join(parts_html) or "сигналов нет"
     SCAN_SUMMARY["thr"] = thr
     SCAN_SUMMARY["ts"] = time.time()
