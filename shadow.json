@@ -1,1 +1,1 @@
-{"episodes": {}, "agg": {}, "cooldown": {}, "tuning": {"auto": false, "thr_nudge": 0.0, "hunt": -0.004, "near": -0.0015, "capture": 0.002, "sl_mult": 1.0, "tp_mult": 1.0}}
+{"episodes": {}, "agg": {}, "cooldown": {}, "tuning": {"auto": true, "thr_nudge": 0.0, "hunt": -0.004, "near": -0.0015, "capture": 0.002, "sl_mult": 1.0, "tp_mult": 1.0}}
