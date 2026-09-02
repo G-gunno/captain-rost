@@ -42,6 +42,7 @@ class Shadow:
             "thr_nudge": 0.0,
             "hunt": -0.004, "near": -0.0015, "capture": +0.002,
             "sl_mult": 1.0, "tp_mult": 1.0,
+            "signal_windows": {"rsi_hi": 90, "chg_hi": 30, "vol_lo": 1.3},
         }
         self._last_upload = 0.0
         self._last_tune = 0.0
@@ -100,6 +101,7 @@ class Shadow:
                 "regime": regime, "sector": c.get("sector"), "tier": c.get("tier"),
                 "keys": c.get("reason_keys", []), "traded": bool(traded),
                 "hi": c["last"], "lo": c["last"], "p4": None,
+                "signal_values": c.get("signal_values", {}),
             }
 
     def tick(self, tickers):
@@ -143,6 +145,9 @@ class Shadow:
             a["pumps24"] += 1
             for k in ep["keys"]:
                 a["keys_pump"][k] = a["keys_pump"].get(k, 0) + 1
+            sv = ep.get("signal_values", {})
+            for k, v in sv.items():
+                a.setdefault("signal_values_pump", {}).setdefault(k, []).append(v)
         for k in ep["keys"]:
             a["keys_all"][k] = a["keys_all"].get(k, 0) + 1
         if ep["traded"]:
@@ -185,6 +190,7 @@ class Shadow:
             self.tuning["sl_mult"] = round(max(0.8, min(1.5, 1.0 + abs(sm) / 100 * 0.3)), 2)
 
         self._apply_weight_lift()
+        self._calibrate_signal_windows()
         self.save()
         logger.info(f"shadow autotune: {self.tuning}")
 
@@ -206,6 +212,41 @@ class Shadow:
                 elif lift < 0.8:
                     learner.weights[k] = round(max(0.3, learner.weights[k] - 0.05), 3)
         learner.save()
+
+
+    def _calibrate_signal_windows(self):
+        """Калибровка окон сигналов (RSI, chg24h, volume) по распределению у пампов."""
+        pump_values = {"rsi": [], "chg24h": [], "volume": []}
+        for a in self.agg.values():
+            sv = a.get("signal_values_pump", {})
+            for k in pump_values:
+                pump_values[k].extend(sv.get(k, []))
+        
+        if len(pump_values["rsi"]) < 50:
+            return
+        
+        w = self.tuning["signal_windows"]
+        
+        rsi_sorted = sorted(pump_values["rsi"])
+        rsi_p90 = rsi_sorted[int(len(rsi_sorted) * 0.9)]
+        target_rsi = max(80, min(95, round(rsi_p90)))
+        w["rsi_hi"] = int(round(w["rsi_hi"] * 0.8 + target_rsi * 0.2))
+        
+        chg_sorted = sorted(pump_values["chg24h"])
+        chg_p90 = chg_sorted[int(len(chg_sorted) * 0.9)]
+        target_chg = max(20, min(50, round(chg_p90)))
+        w["chg_hi"] = int(round(w["chg_hi"] * 0.8 + target_chg * 0.2))
+        
+        vol_sorted = sorted(pump_values["volume"])
+        vol_p10 = vol_sorted[int(len(vol_sorted) * 0.1)]
+        target_vol = max(1.0, min(3.0, round(vol_p10, 1)))
+        w["vol_lo"] = round(w["vol_lo"] * 0.8 + target_vol * 0.2, 1)
+        
+        logger.info(f"shadow windows: rsi≤{w['rsi_hi']} chg≤{w['chg_hi']} vol≥{w['vol_lo']}")
+
+    def signal_windows(self):
+        return self.tuning.get("signal_windows", {"rsi_hi": 90, "chg_hi": 30, "vol_lo": 1.3})
+    
 
     def _avg(self, field, min_n=10):
         tn = sum(a["n"] for a in self.agg.values())
@@ -254,8 +295,11 @@ class Shadow:
         if not shown:
             out.append("   (накапливается)")
         t = self.tuning
+        w = t.get("signal_windows", {})
         out.append(f"   тюнинг: порог {t['thr_nudge']:+.2f} · охота {t['hunt']*100:+.2f}% · "
                    f"SL ×{t['sl_mult']:.2f}")
+        out.append(f"   окна: RSI ≤{w.get('rsi_hi', 90)} · chg ≤{w.get('chg_hi', 30)}% · "
+                   f"vol ≥{w.get('vol_lo', 1.3)}×")
         return out
 
     def stats_text(self):
