@@ -177,7 +177,7 @@ async def live_score(sym, t, regime, news_items=None):
     candles = await market_data.get_kline(sym, "15", 120)
     if len(candles) < 60:
         return None, candles
-    raw, _, _ = score_symbol(candles, t, regime)
+    raw, _, _, _ = score_symbol(candles, t, regime)
     s10 = normalize(raw, regime)
     if news_items is not None:
         base = sym[:-4]
