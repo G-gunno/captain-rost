@@ -162,6 +162,34 @@ def score_symbol(candles, t, regime):
     return score, reasons, keys
 
 
+def normalize(raw, regime):
+    """Сырой скор → 10-балльная шкала (как в scan)."""
+    rm = raw_max_score(regime)
+    if rm <= 0:
+        return 0.0
+    return round(max(0.0, min(SCORE_MAX, raw / rm * SCORE_MAX)), 2)
+
+
+async def live_score(sym, t, regime, news_items=None):
+    """Оценка ТОЙ ЖЕ линейкой, что и scan: свечи 120, нормализация, хайп/новости."""
+    candles = await market_data.get_kline(sym, "15", 120)
+    if len(candles) < 60:
+        return None, candles
+    raw, _, _ = score_symbol(candles, t, regime)
+    s10 = normalize(raw, regime)
+    if news_items is not None:
+        base = sym[:-4]
+        name = await get_coin_name(base)
+        neg, pos, mentions, _ = check_sentiment(news_items, [base, name])
+        rm = raw_max_score(regime)
+        if rm > 0:
+            if pos > neg:
+                s10 = min(SCORE_MAX, s10 + learner.weight("news_pos") / rm * SCORE_MAX)
+            elif mentions >= 2:
+                s10 = min(SCORE_MAX, s10 + learner.weight("hype") / rm * SCORE_MAX)
+    return round(s10, 2), candles
+
+
 async def scan(regime, tickers, limit=5):
     tradable = [s for s, t in tickers.items()
                 if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
