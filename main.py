@@ -494,7 +494,10 @@ async def cmd_autotune(update, context):
         shadow.set_auto(True)
     elif arg in ("off", "выкл"):
         shadow.set_auto(False)
-    await reply(update, shadow.stats_text())
+    else:
+        shadow.set_auto(not shadow.tuning["auto"])
+    await reply(update, shadow.stats_text() +
+                "\n💡 переключение: /autotune · или /autotune off · /autotune on")
 
 
 async def cmd_status(update, context):
