@@ -6,6 +6,7 @@ from loguru import logger
 from bot.exchange.market_data import market_data
 from bot.strategy.indicators import ema, rsi, atr
 from bot.strategy.learner import learner
+from bot.strategy.shadow import shadow
 from bot.news.cmc import (get_coin_name, get_sectors_for_pool,
                           get_ranks_for_pool, tier_of, TIER_EMOJI)
 from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sentiment
@@ -51,13 +52,9 @@ def raw_max_score(regime):
 
 
 def threshold(regime):
-    """Порог на фиксированной 10-балльной шкале.
-
-    bull 5.0 / neutral 6.5 / bear 8.0 + строгость, clamp [5.0 … 9.5].
-    При макс. строгости 9.5 у идеальной монеты (10) остаётся зазор 0.5.
-    """
+    """Порог на фиксированной 10-балльной шкале + автотюн shadow."""
     base = {"bull": 5.0, "neutral": 6.5, "bear": 8.0}.get(regime, 6.5)
-    thr = base + learner.threshold_adj
+    thr = base + learner.threshold_adj + shadow.threshold_nudge()
     return round(max(min(thr, SCORE_MAX - 0.5), SCORE_MAX * 0.5), 2)
 
 
@@ -251,8 +248,7 @@ async def scan(regime, tickers, limit=5):
             score += learner.weight("indep")
             reasons.append(f"независима от BTC (corr {corr:.2f})")
             keys.append("indep")
-
-        kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
+            kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
         base = sym[:-4]
         sector = sectors_map.get(base, "Other")
         tier = tier_of(ranks_map.get(base))
@@ -266,7 +262,6 @@ async def scan(regime, tickers, limit=5):
             score += tb
             reasons.append(f"тир {TIER_EMOJI[tier]}: {tb:+.2f}")
 
-        # Нормализация к 10-балльной шкале
         rm = raw_max
         score10 = (score / rm * SCORE_MAX) if rm > 0 else 0.0
         score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)
@@ -280,6 +275,13 @@ async def scan(regime, tickers, limit=5):
     scored.sort(key=lambda c: c["score"], reverse=True)
 
     thr = threshold(regime)
+    try:
+        shadow.observe(scored, regime, thr)
+        shadow.tick(tickers)
+        shadow.autotune()
+    except Exception as e:
+        logger.error(f"shadow error: {e}")
+
     parts_html, parts_plain = [], []
     for c in scored[:5]:
         k_tag = "🛰" if c.get("kind") == "satellite" else "🏛"
@@ -292,7 +294,6 @@ async def scan(regime, tickers, limit=5):
     SCAN_SUMMARY["thr"] = thr
     SCAN_SUMMARY["ts"] = time.time()
     logger.info(f"Scan top: {' | '.join(parts_plain) or 'сигналов нет'}")
-
     new_set = set(s for s, _ in by_listings)
     candidates = []
     for c in scored:
@@ -313,14 +314,17 @@ async def scan(regime, tickers, limit=5):
             FILTERED_BY_NEWS[:] = FILTERED_BY_NEWS[-10:]
             continue
         if pos > neg:
-            c["score"] += learner.weight("news_pos") / rm * SCORE_MAX if rm > 0 else 0
+            if raw_max > 0:
+                c["score"] = round(min(SCORE_MAX, c["score"] +
+                             learner.weight("news_pos") / raw_max * SCORE_MAX), 2)
             c["reason_keys"].append("news_pos")
             c["reasons"].append(f"позитивный новостной фон ({pos})")
         elif mentions >= 2:
-            c["score"] += learner.weight("hype") / rm * SCORE_MAX if rm > 0 else 0
+            if raw_max > 0:
+                c["score"] = round(min(SCORE_MAX, c["score"] +
+                             learner.weight("hype") / raw_max * SCORE_MAX), 2)
             c["reason_keys"].append("hype")
             c["reasons"].append(f"медиа-хайп ({mentions} упом.)")
-        c["score"] = round(min(SCORE_MAX, c["score"]), 2)
         candidates.append(c)
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
