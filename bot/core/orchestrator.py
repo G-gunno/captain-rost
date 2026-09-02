@@ -4,7 +4,7 @@ from loguru import logger
 
 from bot.exchange.market_data import market_data
 from bot.exchange.paper_exchange import paper
-from bot.strategy.scanner import get_regime, scan, score_symbol, threshold
+from bot.strategy.scanner import get_regime, scan, score_symbol, threshold, live_score
 from bot.strategy.sizing import buy_size, portfolio_limits
 from bot.strategy.indicators import atr, ema
 from bot.core.state import bot_state
@@ -127,11 +127,10 @@ async def startup_reconciliation():
             paper.cancel_order(order["id"])
             actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер снят (нет данных)")
             continue
-        candles = await market_data.get_kline(sym, "15", 120)
-        if len(candles) < 60:
+        score, candles = await live_score(sym, t, regime)
+        if score is None:
             continue
         a = atr(candles)
-        score, _, _ = score_symbol(candles, t, regime)
         if score < thr - 2:
             paper.cancel_order(order["id"])
             actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер снят · ⭐ {score:.1f} ниже {thr - 2:g}")
@@ -237,8 +236,8 @@ async def run_cycle():
         t = tickers.get(sym)
         if not t:
             continue
-        candles = await market_data.get_kline(sym, "15", 60)
-        if len(candles) < 30:
+        score_pos, candles = await live_score(sym, t, regime, news_items)
+        if score_pos is None:
             continue
         closes = [c["close"] for c in candles]
         a = atr(candles)
@@ -248,7 +247,6 @@ async def run_cycle():
         pos["max_price"] = max(pos.get("max_price", 0.0), last)
         pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
         e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
-        score_pos, _, _ = score_symbol(candles, t, regime)
         thr = threshold(regime)
         trend_broken = last < e50 and e21 < e50
 
@@ -368,11 +366,12 @@ async def run_cycle():
             await notify(f"⚠️ <b>Ордер снят</b> · {o_pair} · негатив {neg}")
             continue
 
-        candles = await market_data.get_kline(order["symbol"], "15", 60)
-        a = atr(candles) if candles else 0
+        score_now, candles = await live_score(order["symbol"], t, regime, news_items)
+        if score_now is None:
+            continue
+        a = atr(candles)
         if a <= 0:
             continue
-        score_now, _, _ = score_symbol(candles, t, regime)
         if score_now < thr - 2:
             paper.cancel_order(order["id"])
             await notify(
