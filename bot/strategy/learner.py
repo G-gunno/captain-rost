@@ -76,8 +76,7 @@ class Learner:
 
     def record(self, keys, win, pnl_pct=0.0, sector=None, tier=None,
                exit_type=None, runner_bonus=0.0, kind=None, soft=False):
-        """Одна запись на позицию. soft=True → половинный штраф при убытке
-        (смена режима рынка — сигнал не виноват)."""
+        """Одна запись на позицию. soft=True → половинный штраф при убытке."""
         self.results.append(1 if win else 0)
         self.results = self.results[-200:]
         if sector:
@@ -108,9 +107,23 @@ class Learner:
             delta += 0.05
         if soft and not win:
             delta *= 0.5
+
         for k in keys:
             if k in self.weights:
                 self.weights[k] = round(min(1.7, max(0.3, self.weights[k] + delta)), 3)
+
+        # ЭКВАЛАЙЗЕР: сумма весов постоянна (= числу сигналов), поэтому веса —
+        # это «относительная важность». Наказанный сигнал проседает, остальные
+        # пропорционально приподнимаются; «все в пол» самовосстанавливается.
+        target = float(len(self.weights))          # 9.0
+        cur = sum(self.weights.values())
+        if cur > 0:
+            k = target / cur
+            self.weights = {
+                w: round(min(1.7, max(0.3, v * k)), 3)
+                for w, v in self.weights.items()
+            }
+
         self.save()
         logger.info(f"learner: win={win} pnl={pnl_pct:+.2f}% delta={delta:+.3f} "
                     f"exit={exit_type} runner={runner_bonus:.1f}% soft={soft} "
