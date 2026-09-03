@@ -282,10 +282,25 @@ async def scan(regime, tickers, limit=5):
         if sb:
             score += sb
             reasons.append(f"сектор {sector}: {sb:+.2f}")
-        tb = learner.tier_bias(tier)
+ tb = learner.tier_bias(tier)
         if tb:
             score += tb
             reasons.append(f"тир {TIER_EMOJI[tier]}: {tb:+.2f}")
+
+        name = await get_coin_name(base)
+        neg, pos, mentions, _ = check_sentiment(news_items, [base, name])
+        if neg > 0 and neg > pos:
+            FILTERED_BY_NEWS.append({"symbol": sym, "neg_count": neg, "time": int(time.time())})
+            FILTERED_BY_NEWS[:] = FILTERED_BY_NEWS[-10:]
+            continue
+        if pos > neg:
+            score += learner.weight("news_pos")
+            reasons.append(f"позитивный новостной фон ({pos})")
+            keys.append("news_pos")
+        elif mentions >= 2:
+            score += learner.weight("hype")
+            reasons.append(f"медиа-хайп ({mentions} упом.)")
+            keys.append("hype")
 
         rm = raw_max
         score10 = (score / rm * SCORE_MAX) if rm > 0 else 0.0
@@ -326,32 +341,7 @@ async def scan(regime, tickers, limit=5):
     for c in scored:
         if c["score"] < thr:
             continue
-        c["is_new"] = c["symbol"] in new_set
-
-        base = c["symbol"][:-4]
-        name = await get_coin_name(base)
-        neg, pos, mentions, heads = check_sentiment(news_items, [base, name])
-        if neg > 0 and neg > pos:
-            logger.info(f"{c['symbol']}: пропущен из-за негативного новостного фона ({neg})")
-            FILTERED_BY_NEWS.append({
-                "symbol": c["symbol"],
-                "neg_count": neg,
-                "time": int(time.time()),
-            })
-            FILTERED_BY_NEWS[:] = FILTERED_BY_NEWS[-10:]
-            continue
-        if pos > neg:
-            if raw_max > 0:
-                c["score"] = round(min(SCORE_MAX, c["score"] +
-                             learner.weight("news_pos") / raw_max * SCORE_MAX), 2)
-            c["reason_keys"].append("news_pos")
-            c["reasons"].append(f"позитивный новостной фон ({pos})")
-        elif mentions >= 2:
-            if raw_max > 0:
-                c["score"] = round(min(SCORE_MAX, c["score"] +
-                             learner.weight("hype") / raw_max * SCORE_MAX), 2)
-            c["reason_keys"].append("hype")
-            c["reasons"].append(f"медиа-хайп ({mentions} упом.)")
+c["is_new"] = c["symbol"] in new_set
         candidates.append(c)
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
