@@ -37,7 +37,7 @@ def is_tradable(symbol):
 
 
 def raw_max_score(regime):
-    """Теоретический максимум «сырого» скора при ТЕКУЩИХ весах."""
+    """Теоретический максимум «сырого» скора при ТЕКУЩИХ весах (без режимного бонуса)."""
     m = sum(learner.weight(k) for k in
             ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
     m += learner.weight("indep")
@@ -48,8 +48,8 @@ def raw_max_score(regime):
 
 
 def threshold(regime):
-    """Порог на фиксированной 10-балльной шкале + автотюн shadow."""
-    base = {"bull": 5.0, "neutral": 6.0, "bear": 7.0}.get(regime, 6.5)
+    """Порог на независимой 10-балльной шкале; строгость рынка — только здесь."""
+    base = {"bull": 5.0, "neutral": 6.0, "bear": 7.0}.get(regime, 6.0)
     thr = base + learner.threshold_adj + shadow.threshold_nudge()
     return round(max(min(thr, SCORE_MAX - 0.5), SCORE_MAX * 0.5), 2)
 
@@ -139,8 +139,6 @@ async def fetch_new_listings():
             continue
         out.append((sym, (now_ms - launch) / 3600000))
     return out
-
-
 def score_symbol(candles, t, regime):
     closes = [c["close"] for c in candles]
     last = closes[-1]
@@ -151,15 +149,16 @@ def score_symbol(candles, t, regime):
     base_vol = sum(vols[-21:-1]) / 20 if len(vols) > 21 else (sum(vols) / max(1, len(vols)))
     vol_ratio = vols[-1] / base_vol if base_vol else 1.0
 
+    w = shadow.signal_windows()
     score, reasons, keys = 0.0, [], []
     if last > e50: score += learner.weight("ema50"); reasons.append("цена выше EMA50"); keys.append("ema50")
     if e21 > e50: score += learner.weight("ema21"); reasons.append("EMA21>EMA50"); keys.append("ema21")
     if e12 > e26: score += learner.weight("impulse"); reasons.append("импульс роста"); keys.append("impulse")
-    w = shadow.signal_windows()
     if 40 <= r <= w["rsi_hi"]: score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
     if vol_ratio > w["vol_lo"]: score += learner.weight("volume"); reasons.append(f"объём x{vol_ratio:.1f}"); keys.append("volume")
     if 0 < t["change_pct"] < w["chg_hi"]: score += learner.weight("chg24h"); reasons.append(f"24ч +{t['change_pct']:.1f}%"); keys.append("chg24h")
     if t["quote_volume"] < 500_000: score -= 1
+
     signal_values = {"rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio}
     return score, reasons, keys, signal_values
 
@@ -173,25 +172,40 @@ def normalize(raw, regime):
 
 
 async def live_score(sym, t, regime, news_items=None):
-    """Оценка ТОЙ ЖЕ линейкой, что и scan: свечи 120, нормализация, хайп/новости."""
+    """Оценка ТОЙ ЖЕ линейкой, что и scan: свечи 120, indep, сектор/тир,
+    новости/хайп, нормализация."""
     candles = await market_data.get_kline(sym, "15", 120)
     if len(candles) < 60:
         return None, candles
     raw, _, _, _ = score_symbol(candles, t, regime)
-    s10 = normalize(raw, regime)
+
+    btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
+    btc_ret = _returns([c["close"] for c in btc_candles])
+    corr = _corr(_returns([c["close"] for c in candles]), btc_ret)
+    if corr > 0.85 and regime == "neutral":
+        raw -= 1
+    elif corr < 0.45:
+        raw += learner.weight("indep")
+
+    base = sym[:-4]
+    sectors_map = await get_sectors_for_pool([base])
+    ranks_map = await get_ranks_for_pool([base])
+    sb = learner.sector_bias(sectors_map.get(base, "Other"))
+    if sb:
+        raw += sb
+    tb = learner.tier_bias(tier_of(ranks_map.get(base)))
+    if tb:
+        raw += tb
+
     if news_items is not None:
-        base = sym[:-4]
         name = await get_coin_name(base)
         neg, pos, mentions, _ = check_sentiment(news_items, [base, name])
-        rm = raw_max_score(regime)
-        if rm > 0:
-            if pos > neg:
-                s10 = min(SCORE_MAX, s10 + learner.weight("news_pos") / rm * SCORE_MAX)
-            elif mentions >= 2:
-                s10 = min(SCORE_MAX, s10 + learner.weight("hype") / rm * SCORE_MAX)
-    return round(s10, 2), candles
+        if pos > neg:
+            raw += learner.weight("news_pos")
+        elif mentions >= 2:
+            raw += learner.weight("hype")
 
-
+    return normalize(raw, regime), candles
 async def scan(regime, tickers, limit=5):
     tradable = [s for s, t in tickers.items()
                 if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
@@ -273,7 +287,7 @@ async def scan(regime, tickers, limit=5):
             reasons.append(f"независима от BTC (corr {corr:.2f})")
             keys.append("indep")
 
-        kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"       # ← уровень цикла
+        kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
         base = sym[:-4]
         sector = sectors_map.get(base, "Other")
         tier = tier_of(ranks_map.get(base))
@@ -290,6 +304,7 @@ async def scan(regime, tickers, limit=5):
         name = await get_coin_name(base)
         neg, pos, mentions, _ = check_sentiment(news_items, [base, name])
         if neg > 0 and neg > pos:
+            logger.info(f"{sym}: пропущен из-за негативного новостного фона ({neg})")
             FILTERED_BY_NEWS.append({"symbol": sym, "neg_count": neg, "time": int(time.time())})
             FILTERED_BY_NEWS[:] = FILTERED_BY_NEWS[-10:]
             continue
@@ -336,12 +351,13 @@ async def scan(regime, tickers, limit=5):
     SCAN_SUMMARY["thr"] = thr
     SCAN_SUMMARY["ts"] = time.time()
     logger.info(f"Scan top: {' | '.join(parts_plain) or 'сигналов нет'}")
+
     new_set = set(s for s, _ in by_listings)
     candidates = []
     for c in scored:
         if c["score"] < thr:
             continue
-c["is_new"] = c["symbol"] in new_set
+        c["is_new"] = c["symbol"] in new_set
         candidates.append(c)
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
