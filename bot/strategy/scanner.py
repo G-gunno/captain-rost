@@ -282,7 +282,7 @@ async def scan(regime, tickers, limit=5):
         if sb:
             score += sb
             reasons.append(f"сектор {sector}: {sb:+.2f}")
- tb = learner.tier_bias(tier)
+        tb = learner.tier_bias(tier)
         if tb:
             score += tb
             reasons.append(f"тир {TIER_EMOJI[tier]}: {tb:+.2f}")
