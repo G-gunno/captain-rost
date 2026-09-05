@@ -5,9 +5,9 @@ from bot.exchange.paper_exchange import paper
 from bot.strategy.learner import learner
 
 PERIODS = {
-    "daily": ("Дневной отчёт", 1),
-    "weekly": ("Недельный отчёт", 7),
-    "monthly": ("Месячный отчёт", 30),
+    "daily": ("#Дневной_отчёт", 1),
+    "weekly": ("#Недельный_отчёт", 7),
+    "monthly": ("#Месячный_отчёт", 30),
 }
 
 
@@ -37,12 +37,33 @@ async def build_report(period, tz):
     losses = [r for r in trades if r["pnl"] <= 0]
     total_pnl = sum(r["pnl"] for r in trades)
 
-    lines = [f"📅 <b>{title}</b> · 🕐", ""]
+    lines = [f"📅 <b>{title}</b> 🕘", ""]
     free_pct = paper.usdt / eq * 100 if eq else 0
     lines.append(f"💰 Свободно: <b>{usd(paper.usdt)}</b> ({free_pct:.0f}%)")
     lines.append(f"🏦 Накопления: <b>{usd(paper.funding)}</b>")
     lines.append(f"📈 Капитал: <b>{usd(eq)}</b>")
     lines.append("")
+
+    # --- Анализ рыночного фона за период ---
+    history = [h for h in getattr(paper, "market_history", []) if h.get("ts", 0) >= start_ts]
+    if history:
+        total_h = len(history)
+        r_counts, m_counts = {}, {}
+        for h in history:
+            r, m = h.get("regime", "neutral"), h.get("mode", "NORMAL")
+            r_counts[r] = r_counts.get(r, 0) + 1
+            m_counts[m] = m_counts.get(m, 0) + 1
+        
+        r_map = {"bull": "🟢 бычий", "neutral": "🟡 нейтральный", "bear": "🔴 медвежий"}
+        m_map = {"NORMAL": "🟢 NORMAL", "CAUTIOUS": "🟡 CAUTIOUS", "STRICT": "🔴 STRICT", "AGGRESSIVE": "🚀 AGGRESSIVE"}
+        
+        r_str = " · ".join(f"{r_map.get(k, k)} {v/total_h*100:.0f}%" for k, v in sorted(r_counts.items(), key=lambda x: x[1], reverse=True))
+        m_str = " · ".join(f"{m_map.get(k, k)} {v/total_h*100:.0f}%" for k, v in sorted(m_counts.items(), key=lambda x: x[1], reverse=True))
+        
+        lines.append("🌍 <b>Рыночный фон за период</b>")
+        lines.append(f"   🧭 Фазы: {r_str}")
+        lines.append(f"   🎚 Риск: {m_str}")
+        lines.append("")
 
     lines.append(f"📊 <b>Сделки за период</b>: {len(trades)} (✅ {len(wins)} / ❌ {len(losses)})")
     lines.append(f"💵 PnL: {pnl_emoji(total_pnl)} <b>{usd(total_pnl)}</b>")
