@@ -55,26 +55,27 @@ def corr_txt(d):
     return f" · ₿ {v:.2f}" if v is not None else ""
 
 
-def entry_offset(score, thr, regime, atr_pct):
-    """Смещение входа: снайперский откат вместо покупок по рынку."""
-    surplus = score - thr
-    hunt = shadow.hunt()  # обычно от -0.4% до -1.0% (выучено из рынка)
+def entry_offset(score, thr, regime, atr_pct, is_momentum=False):
+    """Смещение входа: гибридная логика (ракета vs снайпер)."""
+    hunt = shadow.hunt()  # выученный откат (обычно отрицательный, от -0.4% до -1.0%)
     
+    if is_momentum:
+        # Ракета: залетаем агрессивно по рынку или чуть выше
+        return max(shadow.capture(), atr_pct / 100 * 0.1)
+    
+    surplus = score - thr
     if regime == "bear":
-        return hunt * 1.5  # Медвежка: берем только глубокие падающие ножи
+        return hunt * 1.5  # Медвежка: берем только глубокие откаты
     elif regime == "neutral":
-        return hunt * 1.2  # Боковик: берем чуть ниже выученного отката
+        return hunt * 1.2  # Боковик: ждем откат чуть глубже обычного
         
-    # Бычий рынок
+    # Бычий рынок (Снайпер)
     if surplus >= 3.0:
-        # Супер-сигнал: берем на микро-откате (никаких покупок по рынку!)
         return max(shadow.near(), -atr_pct / 100 * 0.3)
     if surplus >= 1.5:
-        # Нормальный сигнал: ждем стандартный выученный откат (не меньше пол-ATR)
         return min(hunt, -atr_pct / 100 * 0.5)
         
-    # Слабый сигнал (еле прошел порог): берем только на глубоком откате
-    return hunt * 1.5
+    return hunt * 1.5  # Слабый сигнал — берем только на проливе
 
 
 def set_notifier(cb):
@@ -150,7 +151,8 @@ async def startup_reconciliation():
             actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер снят · ⭐ {score:.1f} ниже {thr - 2:g}")
         elif a > 0:
             atr_pct = a / t["last"] * 100
-            off = entry_offset(score, thr, regime, atr_pct)
+            is_mom = order.get("is_momentum", False)
+            off = entry_offset(score, thr, regime, atr_pct, is_mom)
             old_price = order["price"]
             order["price"] = t["last"] * (1 + off)
             
