@@ -212,6 +212,7 @@ async def run_cycle():
             pos["sector"] = f.get("sector", "Other")
             pos["tier"] = f.get("tier")
             pos["regime_entry"] = f.get("regime")
+            pos["corr"] = f.get("corr", 0.5)
             paper.save()
         kind_tag = kind_tag_of(f)
         sector = (pos.get("sector") if pos else None) or f.get("sector") or "Other"
@@ -310,11 +311,25 @@ async def run_cycle():
             )
             continue
 
-        # 4б. ИНВАЛИДАЦИЯ + серая зона + regime-инвалидация (10-шкала: зазор 2)
-        regime_flipped = pos.get("regime_entry") == "bull" and regime != "bull"
+    # 4б. ИНВАЛИДАЦИЯ + серая зона + regime-инвалидация
         signal_weak = trend_broken or score_pos <= thr - 2
 
-        if signal_weak or (regime_flipped and pnl_pct <= -0.5):
+        # Проверяем зависимость от BTC
+        pos_corr = pos.get("corr", 0.5)
+        btc_dependent = pos_corr >= 0.45  # независимым монетам по барабану на BTC
+
+        # Умный переворот режима:
+        # Режем только если:
+        # 1) Рынок стал прямо медвежьим (bear) И монета зависит от BTC
+        # 2) Либо рынок стал neutral, но и собственный скор монеты просел ниже порога (score_pos < thr)
+        regime_danger = False
+        if pos.get("regime_entry") == "bull" and btc_dependent:
+            if regime == "bear":
+                regime_danger = True
+            elif regime == "neutral" and score_pos < thr:
+                regime_danger = True
+
+        if signal_weak or (regime_danger and pnl_pct <= -0.5):
             if pnl_pct >= MIN_EARLY_EXIT_PCT:
                 ex = paper._sell(sym, last, "СИГНАЛ ИСЯК 📉", regime_now=regime)
                 await notify(
