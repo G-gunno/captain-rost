@@ -107,7 +107,7 @@ async def start_ws_ticker_stream():
                 await ws.send(json.dumps(sub_msg))
                 logger.info("✅ WebSocket подключен к потоку спот-тикеров Bybit")
 
-                async for message:
+                async for message in ws:  # <--- ИСПРАВЛЕНА ОШИБКА СИНТАКСИСА ЗДЕСЬ
                     data = json.loads(message)
                     if "topic" in data and data["topic"].startswith("tickers."):
                         d = data.get("data", {})
