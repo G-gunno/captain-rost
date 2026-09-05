@@ -118,8 +118,9 @@ async def startup_reconciliation():
             fixed.append(f"TP {fmt_price(pos['tp'])}")
 
         if pos.get("tp1_done"):
-            if pos.get("sl", 0) < entry:
-                pos["sl"] = round(entry, 10)
+            breakeven_price = entry * (1 + (FEE_PCT * 2) / 100)
+            if pos.get("sl", 0) < breakeven_price:
+                pos["sl"] = round(breakeven_price, 10)
                 fixed.append(f"SL {fmt_price(pos['sl'])} (безубыток)")
         else:
             sl = pos.get("sl", 0)
@@ -317,14 +318,18 @@ async def run_cycle():
             half = pos["qty"] / 2
             ex = paper.sell_partial(sym, half, pos["tp"], "TP1 🎯")
             pos["tp1_done"] = True
-            pos["sl"] = max(pos["sl"], pos["avg"])
+            
+            # Честный безубыток с учетом комиссий за вход и выход (0.2%)
+            breakeven_price = pos["avg"] * (1 + (FEE_PCT * 2) / 100)
+            pos["sl"] = max(pos["sl"], breakeven_price)
+            
             pos["tp"] = round(pos["tp"] + 1.5 * a, 10)
             paper.save()
             await notify(
                 f"🎯 <b>TP1</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · 50%\n"
                 f"📊 {fmt_price(ex['price'])} · 🔥 {fmt_pct(ex['pnl_pct'])} · 💵 прибыль {usd(ex['pnl'])}"
                 f"{funding_line(ex.get('transferred', 0))}\n"
-                f"остаток бежит · 🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])} (безубыток)"
+                f"остаток бежит · 🎯 {fmt_price(pos['tp'])} · 🔒 <b>{fmt_price(pos['sl'])} (безубыток)</b>"
             )
             continue
 
@@ -376,13 +381,25 @@ async def run_cycle():
                     f"🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])}"
                 )
 
-        # 4г. Трейлинг SL — только вверх
+        # 4г. Трейлинг SL — динамический поджим
         if new_sl is None:
             new_sl = pos["sl"]
-        if last >= pos["avg"] + 1.0 * a:
-            new_sl = max(new_sl, pos["avg"])
-        if last >= pos["avg"] + 2.0 * a:
-            new_sl = max(new_sl, last - 0.8 * a)
+            
+        max_p = pos.get("max_price", last)
+        breakeven_price = pos["avg"] * (1 + (FEE_PCT * 2) / 100)
+
+        # Шаг 1: Просто подросли — страхуем честным безубытком
+        if max_p >= pos["avg"] + 1.0 * a:
+            new_sl = max(new_sl, breakeven_price)
+            
+        # Шаг 2: Пошел уверенный тренд — тянем с зазором в 1.0 ATR от пика
+        if max_p >= pos["avg"] + 1.5 * a:
+            new_sl = max(new_sl, max_p - 1.0 * a)
+            
+        # Шаг 3: Монета улетела высоко — душим цену с зазором 0.5 ATR, чтобы забрать максимум при развороте
+        if max_p >= pos["avg"] + 2.5 * a:
+            new_sl = max(new_sl, max_p - 0.5 * a)
+
         if new_sl and new_sl > pos["sl"]:
             new_sl_r = round(new_sl, 10)
             if new_sl_r > pos["sl"]:
