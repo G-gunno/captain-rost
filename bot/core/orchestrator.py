@@ -448,32 +448,42 @@ async def run_cycle():
         paper.cancel_order(order["id"])
         
         atr_pct = a / t["last"] * 100
-        off = entry_offset(score_now, thr, regime, atr_pct)
+        is_mom = order.get("is_momentum", False)
+        off = entry_offset(score_now, thr, regime, atr_pct, is_mom)
+        
         ideal_price = t["last"] * (1 + off)
         old_price = order["price"]
         
-        # Anti-FOMO: если цена улетела больше чем на 1.5 ATR от нашего старого ордера — отпускаем
-        if t["last"] > old_price + 1.5 * a:
-            await notify(f"🚀 <b>Ордер снят (Улетела)</b> · {o_pair} · ждем других")
-            continue
-            
-        # Не гоняемся за ценой: если новая расчетная цена выше старой, оставляем старую (не идем вверх)
-        if ideal_price > old_price:
-            order["price"] = old_price
-            price_icon = "⏸"
-        else:
+        if is_mom:
+            # Для ракеты разрешаем погоню (до 3 раз), стоп короткий
             order["price"] = ideal_price
-            price_icon = "⬇️"
-            
+            price_icon = "⬆️" if ideal_price > old_price else "⬇️"
+            sl_dist = 0.6 * a  # Короткий стоп (-0.6 ATR)
+        else:
+            # Для снайпера: если улетела больше чем на 1.5 ATR - снимаем
+            if t["last"] > old_price + 1.5 * a:
+                await notify(f"🚀 <b>Ордер снят (Улетела)</b> · {o_pair} · ждем других")
+                continue
+            # Лимитку вверх не двигаем, только вниз или на месте
+            if ideal_price > old_price:
+                order["price"] = old_price
+                price_icon = "⏸"
+            else:
+                order["price"] = ideal_price
+                price_icon = "⬇️"
+            sl_dist = 1.2 * a  # Стандартный стоп
+
         order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
-        order["sl"] = min(order["price"] - 1.2 * a, order["price"] * (1 - MIN_SL_PCT / 100))
+        order["sl"] = min(order["price"] - sl_dist, order["price"] * (1 - MIN_SL_PCT / 100))
         order["created"] = now
         order["requotes"] = order.get("requotes", 0) + 1
         paper.orders.append(order)
         paper.save()
+        
+        mode_txt = "Ракета" if is_mom else "Снайпер"
         await notify(
-            f"🔁 <b>Ордер ждёт отката {price_icon}</b> · {o_pair}\n"
-            f"📥 {fmt_price(order['price'])} · попытка {order['requotes'] + 1}"
+            f"🔁 <b>Ордер {price_icon}</b> · {o_pair} ({mode_txt})\n"
+            f"📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · попытка {order['requotes'] + 1}"
         )
 
     # 7. Сканирование и покупки / ротация
@@ -583,20 +593,25 @@ async def run_cycle():
                 logger.info(f"{sym}: пропущен — лимит сателлитов исчерпан ({sat_limit:.0f}%)")
                 continue
 
-        off = entry_offset(cand["score"], thr, regime, cand["atr_pct"])
+        is_mom = cand.get("is_momentum", False)
+        off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], is_mom)
         entry = cand["last"] * (1 + off)
         a = cand["atr"]
         if a <= 0:
             continue
 
         if kind == "satellite":
-            sl_dist_pct = max(min(1.5 * a / entry * 100 * shadow.sl_mult(), SAT_MAX_SL_PCT), 2.0)
+            # Для ракеты стоп режем в 2 раза
+            base_sl_mult = 0.75 if is_mom else 1.5
+            sl_dist_pct = max(min(base_sl_mult * a / entry * 100 * shadow.sl_mult(), SAT_MAX_SL_PCT), 2.0)
             tp_dist_pct = max(min(2.5 * a / entry * 100 * shadow.tp_mult(), 12.0), sl_dist_pct * MIN_RR_SAT)
             sl = entry * (1 - sl_dist_pct / 100)
             tp = entry * (1 + tp_dist_pct / 100)
             min_rr = MIN_RR_SAT
         else:
-            sl = entry - 1.2 * a * shadow.sl_mult()
+            # Для Core: ракета = короткий стоп (0.6 ATR), снайпер = стандартный (1.2 ATR)
+            sl_dist_atr = 0.6 * a if is_mom else 1.2 * a
+            sl = entry - sl_dist_atr * shadow.sl_mult()
             tp = entry + 2.0 * a * shadow.tp_mult()
             tp = max(tp, entry * (1 + MIN_TP_PCT / 100))
             sl = min(sl, entry * (1 - MIN_SL_PCT / 100))
@@ -650,13 +665,15 @@ async def run_cycle():
         order["tier"] = cand.get("tier")
         order["corr"] = cand.get("corr")
         order["regime"] = regime
+        order["is_momentum"] = is_mom
         paper.save()
         tp_pct = (tp - entry) / entry * 100
         sl_pct = (sl - entry) / entry * 100
         kind_tag = "🛰" if kind == "satellite" else "🏛"
         new_tag = "· 🆕 " if cand.get("is_new") else ""
+        mode_tag = "🚀 Ракета" if is_mom else "🎯 Снайпер"
         await notify(
-            f"📋 <b>Ордер</b> {new_tag}· {pair_html(sym[:-4], sector, kind_tag, cand.get('tier'))}\n"
+            f"📋 <b>Ордер ({mode_tag})</b> {new_tag}· {pair_html(sym[:-4], sector, kind_tag, cand.get('tier'))}\n"
             f"💵 {usd(size)} · 📥 {fmt_price(entry)} ({off * 100:+.2f}%){corr_txt(cand)}\n"
             f"🎯 {fmt_price(tp)} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
             f"⭐ {cand['score']:.1f} · 🧠 {'; '.join(cand['reasons'][:3])}"
