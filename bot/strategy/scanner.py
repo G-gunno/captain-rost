@@ -154,9 +154,17 @@ def score_symbol(candles, t, regime):
     if last > e50: score += learner.weight("ema50"); reasons.append("цена выше EMA50"); keys.append("ema50")
     if e21 > e50: score += learner.weight("ema21"); reasons.append("EMA21>EMA50"); keys.append("ema21")
     if e12 > e26: score += learner.weight("impulse"); reasons.append("импульс роста"); keys.append("impulse")
-    if 40 <= r <= w["rsi_hi"]: score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
+    if 40 <= r <= w["rsi_hi"]: 
+        score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
+    elif r > w["rsi_hi"]: 
+        score -= 1.5; reasons.append(f"перегрев RSI {r:.0f}") # Штраф за покупку на хаях
+
     if vol_ratio > w["vol_lo"]: score += learner.weight("volume"); reasons.append(f"объём x{vol_ratio:.1f}"); keys.append("volume")
-    if 0 < t["change_pct"] < w["chg_hi"]: score += learner.weight("chg24h"); reasons.append(f"24ч +{t['change_pct']:.1f}%"); keys.append("chg24h")
+    
+    if 0 < t["change_pct"] < w["chg_hi"]: 
+        score += learner.weight("chg24h"); reasons.append(f"24ч +{t['change_pct']:.1f}%"); keys.append("chg24h")
+    elif t["change_pct"] >= w["chg_hi"]: 
+        score -= 1.0; reasons.append(f"памп +{t['change_pct']:.1f}% (уже поздно)") # Штраф за улетевший поезд
     if t["quote_volume"] < 500_000: score -= 1
 
     signal_values = {"rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio}
