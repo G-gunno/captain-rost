@@ -291,12 +291,14 @@ async def run_cycle():
         # 4.0 НОВОСТНАЯ ПРОВЕРКА ПОЗИЦИИ
         base = sym[:-4]
         name = await get_coin_name(base)
-        neg, pos_news, _, _ = check_sentiment(news_items, [base, name])
-        if neg > 0 and neg > pos_news:
+        neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
+        
+        is_toxic = neg > 0 and neg > pos_news and neg >= (mentions * 0.2)
+        if is_toxic:
             if pnl_pct >= MIN_EARLY_EXIT_PCT:
                 ex = paper._sell(sym, last, "НОВОСТИ ⚠️", regime_now=regime)
                 await notify(
-                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · новостной выход ⚠️ {neg}\n"
+                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · новостной выход ⚠️ {neg}/{mentions}\n"
                     f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}"
                     f"{funding_line(ex.get('transferred', 0))}"
                 )
@@ -304,7 +306,7 @@ async def run_cycle():
             elif pnl_pct <= 0:
                 ex = paper._sell(sym, last, "НОВОСТИ 🛑", regime_now=regime)
                 await notify(
-                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · новостная резка 🛑 {neg}\n"
+                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · новостная резка 🛑 {neg}/{mentions}\n"
                     f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}"
                     f"{funding_line(ex.get('transferred', 0))}"
                 )
@@ -412,10 +414,12 @@ async def run_cycle():
         base = order["symbol"][:-4]
         o_pair = pair_html(base, order.get("sector") or "Other", kind_tag_of(order), order.get("tier"))
         name = await get_coin_name(base)
-        neg, pos_news, _, _ = check_sentiment(news_items, [base, name])
-        if neg > 0 and neg > pos_news:
+        neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
+        
+        is_toxic = neg > 0 and neg > pos_news and neg >= (mentions * 0.2)
+        if is_toxic:
             paper.cancel_order(order["id"])
-            await notify(f"⚠️ <b>Ордер снят</b> · {o_pair} · негатив {neg}")
+            await notify(f"⚠️ <b>Ордер снят</b> · {o_pair} · негатив {neg}/{mentions}")
             continue
 
         score_now, candles = await live_score(order["symbol"], t, regime, news_items)
