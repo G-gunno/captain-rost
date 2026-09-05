@@ -8,7 +8,7 @@ from bot.strategy.indicators import ema, rsi, atr
 from bot.strategy.learner import learner
 from bot.strategy.shadow import shadow
 from bot.news.cmc import (get_coin_name, get_sectors_for_pool,
-                          get_ranks_for_pool, tier_of, TIER_EMOJI)
+                          get_ranks_for_pool, tier_of, TIER_EMOJI, fetch_missing_names)
 from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sentiment
 
 SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
@@ -237,7 +237,7 @@ async def live_score(sym, t, regime, news_items=None):
     
     # Применяем бонус к живому скору (только для ракет)
     _, _, keys_live, sv_live = score_symbol(candles, t, regime)
-    is_mom_live = (sv_live.get("rsi", 0) > 68 and sv_live.get("volume", 0) > 2.0 and "impulse" in keys_live)
+    is_mom_live = (sv_live.get("rsi", 0) >= 65 and sv_live.get("volume", 0) >= 1.5 and "impulse" in keys_live)
     entry_mode_live = "rocket" if is_mom_live else "sniper"
     mode_score_bonus, _ = learner.entry_mode_bias(entry_mode_live)
     
@@ -298,6 +298,7 @@ async def scan(regime, tickers, limit=20):  # УВЕЛИЧИЛИ ЛИМИТ ОЧ
 
     sectors_map = await get_sectors_for_pool(pool_bases)
     ranks_map = await get_ranks_for_pool(pool_bases)
+    await fetch_missing_names(pool_bases)  # <--- МАССОВО ГРУЗИМ ИМЕНА БЕЗ ОШИБОК CMC
 
     news_items = await fetch_news_cache()
     btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
@@ -367,7 +368,7 @@ async def scan(regime, tickers, limit=20):  # УВЕЛИЧИЛИ ЛИМИТ ОЧ
         
         # Определяем "Ракету" (Моментум)
         sv = signal_values
-        is_momentum = (sv.get("rsi", 0) > 68 and sv.get("volume", 0) > 2.0 and "impulse" in keys)
+        is_momentum = (sv.get("rsi", 0) >= 65 and sv.get("volume", 0) >= 1.5 and "impulse" in keys)
         
         # Умный сайзинг и бонус скора (только для ракет)
         entry_mode = "rocket" if is_momentum else "sniper"
