@@ -96,6 +96,7 @@ async def notify(text):
 async def startup_reconciliation():
     logger.info("=== RECONCILE START ===")
     prices = await market_data.get_tickers()
+    deriv_tickers = await market_data.get_derivatives_tickers()
     if not prices:
         logger.error("Reconcile: нет цен, пропуск")
         return
@@ -144,7 +145,7 @@ async def startup_reconciliation():
             paper.cancel_order(order["id"])
             actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · снят 🪫 (нет данных)")
             continue
-        score, candles = await live_score(sym, t, regime)
+        score, candles = await live_score(sym, t, regime, deriv_t=deriv_tickers.get(sym))
         if score is None:
             continue
         a = atr(candles)
@@ -169,19 +170,20 @@ async def startup_reconciliation():
             
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
+            bid1 = t.get("bid1", t["last"]) # <-- Лучший Bid
             
-            # Проверка на "улетевшую" монету для снайпера
             if not is_mom and t["last"] > old_price + 1.5 * a:
                 paper.cancel_order(order["id"])
                 actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · снят 🚀 (улетел)")
                 continue
 
-            # Логика подтягивания цены (как в основном цикле)
             if is_mom:
                 order["price"] = ideal_price
                 price_icon = "⬆️" if ideal_price > old_price else "⬇️"
                 sl_dist = 0.6 * a
             else:
+                # Снайпер всегда Maker (не выше лучшего бида)
+                ideal_price = min(ideal_price, bid1)
                 if ideal_price > old_price:
                     order["price"] = old_price
                     price_icon = "⏸"
@@ -226,6 +228,7 @@ async def run_cycle():
 
     logger.info("=== CYCLE START ===")
     tickers = await market_data.get_tickers()
+    deriv_tickers = await market_data.get_derivatives_tickers()
     if not tickers:
         logger.error("Нет тикеров — цикл пропущен")
         return
@@ -318,7 +321,7 @@ async def run_cycle():
         t = tickers.get(sym)
         if not t:
             continue
-        score_pos, candles = await live_score(sym, t, regime, news_items)
+        score_pos, candles = await live_score(sym, t, regime, news_items, deriv_t=deriv_tickers.get(sym))
         if score_pos is None:
             continue
         closes = [c["close"] for c in candles]
@@ -552,7 +555,7 @@ async def run_cycle():
         )
 
 # 7. Сканирование и покупки / ротация
-    candidates = await scan(regime, tickers, limit=20)  # Даем сканеру отдавать топ-20
+    candidates = await scan(regime, tickers, deriv_tickers, limit=20)
 
     equity = paper.equity(tickers)
     thr = threshold(regime)
@@ -639,7 +642,16 @@ async def run_cycle():
         # --- Расчет точек входа и стопов ---
         is_mom = cand.get("is_momentum", False)
         off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], is_mom)
-        entry = cand["last"] * (1 + off)
+        
+        t_data = tickers.get(sym, {})
+        bid1 = t_data.get("bid1", cand["last"])
+        ideal_entry = cand["last"] * (1 + off)
+        
+        if is_mom:
+            entry = ideal_entry  # Ракета бьет по рынку
+        else:
+            entry = min(ideal_entry, bid1)  # Снайпер встает лимиткой в стакан
+            
         a = cand["atr"]
         if a <= 0:
             logger.info(f"{sym}: пропущен — нулевой ATR")
@@ -672,8 +684,11 @@ async def run_cycle():
             logger.info(f"{sym}: пропущен — плохой Risk/Reward (R:R = {rr:.2f})")
             continue
 
+        entry_mode = "rocket" if is_mom else "sniper"
+        km = learner.kelly_multiplier(entry_mode)  # Индивидуальный келли
+        
         size = buy_size(equity, cand["score"], cand["liquidity"], paper.usdt,
-                        sl_dist, kind=kind, realized=paper.realized,
+                        sl_dist, kind=kind, km=km,
                         sat_size_pct=sat_size, size_multiplier=cand.get("size_mult", 1.0))
         if size < 5:
             logger.info(f"{sym}: пропущен — размер позиции < 5$")
