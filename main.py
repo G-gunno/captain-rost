@@ -367,6 +367,22 @@ async def cmd_learn(update, context):
         lines.append(f"🛰 Сателлиты: {len(sat_hist)} · wr {swr:.0%} · ср. {savg:+.2f}%")
     lines.append("")
 
+    lines.append("🏹/🚀 <b>Стратегии входа</b>")
+    rock_hist = learner.entry_stats.get("rocket") or []
+    snip_hist = learner.entry_stats.get("sniper") or []
+    
+    if rock_hist:
+        r_wr = sum(1 for p in rock_hist if p > 0) / len(rock_hist)
+        r_avg = sum(rock_hist) / len(rock_hist)
+        lines.append(f"   🚀 Ракеты (пробой): {len(rock_hist)} · wr {r_wr:.0%} · ср. {r_avg:+.2f}%")
+    if snip_hist:
+        s_wr = sum(1 for p in snip_hist if p > 0) / len(snip_hist)
+        s_avg = sum(snip_hist) / len(snip_hist)
+        lines.append(f"   🏹 Снайпер (откат): {len(snip_hist)} · wr {s_wr:.0%} · ср. {s_avg:+.2f}%")
+    if not rock_hist and not snip_hist:
+         lines.append("   (накапливается)")
+    lines.append("")
+    
     lines.append("🧭 <b>Где деньги</b> · сектора и тиры")
     if learner.sector_stats:
         rows = []
