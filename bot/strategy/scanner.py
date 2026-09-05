@@ -328,13 +328,18 @@ async def scan(regime, tickers, limit=5):
         rm = raw_max
         score10 = (score / rm * SCORE_MAX) if rm > 0 else 0.0
         score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)
+        
+        # Определяем "Ракету" (Моментум)
+        sv = signal_values
+        is_momentum = (sv.get("rsi", 0) > 68 and sv.get("volume", 0) > 2.0 and "impulse" in keys)
 
         scored.append({"symbol": sym, "score": score10, "reasons": reasons,
                        "reason_keys": keys, "atr": a, "last": last_price,
                        "liquidity": tickers[sym]["quote_volume"],
                        "corr": round(corr, 2), "atr_pct": round(atr_pct, 2),
                        "kind": kind, "sector": sector, "tier": tier,
-                       "signal_values": signal_values})
+                       "signal_values": signal_values,
+                       "is_momentum": is_momentum})
 
     scored.sort(key=lambda c: c["score"], reverse=True)
 
