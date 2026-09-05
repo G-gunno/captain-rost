@@ -560,11 +560,23 @@ async def cmd_status(update, context):
                 kind = "🛰" if o.get("kind") == "satellite" else "🏛"
                 sector = o.get("sector") or sector_of(o["symbol"][:-4])
                 tier_em = TIER_EMOJI.get(o.get("tier") or "", "")
+                
+                # Добавляем иконку режима (Ракета или Снайпер)
+                mode_emoji = "🚀" if o.get("is_momentum") else "🎯"
+                
+                # Считаем дистанцию ордера от текущей рыночной цены
+                last_price = prices.get(o["symbol"], {}).get("last", 0)
+                if last_price > 0:
+                    dist_pct = (o["price"] - last_price) / last_price * 100
+                    dist_str = f" ({dist_pct:+.2f}%)"
+                else:
+                    dist_str = ""
+                
                 msg.append(
-                    f"{kind} <b>{o['symbol'][:-4]}</b>{' ' + tier_em if tier_em else ''} · "
+                    f"{kind} {mode_emoji} <b>{o['symbol'][:-4]}</b>{' ' + tier_em if tier_em else ''} · "
                     f"<i>{sector}</i> · {w:.1f}%"
                 )
-                msg.append(f"   💼 {usd(val)} · 📥 {fmt_price(o['price'])}")
+                msg.append(f"   💼 {usd(val)} · 📥 {fmt_price(o['price'])}{dist_str}")
                 tp_pct = (o["tp"] - o["price"]) / o["price"] * 100 if o["price"] else 0
                 sl_pct = (o["sl"] - o["price"]) / o["price"] * 100 if o["price"] else 0
                 msg.append(f"   🎯 {fmt_price(o['tp'])} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(o['sl'])} ({fmt_pct(sl_pct)})")
