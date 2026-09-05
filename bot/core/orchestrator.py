@@ -284,6 +284,17 @@ async def run_cycle():
         await notify(f"🧭 <b>Смена фазы рынка</b>\n{old_str} ➡️ {new_str}\n₿ {fmt_price(info.get('btc', 0))}")
     _last_regime = regime
 
+    # --- ЗАПИСЬ ИСТОРИИ ФОНА РЫНКА (ДЛЯ ОТЧЕТОВ) ---
+    paper.market_history.append({
+        "ts": int(time.time()),
+        "regime": regime,
+        "mode": mode
+    })
+    # Оставляем историю только за последние 32 дня (чтобы файл не раздувался)
+    cutoff = int(time.time()) - 32 * 86400
+    paper.market_history = [x for x in paper.market_history if x.get("ts", 0) >= cutoff]
+    paper.save()
+
     # 3. ЭКСТРЕННЫЙ РИСК-МЕНЕДЖМЕНТ
     btc_t = tickers.get("BTCUSDT", {})
     btc_c = await market_data.get_kline("BTCUSDT", "60", 3)
