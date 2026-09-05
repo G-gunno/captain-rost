@@ -73,17 +73,37 @@ def _corr(a, b):
 
 
 async def get_regime():
+    # 1. Получаем макро-тренд по BTC
     candles = await market_data.get_kline("BTCUSDT", "60", 250)
     if len(candles) < 60:
         return "neutral", {}
     closes = [c["close"] for c in candles]
     e50, e200, last = ema(closes, 50)[-1], ema(closes, 200)[-1], closes[-1]
+    
     if last > e50 > e200:
         regime = "bull"
     elif last < e50 < e200:
         regime = "bear"
     else:
         regime = "neutral"
+
+    # 2. Оцениваем "температуру альтов" (Market Breadth), если биток спит
+    if regime == "neutral":
+        tickers = await market_data.get_tickers()
+        if tickers:
+            tradable = [s for s, t in tickers.items() if is_tradable(s) and t["quote_volume"] >= 500_000]
+            if tradable:
+                # Считаем процент альтов, которые выросли более чем на 3% за 24 часа
+                green_alts = sum(1 for s in tradable if tickers[s]["change_pct"] > 3.0)
+                breadth_pct = (green_alts / len(tradable)) * 100
+                
+                # Если больше 25% ликвидных альтов уверенно растут - это альтсезон (локальный)
+                if breadth_pct >= 25.0:
+                    regime = "bull"
+                    logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые. Режим принудительно переведен в 'bull' (Альтсезон).")
+                else:
+                    logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые. Режим остается 'neutral'.")
+
     return regime, {"btc": last, "ema50": e50, "ema200": e200}
 
 
