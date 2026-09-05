@@ -1,0 +1,4019 @@
+=== СТРУКТУРА ПРОЕКТА ===
+main.py
+requirements.txt
+    [Папка] bot/
+        __init__.py
+        [Папка] news/
+            __init__.py
+            cmc.py
+            rss_news.py
+        [Папка] services/
+            __init__.py
+            info.py
+            reports.py
+        [Папка] strategy/
+            __init__.py
+            indicators.py
+            learner.py
+            scanner.py
+            shadow.py
+            sizing.py
+        [Папка] utils/
+            __init__.py
+            format.py
+        [Папка] core/
+            __init__.py
+            orchestrator.py
+            remote_state.py
+            state.py
+        [Папка] exchange/
+            __init__.py
+            bybit_client.py
+            market_data.py
+            paper_exchange.py
+
+=== КОД ФАЙЛОВ ===
+
+--- НАЧАЛО ФАЙЛА: ./main.py ---
+import os
+import asyncio
+import calendar
+import html as _html
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import aiohttp.web as web
+from loguru import logger
+from telegram import BotCommand, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import Conflict as TelegramConflict, BadRequest
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+
+from bot.exchange.market_data import market_data
+from bot.exchange.paper_exchange import paper
+from bot.core.orchestrator import run_cycle, set_notifier, CYCLE_SECONDS
+from bot.core.state import bot_state
+from bot.core.remote_state import ensure_branch
+from bot.services.reports import build_report
+from bot.services.info import info_full_text
+from bot.strategy.shadow import shadow
+from bot.strategy.scanner import SCAN_SUMMARY, FILTERED_BY_NEWS, get_regime, threshold
+from bot.strategy.learner import learner, TIERS
+from bot.news.cmc import sector_of, TIER_EMOJI, TIER_NAMES, memory_stats
+from bot.utils.format import fmt_price, fmt_pct, fmt_sym
+
+_app = None
+WEBHOOK_PATH = "/telegram-webhook"
+
+
+# ==================== Хелперы ====================
+def usd(x):
+    return f"${x:,.2f}"
+
+
+def pnl_emoji(x):
+    return "🟢" if x > 0.05 else ("🔴" if x < -0.05 else "🟡")
+
+
+def weight_emoji(v):
+    return "🔥" if v >= 1.1 else ("🟢" if v >= 0.9 else ("🟡" if v >= 0.7 else "🔻"))
+
+
+async def reply(update, text, markup=None):
+    try:
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+    except BadRequest:
+        await update.message.reply_text(text, reply_markup=markup)
+
+
+# ==================== HTTP handlers ====================
+async def health_handler(request):
+    return web.Response(text="OK")
+
+
+async def webhook_handler(request):
+    try:
+        data = await request.json()
+        update = Update.de_json(data, bot=_app.bot)
+        await _app.process_update(update)
+    except Exception as e:
+        logger.error(f"webhook process_update error: {e}")
+    return web.Response(text="OK")
+
+
+# ==================== Уведомления и циклы ====================
+async def send_chat(text):
+    chat = os.getenv("TELEGRAM_CHAT_ID")
+    if chat and _app:
+        try:
+            await _app.bot.send_message(chat_id=chat, text=text, parse_mode="HTML")
+        except BadRequest:
+            await _app.bot.send_message(chat_id=chat, text=text)
+
+
+async def cycle_loop():
+    await asyncio.sleep(15)
+    while True:
+        try:
+            await run_cycle()
+        except Exception as e:
+            logger.exception(f"Ошибка цикла: {e}")
+        await asyncio.sleep(CYCLE_SECONDS)
+
+
+async def report_loop():
+    tz = ZoneInfo(os.getenv("TIMEZONE", "Europe/Moscow"))
+    last_sent = None
+    while True:
+        try:
+            now = datetime.now(tz)
+            if now.hour == 21 and now.minute < 5 and last_sent != now.date():
+                last_sent = now.date()
+                await send_chat(await build_report("daily", tz))
+                if now.weekday() == 6:
+                    await send_chat(await build_report("weekly", tz))
+                if now.day == calendar.monthrange(now.year, now.month)[1]:
+                    await send_chat(await build_report("monthly", tz))
+        except Exception as e:
+            logger.exception(f"report error: {e}")
+        await asyncio.sleep(30)
+
+
+async def error_handler(update, context):
+    err = context.error
+    if isinstance(err, TelegramConflict):
+        logger.warning("Telegram Conflict (вебхук-режим, игнорируем)")
+        return
+    logger.exception(f"Unhandled error: {err}")
+
+
+# ==================== ДЕЙСТВИЯ С ПОДТВЕРЖДЕНИЕМ ====================
+async def action_pause(context):
+    if bot_state.paused:
+        return "⏸ Уже на паузе."
+    orders = list(paper.orders)
+    paper.orders = []
+    paper.save()
+    bot_state.pause(orders)
+    return f"⏸ <b>Пауза</b>: ордеров снято {len(orders)}, позиции открыты."
+
+
+async def action_resume(context):
+    if not bot_state.paused:
+        return "▶️ Не на паузе."
+    orders = bot_state.resume()
+    paper.orders.extend(orders)
+    paper.save()
+    return f"▶️ <b>Возобновлено</b>: ордеров восстановлено {len(orders)}."
+
+
+async def action_exitall(context):
+    bot_state.trading_enabled = False
+    prices = await market_data.get_tickers()
+    results = paper.sell_all(prices)
+    total = sum(r["pnl"] for r in results)
+    return (
+        f"🛑 <b>Торговля остановлена</b>\n"
+        f"Позиций закрыто: {len(results)} · {pnl_emoji(total)} {total:+.2f}%\n"
+        f"💰 Баланс: <b>{usd(paper.usdt)}</b>\n"
+        f"🧠 Опыт обучения сохранён."
+    )
+
+
+async def action_resetlearn(context):
+    learner.reset()
+    return "🧠♻️ <b>Опыт сброшен</b>: веса = 1.0, история очищена."
+
+
+async def action_resetstats(context):
+    paper.reset_stats()
+    learner.reset_stats()
+    return (
+        "📊 <b>Статистика сброшена</b>\n"
+        "PF / DD / Expectancy — с нуля, веса-знания сохранены.\n"
+        "Режим вернулся к базовому."
+    )
+
+
+ACTIONS = {
+    "pause": (action_pause, "поставить торговлю на паузу?"),
+    "resume": (action_resume, "возобновить торговлю?"),
+    "exitall": (action_exitall, "продать ВСЕ позиции и остановить торговлю?"),
+    "resetlearn": (action_resetlearn, "сбросить опыт обучения (веса и историю)?"),
+    "resetstats": (action_resetstats, "сбросить торговую статистику?"),
+}
+
+
+async def ask_confirmation(update, context, key):
+    _, question = ACTIONS[key]
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm:{key}"),
+        InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
+    ]])
+    await reply(update, f"⚠️ <b>Подтвердите:</b> {_html.escape(question)}", markup=keyboard)
+
+
+async def confirm_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "cancel":
+        try:
+            await query.edit_message_text("❌ Отменено.",
+                                          reply_markup=InlineKeyboardMarkup([]))
+        except BadRequest:
+            pass
+        return
+
+    if data.startswith("confirm:"):
+        key = data.split(":", 1)[1]
+        entry = ACTIONS.get(key)
+        if not entry:
+            return
+        fn, _ = entry
+        try:
+            result = await fn(context)
+            try:
+                await query.edit_message_text(
+                    f"✅ <b>Подтверждено</b>\n\n{result}",
+                    reply_markup=InlineKeyboardMarkup([]),
+                )
+            except BadRequest:
+                await query.edit_message_text(
+                    f"✅ Подтверждено\n\n{result}",
+                    reply_markup=InlineKeyboardMarkup([]),
+                )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                return
+            try:
+                await query.edit_message_text(f"⚠️ Ошибка: {e}",
+                                              reply_markup=InlineKeyboardMarkup([]))
+            except BadRequest:
+                pass
+        except Exception as e:
+            logger.exception(f"confirm action error: {e}")
+            try:
+                await query.edit_message_text(f"⚠️ Ошибка: {e}",
+                                              reply_markup=InlineKeyboardMarkup([]))
+            except BadRequest:
+                pass
+
+
+# ==================== Главный запуск ====================
+async def run_all(application):
+    global _app
+    _app = application
+
+    await application.initialize()
+    await application.start()
+
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook удалён, очередь обновлений сброшена")
+    except Exception as e:
+        logger.error(f"delete_webhook error: {e}")
+
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
+    webhook_url = f"{public_url}{WEBHOOK_PATH}"
+
+    await application.bot.set_webhook(
+        url=webhook_url,
+        drop_pending_updates=True,
+        allowed_updates=["message", "edited_message", "callback_query"],
+    )
+    logger.info(f"✅ Webhook установлен: {webhook_url}")
+
+    # Меню в порядке пользователя
+    await application.bot.set_my_commands([
+        BotCommand("start", "🚀 Запустить торговлю"),
+        BotCommand("pause", "⏸ Пауза (с подтверждением)"),
+        BotCommand("resume", "▶️ Возобновить (с подтверждением)"),
+        BotCommand("status", "📊 Статус: балансы и позиции"),
+        BotCommand("learn", "🧠 Обучение: параметры, сектора, веса, память"),
+        BotCommand("news", "📰 Статус новостной аналитики"),
+        BotCommand("exitall", "🛑 Продать всё и остановить (с подтверждением)"),
+        BotCommand("resetstats", "📊 Сбросить статистику"),
+        BotCommand("resetlearn", "🧠♻️ Сбросить опыт обучения"),
+        BotCommand("log", "📄 Файл лога"),
+        BotCommand("autotune", "🎛 Автотюн: статус и вкл/выкл"),
+        BotCommand("info", "📖 Информация о боте"),
+        BotCommand("help", "📖 Справка"),
+    ])
+
+    await asyncio.to_thread(ensure_branch)
+
+    set_notifier(send_chat)
+    asyncio.create_task(cycle_loop())
+    asyncio.create_task(report_loop())
+    logger.info("Цикл торговли и отчёты запущены (WEBHOOK MODE)")
+
+    web_app = web.Application()
+    web_app.router.add_get("/", health_handler)
+    web_app.router.add_post(WEBHOOK_PATH, webhook_handler)
+
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"HTTP-сервер запущен на порту {port} (GET / + POST {WEBHOOK_PATH})")
+
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        logger.info("Остановка...")
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        await application.stop()
+        await application.shutdown()
+        await runner.cleanup()
+
+
+# ==================== Команды Telegram ====================
+async def cmd_start(update, context):
+    bot_state.fresh_start()
+    await reply(update, "🤖 <b>Капитан Рост</b> на связи! Торговля запущена, цикл начат заново.")
+
+
+async def cmd_info(update, context):
+    """Паспорт бота — всё одним текстовым сообщением, без кнопок."""
+    await reply(update, info_full_text())
+
+
+async def cmd_help(update, context):
+    await reply(update,
+        "📖 <b>Мои команды</b>\n"
+        "/status — позиции и метрики\n"
+        "/info — информация о боте\n"
+        "/learn — обучение\n"
+        "/news — новостная аналитика\n"
+        "/pause, /resume, /exitall — с подтверждением\n"
+        "/resetstats, /resetlearn — сбросы\n"
+        "/log — файл лога"
+    )
+
+
+async def cmd_pause(update, context):
+    await ask_confirmation(update, context, "pause")
+
+
+async def cmd_resume(update, context):
+    await ask_confirmation(update, context, "resume")
+
+
+async def cmd_exitall(update, context):
+    await ask_confirmation(update, context, "exitall")
+
+
+async def cmd_resetlearn(update, context):
+    await ask_confirmation(update, context, "resetlearn")
+
+
+async def cmd_resetstats(update, context):
+    await ask_confirmation(update, context, "resetstats")
+
+
+async def cmd_learn(update, context):
+    wr, n = learner.winrate()
+    regime, _ = await get_regime()
+    lines = ["🧠 <b>Обучение бота</b>", ""]
+
+    lines.append("📌 <b>Текущие параметры</b>")
+    lines.append(
+        f"🎯 Winrate <b>{wr:.0%}</b> ({n}) · строгость <b>{learner.threshold_adj:+.1f}</b> · "
+        f"порог <b>{threshold(regime):g}</b>"
+    )
+    lines.append(
+        f"🛰 Сателлиты: лимит <b>{learner.satellite_limit():.0f}%</b> · "
+        f"размер <b>{learner.satellite_size_pct():.1f}%</b>"
+    )
+    core_hist = learner.kind_stats.get("core") or []
+    sat_hist = learner.kind_stats.get("satellite") or []
+    if core_hist:
+        cwr = sum(1 for p in core_hist if p > 0) / len(core_hist)
+        cavg = sum(core_hist) / len(core_hist)
+        lines.append(f"🏛 Core: {len(core_hist)} · wr {cwr:.0%} · ср. {cavg:+.2f}%")
+    if sat_hist:
+        swr = sum(1 for p in sat_hist if p > 0) / len(sat_hist)
+        savg = sum(sat_hist) / len(sat_hist)
+        lines.append(f"🛰 Сателлиты: {len(sat_hist)} · wr {swr:.0%} · ср. {savg:+.2f}%")
+    lines.append("")
+
+    lines.append("🧭 <b>Где деньги</b> · сектора и тиры")
+    if learner.sector_stats:
+        rows = []
+        for s, hist in learner.sector_stats.items():
+            if not hist:
+                continue
+            swr = sum(1 for p in hist if p > 0) / len(hist)
+            avg = sum(hist) / len(hist)
+            rows.append((s, swr, len(hist), avg, learner.sector_bias(s)))
+        rows.sort(key=lambda r: r[4], reverse=True)
+        for s, swr, cnt, avg, bias in rows:
+            lines.append(
+                f"   {pnl_emoji(avg)} <i>{s}</i> · wr {swr:.0%} ({cnt}) · "
+                f"{avg:+.2f}% → бонус {bias:+.2f}"
+            )
+    else:
+        lines.append("   (пока нет данных)")
+    tier_shown = False
+    for t in TIERS:
+        hist = learner.tier_stats.get(t) or []
+        if not hist:
+            continue
+        tier_shown = True
+        twr = sum(1 for p in hist if p > 0) / len(hist)
+        tavg = sum(hist) / len(hist)
+        lines.append(
+            f"   {TIER_EMOJI[t]} <i>{TIER_NAMES[t]}</i> · wr {twr:.0%} ({len(hist)}) · "
+            f"{tavg:+.2f}% → бонус {learner.tier_bias(t):+.2f}"
+        )
+    if not tier_shown:
+        lines.append("   🐘 Кап-тиры: накапливается")
+    lines.append("")
+
+    lines.append("🎯 <b>Чему верит бот</b> · веса сигналов")
+    for k, v in sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True):
+        bar = "⚡" * max(1, int(round(v * 5)))
+        lines.append(f"   {weight_emoji(v)} <i>{k}</i> · {v:.2f} {bar}")
+    lines.append("")
+
+    lines.append("🧾 <b>Как выходим</b> · типы выходов")
+    if learner.exit_stats:
+        rows = []
+        for t, hist in learner.exit_stats.items():
+            if not hist:
+                continue
+            twr = sum(1 for p in hist if p > 0) / len(hist)
+            avg = sum(hist) / len(hist)
+            rows.append((t, twr, len(hist), avg))
+        rows.sort(key=lambda r: r[3], reverse=True)
+        for t, twr, cnt, avg in rows:
+            lines.append(f"   {pnl_emoji(avg)} <i>{t}</i> · {cnt} · wr {twr:.0%} · {avg:+.2f}%")
+    else:
+        lines.append("   (пока нет данных)")
+    lines.append("")
+
+    mem = memory_stats()
+    lines.append("🗂 <b>Память по монетам</b>")
+    lines.append(
+        f"   📚 База {mem['base']} + выучено {mem['learned']} = "
+        f"<b>{mem['total']}</b> монет"
+    )
+    sec_txt = " | ".join(
+        f"{s} · {c}" for s, c in sorted(mem["sectors"].items(), key=lambda kv: kv[1], reverse=True)
+    )
+    lines.append(f"   🧭 {sec_txt}")
+    tier_txt = " · ".join(
+        f"{TIER_EMOJI[t]} {c}" for t, c in sorted(mem["tiers"].items(), key=lambda kv: kv[1], reverse=True)
+    )
+    lines.append(f"   🏆 {tier_txt}")
+    lines.append("")
+    lines.extend(shadow.learn_lines())
+
+    await reply(update, "\n".join(lines))
+
+
+async def cmd_news(update, context):
+    from bot.news.cmc import get_stats as cmc_stats
+    from bot.news.rss_news import get_stats as rss_stats
+
+    cmc = cmc_stats()
+    rss = rss_stats()
+
+    lines = ["📰 <b>Новостная аналитика</b>", ""]
+
+    lines.append("📡 <b>RSS-ленты</b>")
+    if rss["feeds_working"]:
+        lines.append(f"   ✅ работают · {rss['items_count']} новостей")
+        lines.append(f"   ⏱ кэш обновлён {rss['cache_age_min']} мин назад")
+        if rss["neg_examples"]:
+            lines.append(f"   ⚠️ негатив: {_html.escape(rss['neg_examples'][0][:60])}…")
+        if rss["pos_examples"]:
+            lines.append(f"   ✅ позитив: {_html.escape(rss['pos_examples'][0][:60])}…")
+    else:
+        lines.append("   ❌ ленты недоступны")
+
+    lines.append("")
+    lines.append("🏷 <b>CoinMarketCap</b>")
+    lines.append(f"   {'✅' if cmc['api_key_set'] else '❌'} API ключ · 📚 секторов: {cmc['sectors_learned']} · 🏆 рангов: {cmc['ranks_cached']}")
+
+    lines.append("")
+    lines.append("🚫 <b>Отфильтровано новостями</b>")
+    if FILTERED_BY_NEWS:
+        for item in FILTERED_BY_NEWS[-5:]:
+            lines.append(f"   • {_html.escape(fmt_sym(item['symbol']))} · негатив {item['neg_count']}")
+    else:
+        lines.append("   (пока пусто)")
+
+    await reply(update, "\n".join(lines))
+
+
+async def cmd_log(update, context):
+    src = Path("logs/bot.log")
+    if not src.exists():
+        await reply(update, "⚠️ Файл лога не найден.")
+        return
+    name = f"log_{datetime.now().strftime('%H%M%S')}.txt"
+    tmp = Path("logs") / name
+    tmp.write_bytes(src.read_bytes())
+    with open(tmp, "rb") as f:
+        await update.message.reply_document(document=f, filename=name)
+
+async def cmd_autotune(update, context):
+    arg = (context.args or [None])[0]
+    if arg in ("on", "вкл"):
+        shadow.set_auto(True)
+    elif arg in ("off", "выкл"):
+        shadow.set_auto(False)
+    else:
+        shadow.set_auto(not shadow.tuning["auto"])
+    await reply(update, shadow.stats_text() +
+                "\n💡 переключение: /autotune · или /autotune off · /autotune on")
+
+
+async def cmd_status(update, context):
+    try:
+        prices = await market_data.get_tickers()
+        eq = paper.equity(prices)
+        free_pct = paper.usdt / eq * 100 if eq else 0
+
+        msg = ["📊 <b>Капитан Рост</b> · <i>тренировка</i> 🎓", ""]
+        msg.append(f"💰 Свободно: <b>{usd(paper.usdt)}</b> ({free_pct:.0f}%)")
+        msg.append(f"🏦 Накопления: <b>{usd(paper.funding)}</b>")
+        msg.append(f"📈 Капитал: <b>{usd(eq)}</b>")
+        msg.append("")
+
+        if paper.positions:
+            invested = sum(
+                p["qty"] * prices.get(s, {}).get("last", 0)
+                for s, p in paper.positions.items()
+            )
+            inv_pct = invested / eq * 100 if eq else 0
+            msg.append(f"📦 <b>Позиции ({len(paper.positions)})</b> · {inv_pct:.0f}% портфеля")
+            for sym, pos in paper.positions.items():
+                last = prices.get(sym, {}).get("last", 0)
+                val = pos["qty"] * last
+                w = val / eq * 100 if eq else 0
+                pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
+                kind = "🛰" if pos.get("kind") == "satellite" else "🏛"
+                sector = pos.get("sector") or sector_of(sym[:-4])
+                tier_em = TIER_EMOJI.get(pos.get("tier") or "", "")
+                ind = "🔥" if pos.get("tp1_done") else pnl_emoji(pnl_pct)
+                tp1 = " · TP1" if pos.get("tp1_done") else ""
+                msg.append(
+                    f"{kind} <b>{sym[:-4]}</b>{' ' + tier_em if tier_em else ''} · "
+                    f"<i>{sector}</i> · {ind} {fmt_pct(pnl_pct)}{tp1}"
+                )
+                msg.append(f"   💼 {usd(val)} · {w:.1f}%")
+                msg.append(f"   📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)}")
+                tp_pct = (pos["tp"] - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
+                sl_pct = (pos["sl"] - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
+                
+                # Визуализация SL
+                if sl_pct >= 0.5:
+                    sl_str = f"📈 <b>{fmt_price(pos['sl'])} ({fmt_pct(sl_pct)})</b>"
+                elif sl_pct >= 0.15: # Учитываем комиссию ~0.2%
+                    sl_str = f"🔒 <b>{fmt_price(pos['sl'])} ({fmt_pct(sl_pct)})</b>"
+                else:
+                    sl_str = f"🛡 {fmt_price(pos['sl'])} ({fmt_pct(sl_pct)})"
+                    
+                msg.append(f"   🎯 {fmt_price(pos['tp'])} ({fmt_pct(tp_pct)}) · {sl_str}")
+        else:
+            msg.append("📦 <b>Позиции</b>: нет")
+        msg.append("")
+
+        if paper.orders:
+            orders_sum = sum(o["qty"] * o["price"] for o in paper.orders)
+            msg.append(f"📋 <b>Ордера ({len(paper.orders)})</b> · {usd(orders_sum)}")
+            for o in paper.orders:
+                val = o["qty"] * o["price"]
+                w = val / eq * 100 if eq else 0
+                kind = "🛰" if o.get("kind") == "satellite" else "🏛"
+                sector = o.get("sector") or sector_of(o["symbol"][:-4])
+                tier_em = TIER_EMOJI.get(o.get("tier") or "", "")
+                msg.append(
+                    f"{kind} <b>{o['symbol'][:-4]}</b>{' ' + tier_em if tier_em else ''} · "
+                    f"<i>{sector}</i> · {w:.1f}%"
+                )
+                msg.append(f"   💼 {usd(val)} · 📥 {fmt_price(o['price'])}")
+                tp_pct = (o["tp"] - o["price"]) / o["price"] * 100 if o["price"] else 0
+                sl_pct = (o["sl"] - o["price"]) / o["price"] * 100 if o["price"] else 0
+                msg.append(f"   🎯 {fmt_price(o['tp'])} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(o['sl'])} ({fmt_pct(sl_pct)})")
+        else:
+            msg.append("📋 <b>Ордера</b>: нет")
+        msg.append("")
+
+        metrics = paper.get_metrics(prices)
+        mode, _ = learner.risk_mode(
+            metrics["profit_factor"], metrics["max_drawdown_pct"], metrics["total_trades"]
+        )
+        mode_emoji = {"NORMAL": "🟢", "CAUTIOUS": "🟡", "STRICT": "🔴", "AGGRESSIVE": "🚀"}.get(mode, "⚪")
+
+        msg.append(f"📊 <b>Метрики</b> · {mode_emoji} {mode}")
+        msg.append(
+            f"🧾 {metrics['total_trades']} позиций "
+            f"(✅ {metrics['win_count']} / ❌ {metrics['loss_count']}) · "
+            f"🎯 частичных TP1: {metrics['partial_count']}"
+        )
+
+        pf = metrics["profit_factor"]
+        if pf is None:
+            pf_text, pf_mark = "—", ""
+        elif pf == float("inf"):
+            pf_text, pf_mark = "∞", "🎯"
+        else:
+            pf_text = f"{pf:.2f}"
+            pf_mark = "🎯" if pf >= 1.3 else ("⚠️" if pf >= 1.0 else "❌")
+        dd = metrics["max_drawdown_pct"]
+        dd_mark = "✅" if dd < 5 else ("⚠️" if dd < 15 else "🔴")
+        msg.append(f"📈 PF: <b>{pf_text}</b> {pf_mark} (цель ≥ 1.3) · 📉 DD: <b>{dd:.1f}%</b> {dd_mark} (лимит 15%)")
+
+        exp = metrics["expectancy"]
+        rf = metrics["recovery_factor"]
+        exp_mark = "🎯" if exp > 0 else "❌"
+        rf_mark = "🎯" if rf > 2 else ("⚠️" if rf > 1 else "❌")
+        msg.append(f"💹 {pnl_emoji(exp)} <b>{exp:+.2f}</b> {exp_mark} (цель > 0) · 🔄 RF: <b>{rf:.1f}</b> {rf_mark} (цель ≥ 2)")
+
+        sat_exposure = sum(
+            p["qty"] * prices.get(s, {}).get("last", 0)
+            for s, p in paper.positions.items() if p.get("kind") == "satellite"
+        ) + sum(
+            o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite"
+        )
+        sat_pct = sat_exposure / eq * 100 if eq else 0
+        msg.append(f"🛰 Сателлиты: <b>{sat_pct:.1f}%</b> / {learner.satellite_limit():.0f}% · размер {learner.satellite_size_pct():.1f}%")
+        msg.append(f"💵 Суммарный PnL: {pnl_emoji(metrics['total_pnl'])} <b>{usd(metrics['total_pnl'])}</b>")
+        msg.append("")
+
+        regime, _ = await get_regime()
+        regime_emoji = {"bull": "🟢", "neutral": "🟡", "bear": "🔴"}.get(regime, "⚪")
+        regime_text = {"bull": "бычий", "neutral": "нейтральный", "bear": "медвежий"}.get(regime, regime)
+
+        btc = prices.get("BTCUSDT", {}).get("last", 0)
+        msg.append(f"₿ <b>${fmt_price(btc)}</b> · {regime_emoji} {regime_text} · 🎯 порог {threshold(regime):g}")
+        if SCAN_SUMMARY.get("text"):
+            msg.append(f"🔎 {SCAN_SUMMARY['text']}")
+        wr, n = learner.winrate()
+        top = sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        top_txt = " · ".join(f"{k} {v:.2f}" for k, v in top)
+        msg.append(f"🧠 wr {wr:.0%} ({n}) · топ: {top_txt} · строгость {learner.threshold_adj:+.1f}")
+
+        await reply(update, "\n".join(msg))
+    except Exception as e:
+        logger.exception("Ошибка в /status")
+        await reply(update, f"⚠️ Ошибка: {e}")
+
+
+def main():
+    os.makedirs("logs", exist_ok=True)
+    logger.add("logs/bot.log", rotation="5 MB", retention="7 days", enqueue=True, level="INFO")
+    logger.info("Запуск бота CaptainRost (PAPER MODE, WEBHOOK)...")
+
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        logger.error("Ошибка! TELEGRAM_BOT_TOKEN не найден.")
+        return
+
+    app = Application.builder().token(token).build()
+    app.add_error_handler(error_handler)
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("pause", cmd_pause))
+    app.add_handler(CommandHandler("resume", cmd_resume))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("learn", cmd_learn))
+    app.add_handler(CommandHandler("news", cmd_news))
+    app.add_handler(CommandHandler("exitall", cmd_exitall))
+    app.add_handler(CommandHandler("resetstats", cmd_resetstats))
+    app.add_handler(CommandHandler("resetlearn", cmd_resetlearn))
+    app.add_handler(CommandHandler("log", cmd_log))
+    app.add_handler(CommandHandler("info", cmd_info))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("autotune", cmd_autotune))
+    app.add_handler(CallbackQueryHandler(confirm_handler, pattern="^(confirm:|cancel)"))
+
+    logger.info("Бот собран, запускаем webhook-сервер...")
+    asyncio.run(run_all(app))
+
+
+if __name__ == '__main__':
+    main()
+
+--- КОНЕЦ ФАЙЛА: ./main.py ---
+
+--- НАЧАЛО ФАЙЛА: ./requirements.txt ---
+python-telegram-bot==20.7
+loguru==0.7.2
+python-dotenv==1.0.1
+httpx
+pybit
+aiohttp
+
+--- КОНЕЦ ФАЙЛА: ./requirements.txt ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/__init__.py ---
+# пакет bot
+
+--- КОНЕЦ ФАЙЛА: ./bot/__init__.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/news/__init__.py ---
+import os
+import time
+
+import httpx
+from loguru import logger
+
+CMC_BASE = "https://pro-api.coinmarketcap.com"
+
+_cache = {"hype": None, "hype_ts": 0, "info": {}}
+
+
+async def _get(path, params):
+    key = os.getenv("CMC_API_KEY", "").strip()
+    if not key:
+        return None
+    headers = {"X-CMC_PRO_API_KEY": key}
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(CMC_BASE + path, params=params, headers=headers)
+        data = r.json()
+        if data.get("status", {}).get("error_code"):
+            logger.error(f"CMC error: {data['status']}")
+            return None
+        return data
+    except Exception as e:
+        logger.error(f"CMC request error: {e}")
+        return None
+
+
+async def get_hype_symbols() -> set:
+    """Монеты из трендов CMC (кэш 30 минут)."""
+    now = time.time()
+    if _cache["hype"] is not None and now - _cache["hype_ts"] < 1800:
+        return _cache["hype"]
+    hype = set()
+    for path in ["/v1/cryptocurrency/trending/latest",
+                 "/v1/cryptocurrency/trending/most-visited"]:
+        data = await _get(path, {"limit": 30})
+        if data:
+            arr = data.get("data")
+            if isinstance(arr, dict):
+                arr = arr.get("items") or []
+            for item in arr or []:
+                sym = (item.get("symbol") or "").upper()
+                if sym:
+                    hype.add(sym)
+    _cache["hype"], _cache["hype_ts"] = hype, now
+    return hype
+
+
+async def get_coin_name(symbol: str) -> str:
+    """Название монеты по тику (кэш 24 часа)."""
+    info = _cache["info"].get(symbol)
+    if info and time.time() - info["ts"] < 86400:
+        return info["name"]
+    data = await _get("/v1/cryptocurrency/info", {"symbol": symbol})
+    name = ""
+    if data:
+        arr = data.get("data", {}).get(symbol) or data.get("data", {}).get(symbol.upper())
+        if isinstance(arr, list) and arr:
+            name = arr[0].get("name", "")
+        elif isinstance(arr, dict):
+            name = arr.get("name", "")
+    _cache["info"][symbol] = {"name": name, "ts": time.time()}
+    return name
+
+--- КОНЕЦ ФАЙЛА: ./bot/news/__init__.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/news/cmc.py ---
+import os
+import json
+import time
+import asyncio
+from pathlib import Path
+
+import httpx
+from loguru import logger
+
+from bot.core.remote_state import download_state, upload_state
+
+CMC_BASE = "https://pro-api.coinmarketcap.com"
+
+_cache = {"info": {}}
+
+# ===== БАЗОВЫЙ СЛОВАРЬ СЕКТОРОВ (только оверрид; остальное учится само) =====
+SECTORS = {
+    "BTC": "L1", "ETH": "L1", "SOL": "L1", "BNB": "L1", "AVAX": "L1",
+    "ADA": "L1", "DOT": "L1", "NEAR": "L1", "APT": "L1", "SUI": "L1",
+    "XRP": "L1", "LTC": "L1", "BCH": "L1", "ATOM": "L1", "TON": "L1",
+    "ARB": "L2", "OP": "L2", "STRK": "L2", "POL": "L2", "ZRO": "L2",
+    "UNI": "DeFi", "AAVE": "DeFi", "LINK": "DeFi", "MKR": "DeFi",
+    "CRV": "DeFi", "LDO": "DeFi", "DYDX": "DeFi", "JUP": "DeFi",
+    "DOGE": "Meme", "SHIB": "Meme", "PEPE": "Meme", "BONK": "Meme",
+    "WIF": "Meme", "FLOKI": "Meme", "PENGU": "Meme", "TRUMP": "Meme",
+    "AXS": "Gaming", "SAND": "Gaming", "GALA": "Gaming", "NOT": "Gaming",
+    "FET": "AI", "RNDR": "AI", "GRT": "AI", "WLD": "AI", "GRASS": "AI",
+}
+
+SECTOR_TAG_MAP = {
+    "layer-1": "L1", "layer-2": "L2", "defi": "DeFi",
+    "ai-big-data": "AI", "memes": "Meme", "gaming": "Gaming",
+    "metaverse": "Gaming", "nft-collectibles": "Gaming",
+    "infrastructure": "Infra", "storage": "Storage", "privacy": "Privacy",
+    "real-world-assets": "RWA", "dex": "DEX", "exchange-token": "Exchange",
+    "interoperability": "Infra", "oracle": "Infra",
+}
+
+# ===== КАП-ТИРЫ CMC =====
+TIER_EMOJI = {"TOP20": "🐋", "MID": "🐘", "SMALL": "🐅", "MICRO": "🐭"}
+TIER_NAMES = {
+    "TOP20": "Топ-20 · киты",
+    "MID": "21–100 · слоны",
+    "SMALL": "101–500 · тигры",
+    "MICRO": "500+ · мыши",
+}
+
+
+def tier_of(rank):
+    if rank is None:
+        return "MICRO"
+    if rank <= 20:
+        return "TOP20"
+    if rank <= 100:
+        return "MID"
+    if rank <= 500:
+        return "SMALL"
+    return "MICRO"
+
+
+# ===== КЭШ СЕКТОРОВ (локально + бэкап в GitHub) =====
+SECTOR_FILE = Path(os.getenv("STORAGE_DIR", "storage")) / "sectors.json"
+SECTOR_REMOTE = "sectors.json"
+_sector_cache = {}
+_last_upload = 0.0
+
+
+def _load_sectors():
+    global _sector_cache
+    try:
+        if SECTOR_FILE.exists():
+            _sector_cache = json.loads(SECTOR_FILE.read_text())
+            logger.info(f"sectors: кэш загружен ({len(_sector_cache)} монет)")
+    except Exception as e:
+        logger.error(f"sectors load error: {e}")
+    # Если локального файла нет (свежий деплой) — восстанавливаем из GitHub
+    if not _sector_cache:
+        data = download_state(SECTOR_REMOTE)
+        if isinstance(data, dict) and data:
+            _sector_cache = data
+            logger.info(f"sectors: кэш восстановлен из GitHub ({len(_sector_cache)} монет)")
+
+
+def _save_sectors():
+    global _last_upload
+    try:
+        SECTOR_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SECTOR_FILE.write_text(json.dumps(_sector_cache, ensure_ascii=False))
+    except Exception as e:
+        logger.error(f"sectors save error: {e}")
+    # Бэкап в GitHub не чаще раза в 60 секунд
+    if time.time() - _last_upload > 60:
+        _last_upload = time.time()
+        upload_state(SECTOR_REMOTE, _sector_cache)
+
+
+_load_sectors()
+
+
+def sector_of(base):
+    return SECTORS.get(base) or _sector_cache.get(base) or "Other"
+
+
+def _tags_to_sector(tags):
+    for t in tags or []:
+        s = SECTOR_TAG_MAP.get(t)
+        if s:
+            return s
+    return None
+
+
+async def get_sectors_for_pool(bases):
+    result = {}
+    need = []
+    for b in bases:
+        if b in SECTORS:
+            result[b] = SECTORS[b]
+        elif b in _sector_cache:
+            result[b] = _sector_cache[b]
+        else:
+            need.append(b)
+    if not need:
+        return result
+    await asyncio.sleep(1.0)
+    try:
+        key = os.getenv("CMC_API_KEY", "").strip()
+        headers = {"X-CMC_PRO_API_KEY": key} if key else {}
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"{CMC_BASE}/v1/cryptocurrency/info",
+                            params={"symbol": ",".join(need[:100])},
+                            headers=headers)
+            data = r.json().get("data", {})
+        learned = 0
+        for b in need:
+            arr = data.get(b)
+            sector = "Other"
+            if isinstance(arr, list) and arr:
+                sector = _tags_to_sector(arr[0].get("tags")) or "Other"
+            elif isinstance(arr, dict):
+                sector = _tags_to_sector(arr.get("tags")) or "Other"
+            result[b] = sector
+            if sector != "Other":
+                _sector_cache[b] = sector
+                learned += 1
+        if learned:
+            _save_sectors()
+            logger.info(f"sectors: авто-выучено {learned} новых монет (кэш: {len(_sector_cache)})")
+    except Exception as e:
+        logger.error(f"sectors fetch error: {e}")
+        for b in need:
+            result.setdefault(b, "Other")
+    return result
+
+
+# ===== РАНГИ CMC (кэш 6 часов) =====
+RANKS_FILE = Path(os.getenv("STORAGE_DIR", "storage")) / "ranks.json"
+_ranks = {"data": {}, "ts": 0.0}
+
+
+def _load_ranks():
+    try:
+        if RANKS_FILE.exists():
+            d = json.loads(RANKS_FILE.read_text())
+            _ranks["data"] = d.get("data", {})
+            _ranks["ts"] = float(d.get("ts", 0.0))
+            logger.info(f"ranks: кэш загружен ({len(_ranks['data'])} рангов)")
+    except Exception as e:
+        logger.error(f"ranks load error: {e}")
+
+
+_load_ranks()
+
+
+async def get_ranks_for_pool(bases):
+    """Ранги CMC для пула; обновление раз в 6 часов (1 пакетный запрос)."""
+    now = time.time()
+    if _ranks["data"] and now - _ranks["ts"] < 21600:
+        return {b: _ranks["data"].get(b) for b in bases}
+    fetched = {}
+    try:
+        key = os.getenv("CMC_API_KEY", "").strip()
+        headers = {"X-CMC_PRO_API_KEY": key} if key else {}
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(
+                f"{CMC_BASE}/v1/cryptocurrency/listings/latest",
+                params={"symbol": ",".join(bases[:100]), "limit": 200},
+                headers=headers,
+            )
+            data = r.json().get("data", [])
+        for item in data:
+            fetched[item.get("symbol")] = item.get("cmc_rank")
+        _ranks["data"].update(fetched)
+        _ranks["ts"] = now
+        try:
+            RANKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            RANKS_FILE.write_text(json.dumps({"data": _ranks["data"], "ts": _ranks["ts"]}))
+        except Exception as e:
+            logger.error(f"ranks save error: {e}")
+        logger.info(f"ranks: обновлено {len(fetched)} рангов CMC")
+    except Exception as e:
+        logger.error(f"ranks fetch error: {e}")
+    return {b: fetched.get(b, _ranks["data"].get(b)) for b in bases}
+
+
+# ===== ПАМЯТЬ ПО МОНЕТАМ (для /learn) =====
+def memory_stats():
+    """Сводка памяти: база + выученные монеты, раскладка по секторам и тирам."""
+    sector_counts = {}
+    for sec in SECTORS.values():
+        sector_counts[sec] = sector_counts.get(sec, 0) + 1
+    learned = 0
+    for base, sec in _sector_cache.items():
+        if base not in SECTORS:
+            sector_counts[sec] = sector_counts.get(sec, 0) + 1
+            learned += 1
+    all_bases = set(SECTORS.keys()) | set(_sector_cache.keys())
+    tier_counts = {}
+    for base in all_bases:
+        t = tier_of(_ranks["data"].get(base))
+        tier_counts[t] = tier_counts.get(t, 0) + 1
+    return {
+        "base": len(SECTORS),
+        "learned": learned,
+        "total": len(all_bases),
+        "sectors": sector_counts,
+        "tiers": tier_counts,
+    }
+
+
+async def _get(path, params):
+    key = os.getenv("CMC_API_KEY", "").strip()
+    if not key:
+        return None
+    headers = {"X-CMC_PRO_API_KEY": key}
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(CMC_BASE + path, params=params, headers=headers)
+        data = r.json()
+        if data.get("status", {}).get("error_code"):
+            logger.error(f"CMC error: {data['status']}")
+            return None
+        return data
+    except Exception as e:
+        logger.error(f"CMC request error: {e}")
+        return None
+
+
+async def get_coin_name(symbol: str) -> str:
+    info = _cache["info"].get(symbol)
+    if info and time.time() - info["ts"] < 86400:
+        return info["name"]
+    data = await _get("/v1/cryptocurrency/info", {"symbol": symbol})
+    name = ""
+    if data:
+        arr = data.get("data", {}).get(symbol) or data.get("data", {}).get(symbol.upper())
+        if isinstance(arr, list) and arr:
+            name = arr[0].get("name", "")
+        elif isinstance(arr, dict):
+            name = arr.get("name", "")
+    _cache["info"][symbol] = {"name": name, "ts": time.time()}
+    return name
+
+
+def get_stats():
+    key = os.getenv("CMC_API_KEY", "").strip()
+    return {
+        "api_key_set": bool(key),
+        "cache_count": len(_cache["info"]),
+        "sectors_learned": len(_sector_cache),
+        "ranks_cached": len(_ranks["data"]),
+    }
+
+--- КОНЕЦ ФАЙЛА: ./bot/news/cmc.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/news/rss_news.py ---
+import re
+import time
+import xml.etree.ElementTree as ET
+
+import httpx
+from loguru import logger
+
+_cache = {"items": None, "ts": 0, "listings": None, "listings_ts": 0}
+
+NEWS_FEEDS = [
+    "https://cointelegraph.com/rss",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://decrypt.co/feed",
+]
+
+NEG_WORDS = [
+    "hack", "hacked", "hacking", "exploit", "exploited", "vulnerability",
+    "rug pull", "rugpull", "scam", "fraud", "delist", "delisting",
+    "lawsuit", "sued", "sec investigation", "ban", "banned",
+    "bankrupt", "bankruptcy", "insolvent", "collapse", "collapsed",
+    "ponzi", "pyramid", "exit scam", "fake", "fake volume"
+]
+
+POS_WORDS = [
+    "partnership", "partnerships", "integration", "integrated",
+    "etf approval", "etf approved", "listing", "listed", "launch", "launched",
+    "adoption", "adopted", "institutional", "bullish", "breakout",
+    "ath", "all time high", "record high", "surge", "soaring"
+]
+
+
+def _count(words, text):
+    """Считает совпадения по границам слов (bank != ban)."""
+    total = 0
+    for w in words:
+        pat = re.compile(r'\b' + re.escape(w) + r'\b', re.IGNORECASE)
+        if pat.search(text):
+            total += 1
+    return total
+
+
+def _parse(xml_text):
+    items = []
+    try:
+        root = ET.fromstring(xml_text)
+        for item in root.iter('item'):
+            items.append({
+                'title': item.findtext('title') or '',
+                'desc': item.findtext('description') or '',
+                'link': item.findtext('link') or '',
+                'ts': int(time.time()),
+            })
+    except Exception as e:
+        logger.error(f"RSS parse error: {e}")
+    return items
+
+
+def _parse_listings(xml_text):
+    """Извлекает новые листинги из RSS Bybit — устойчиво к невалидному XML."""
+    listings = []
+
+    # Попытка 1: стандартный XML-парсер
+    try:
+        root = ET.fromstring(xml_text)
+        for item in root.iter('item'):
+            title = item.findtext('title') or ''
+            link = item.findtext('link') or ''
+            pub_date = item.findtext('pubDate')
+            entry = _extract_listing(title, link, pub_date)
+            if entry:
+                listings.append(entry)
+        return listings
+    except ET.ParseError:
+        pass  # невалидный XML — идём в fallback
+    except Exception as e:
+        logger.debug(f"Listings ET parse failed, trying regex fallback: {e}")
+
+    # Попытка 2: regex-fallback — работает с битым XML/HTML
+    try:
+        item_pattern = re.compile(
+            r'<item[^>]*>(.*?)</item>',
+            re.IGNORECASE | re.DOTALL
+        )
+        for block in item_pattern.finditer(xml_text):
+            chunk = block.group(1)
+            title_m = re.search(r'<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>',
+                                chunk, re.IGNORECASE | re.DOTALL)
+            link_m = re.search(r'<link[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>',
+                               chunk, re.IGNORECASE | re.DOTALL)
+            date_m = re.search(r'<pubDate[^>]*>(.*?)</pubDate>',
+                               chunk, re.IGNORECASE | re.DOTALL)
+            title = title_m.group(1).strip() if title_m else ''
+            link = link_m.group(1).strip() if link_m else ''
+            pub_date = date_m.group(1).strip() if date_m else None
+            entry = _extract_listing(title, link, pub_date)
+            if entry:
+                listings.append(entry)
+        if listings:
+            logger.info(f"Listings parsed via regex fallback: {len(listings)} items")
+    except Exception as e:
+        logger.error(f"Listings regex fallback also failed: {e}")
+
+    return listings
+
+
+def _extract_listing(title, link, pub_date):
+    """Если заголовок про новый листинг — возвращает запись, иначе None."""
+    match = re.search(r'New Listing:?\s+([A-Z0-9]+)\s*USDT', title, re.IGNORECASE)
+    if not match:
+        match = re.search(r'\b([A-Z0-9]{2,10})\s*USDT\s+(?:Now\s+)?Listed', title, re.IGNORECASE)
+    if not match:
+        return None
+    symbol = match.group(1).upper() + 'USDT'
+    ts = int(time.time())
+    if pub_date:
+        try:
+            from email.utils import parsedate_to_datetime
+            dt = parsedate_to_datetime(pub_date)
+            ts = int(dt.timestamp())
+        except Exception:
+            pass
+    return {'symbol': symbol, 'title': title.strip(), 'link': (link or '').strip(), 'ts': ts}
+
+
+async def fetch_news_cache():
+    """Свежие заголовки из RSS (кэш 15 минут)."""
+    now = time.time()
+    if _cache["items"] is not None and now - _cache["ts"] < 900:
+        return _cache["items"]
+    all_items = []
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+        for url in NEWS_FEEDS:
+            try:
+                r = await c.get(url)
+                all_items += _parse(r.text)
+            except Exception as e:
+                logger.error(f"RSS fetch error {url}: {e}")
+    _cache["items"], _cache["ts"] = all_items, now
+    return all_items
+
+
+async def fetch_listings_cache():
+    """Новые листинги Bybit (кэш 1 час)."""
+    now = time.time()
+    if _cache["listings"] is not None and now - _cache["listings_ts"] < 3600:
+        return _cache["listings"]
+    listings = []
+    for url in [
+        "https://announcements.bybit.com/en/rss",
+        "https://announcements.bybit.com/rss",
+    ]:
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
+                r = await c.get(url)
+            found = _parse_listings(r.text)
+            if found:
+                listings = found
+                break
+        except Exception as e:
+            logger.error(f"Listings fetch error {url}: {e}")
+    _cache["listings"], _cache["listings_ts"] = listings, now
+    return listings
+
+
+def check_sentiment(items, keys):
+    """Новостной фон по монете: (негатив, позитив, упоминания, заголовки)."""
+    neg = pos = mentions = 0
+    heads = []
+    keys_low = [k.lower() for k in keys if k]
+    for it in items:
+        text = it["title"] + " " + it["desc"]
+        if not any(k in text.lower() for k in keys_low):
+            continue
+        mentions += 1
+        n = _count(NEG_WORDS, text)
+        p = _count(POS_WORDS, text)
+        if n > p:
+            neg += 1
+            heads.append("⚠️ " + it["title"])
+        elif p > n:
+            pos += 1
+            heads.append("✅ " + it["title"])
+    return neg, pos, mentions, heads[:2]
+
+
+def get_stats():
+    """Статистика RSS-лент для мониторинга."""
+    now = time.time()
+    cache_age = now - _cache["ts"] if _cache["ts"] else None
+    items = _cache["items"] or []
+    listings = _cache["listings"] or []
+
+    neg_examples = []
+    pos_examples = []
+    for item in items[:20]:
+        text = item["title"] + " " + item["desc"]
+        n = _count(NEG_WORDS, text)
+        p = _count(POS_WORDS, text)
+        if n > p and len(neg_examples) < 3:
+            neg_examples.append(item["title"][:80])
+        elif p > n and len(pos_examples) < 3:
+            pos_examples.append(item["title"][:80])
+
+    now_ts = int(time.time())
+    fresh_listings = [
+        l for l in listings
+        if 86400 <= now_ts - l['ts'] <= 1209600  # 24ч – 14 дней
+    ]
+
+    return {
+        "cache_age_min": round(cache_age / 60, 1) if cache_age else None,
+        "items_count": len(items),
+        "feeds_working": len(items) > 0,
+        "neg_examples": neg_examples,
+        "pos_examples": pos_examples,
+        "listings_count": len(fresh_listings),
+        "listings_recent": [l['symbol'] for l in fresh_listings[:10]],
+    }
+
+--- КОНЕЦ ФАЙЛА: ./bot/news/rss_news.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/services/__init__.py ---
+# пакет services
+
+--- КОНЕЦ ФАЙЛА: ./bot/services/__init__.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/services/info.py ---
+# -*- coding: utf-8 -*-
+"""Паспорт бота «Капитан Рост» — секции команды /info.
+
+Чтобы новая механика появилась в /info, добавьте запись в INFO_SECTIONS:
+    ("эмодзи", "Заголовок", "текст"   или   функция без аргументов),
+Порядок записей = порядок блоков в сообщении.
+"""
+
+
+def _current_params():
+    """Живой блок: текущие параметры."""
+    from bot.strategy.learner import learner
+    wr, _n = learner.winrate()
+    return (
+        f"Winrate {wr:.0%} · строгость {learner.threshold_adj:+.1f}.\n"
+        f"🛰 Сателлиты: лимит {learner.satellite_limit():.0f}%, "
+        f"размер {learner.satellite_size_pct():.1f}%."
+    )
+
+
+INFO_SECTIONS = [
+    ("📌", "Текущие параметры", _current_params),
+
+    ("🤖", "О боте",
+     "Автономный торговый бот для криптовалют (спот Bybit). Сейчас в режиме тренировки: "
+     "сделки виртуальные, но с реалистичной математикой — комиссия 0.1% за сторону и "
+     "проскальзывание на входе. Цель — накопить статистику и обучиться до перехода на реальные деньги."),
+
+    ("🔄", "Торговый цикл",
+     "Каждые 5 минут: метрики и адаптивный режим → исполнение ордеров → оценка рынка "
+     "(бычий/нейтральный/медвежий по EMA50/200 BTC) → экстренный риск-менеджмент → управление "
+     "позициями (новости, TP1, инвалидация, раннер, трейлинг) → выходы по TP/SL → реквоты → "
+     "сканирование и новые покупки/ротации."),
+
+    ("📡", "Сигналы и скоринг",
+     "Скор складывается из обучаемых весов (0.3–1.7): тренд (EMA50, EMA21), импульс, RSI, объём, "
+     "рост за 24ч, новостной фон, хайп и независимость от BTC. Сверху — бонусы сектора и кап-тира. "
+     "Сигнал проходит, если скор не ниже порога входа."),
+
+    ("🎚", "Адаптив и режимы",
+     "Порог зависит от рынка: бычий — 5, нейтральный — 6, медвежий — 8. Состояние бота сдвигает "
+     "строгость на ±0.5–1.5 по PF, просадке и winrate. Режимы: STRICT, CAUTIOUS, NORMAL, AGGRESSIVE. "
+     "Хуже статистика — строже; лучше — активнее."),
+
+    ("🧠", "Обучение",
+     "После каждой закрытой позиции бот корректирует веса сигналов и копит статистику по секторам, "
+     "кап-тирам, типам выходов и стилю (core/сателлит). Runner-бонус награждает за прибыль выше TP1. "
+     "Опыт хранится локально и дублируется в GitHub."),
+
+    ("🛡", "Риск-менеджмент",
+     "Слои защиты: экстренный выход при дампе BTC (−3%/час или −6%/день); порог входа; лимиты секторов "
+     "и сателлитов; TP1 — продажа 50% на тейке, стоп в безубыток, остаток — «раннер» с трейлингом; "
+     "стоп только вверх; инвалидация и новостная резка; ротация слабых позиций."),
+
+    ("💰", "Деньги",
+     "Комиссия 0.1% за сторону. 62% прибыли — в накопления, 38% остаётся в работе. Размер core — "
+     "сетка по капиталу + сила сигнала + half-Kelly + риск 1% на сделку. Сателлиты меньше и с широким "
+     "стопом; их лимит и размер адаптируются к перформансу."),
+
+    ("🗂", "Память и классификация",
+     "Сектора (L1, L2, DeFi, AI, Meme, Gaming, Infra…) учатся из тегов CMC. Кап-тиры: 🐋 киты (топ-20), "
+     "🐘 слоны (21–100), 🐅 тигры (101–500), 🐭 мыши (500+). Стиль: 🏛 core /  сателлит — по волатильности. "
+     "Всё хранится локально и дублируется в GitHub."),
+
+    ("📊", "Метрики и отчёты",
+     "Цели: PF ≥ 1.3, просадка ≤ 15%, Expectancy > 0, Recovery Factor ≥ 2. "
+     "Отчёты: дневной в 21:00, недельный по воскресеньям, месячный в конце месяца."),
+
+    ("🎛", "Команды",
+     "/status — позиции и метрики; /learn — обучение; /news — новости; /pause, /resume, /exitall — "
+     "с подтверждением; /resetstats, /resetlearn — сбросы; /log — файл лога."),
+]
+
+
+def section_body(body):
+    """Вернуть текст секции: строку или результат вызова функции."""
+    return body() if callable(body) else body
+
+
+def info_full_text():
+    """Собрать весь паспорт одним текстовым сообщением (без кнопок)."""
+    parts = []
+    for emoji, title, body in INFO_SECTIONS:
+        parts.append(f"{emoji} <b>{title}</b>\n{section_body(body)}")
+    return "\n\n".join(parts)
+
+--- КОНЕЦ ФАЙЛА: ./bot/services/info.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/services/reports.py ---
+from datetime import datetime, timedelta
+
+from bot.exchange.market_data import market_data
+from bot.exchange.paper_exchange import paper
+from bot.strategy.learner import learner
+
+PERIODS = {
+    "daily": ("Дневной отчёт", 1),
+    "weekly": ("Недельный отчёт", 7),
+    "monthly": ("Месячный отчёт", 30),
+}
+
+
+def usd(x):
+    return f"${x:,.2f}"
+
+
+def pnl_emoji(x):
+    return "🟢" if x > 0.05 else ("🔴" if x < -0.05 else "🟡")
+
+
+async def build_report(period, tz):
+    title, days = PERIODS.get(period, PERIODS["daily"])
+    prices = await market_data.get_tickers()
+    eq = paper.equity(prices)
+    now = datetime.now(tz)
+
+    if period == "daily":
+        start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        start_dt = now - timedelta(days=days)
+    start_ts = int(start_dt.timestamp())
+
+    trades = [r for r in paper.realized
+              if not r.get("partial") and r.get("time", 0) >= start_ts]
+    wins = [r for r in trades if r["pnl"] > 0]
+    losses = [r for r in trades if r["pnl"] <= 0]
+    total_pnl = sum(r["pnl"] for r in trades)
+
+    lines = [f"📅 <b>{title}</b> · 🕐", ""]
+    free_pct = paper.usdt / eq * 100 if eq else 0
+    lines.append(f"💰 Свободно: <b>{usd(paper.usdt)}</b> ({free_pct:.0f}%)")
+    lines.append(f"🏦 Накопления: <b>{usd(paper.funding)}</b>")
+    lines.append(f"📈 Капитал: <b>{usd(eq)}</b>")
+    lines.append("")
+
+    lines.append(f"📊 <b>Сделки за период</b>: {len(trades)} (✅ {len(wins)} / ❌ {len(losses)})")
+    lines.append(f"💵 PnL: {pnl_emoji(total_pnl)} <b>{usd(total_pnl)}</b>")
+    if trades:
+        best = max(trades, key=lambda r: r["pnl_pct"])
+        worst = min(trades, key=lambda r: r["pnl_pct"])
+        lines.append(
+            f"🏆 Лучшая: <b>{best['symbol'][:-4]}</b> · <i>{best.get('sector', 'Other')}</i> · "
+            f"{pnl_emoji(best['pnl_pct'])} {best['pnl_pct']:+.1f}%"
+        )
+        lines.append(
+            f"📉 Худшая: <b>{worst['symbol'][:-4]}</b> · <i>{worst.get('sector', 'Other')}</i> · "
+            f"{pnl_emoji(worst['pnl_pct'])} {worst['pnl_pct']:+.1f}%"
+        )
+    lines.append("")
+
+    # Сектора за период
+    sector_agg = {}
+    for r in trades:
+        sector_agg.setdefault(r.get("sector", "Other"), []).append(r["pnl_pct"])
+    lines.append("🧭 <b>Сектора за период</b>")
+    if sector_agg:
+        rows = [(s, len(v), sum(v) / len(v)) for s, v in sector_agg.items()]
+        rows.sort(key=lambda x: x[2], reverse=True)
+        for s, cnt, avg in rows[:6]:
+            lines.append(f"   {pnl_emoji(avg)} <i>{s}</i> · {cnt} · ср. {avg:+.2f}%")
+    else:
+        lines.append("   (нет закрытых сделок)")
+    lines.append("")
+
+    # Стиль: core vs сателлиты
+    kind_agg = {}
+    for r in trades:
+        kind_agg.setdefault(r.get("kind", "core"), []).append(r["pnl_pct"])
+    lines.append("🏛/🛰 <b>Стиль за период</b>")
+    if kind_agg:
+        for k, label in (("core", "🏛 Core"), ("satellite", "🛰 Сателлиты")):
+            v = kind_agg.get(k)
+            if v:
+                avg = sum(v) / len(v)
+                lines.append(f"   {pnl_emoji(avg)} {label} · {len(v)} · ср. {avg:+.2f}%")
+    else:
+        lines.append("   (нет закрытых сделок)")
+    lines.append(f"   🛰 Лимит сателлитов сейчас: <b>{learner.satellite_limit():.0f}%</b>")
+    lines.append("")
+
+    # Открытые позиции
+    if paper.positions:
+        lines.append(f"📦 <b>Открытые позиции ({len(paper.positions)})</b>")
+        for sym, pos in paper.positions.items():
+            last = prices.get(sym, {}).get("last", 0)
+            pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] and last else 0
+            kind = "🛰" if pos.get("kind") == "satellite" else "🏛"
+            sector = pos.get("sector") or "Other"
+            tp1 = " · 🔥TP1" if pos.get("tp1_done") else ""
+            lines.append(
+                f"   {kind} <b>{sym[:-4]}</b> · <i>{sector}</i> · "
+                f"{pnl_emoji(pnl_pct)} {pnl_pct:+.1f}%{tp1}"
+            )
+    else:
+        lines.append("📦 <b>Открытые позиции</b>: нет")
+
+    return "\n".join(lines)
+
+--- КОНЕЦ ФАЙЛА: ./bot/services/reports.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/strategy/__init__.py ---
+# пакет strategy
+
+--- КОНЕЦ ФАЙЛА: ./bot/strategy/__init__.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/strategy/indicators.py ---
+def ema(values, period):
+    if not values:
+        return []
+    k = 2 / (period + 1)
+    result = [values[0]]
+    for v in values[1:]:
+        result.append(v * k + result[-1] * (1 - k))
+    return result
+
+
+def rsi(closes, period=14):
+    if len(closes) < period + 1:
+        return 50.0
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        gains.append(max(d, 0))
+        losses.append(max(-d, 0))
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100 - 100 / (1 + rs)
+
+
+def atr(candles, period=14):
+    if len(candles) < 2:
+        return 0.0
+    trs = []
+    for i in range(1, len(candles)):
+        h, l, pc = candles[i]["high"], candles[i]["low"], candles[i - 1]["close"]
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    a = sum(trs[:period]) / min(period, len(trs))
+    for tr in trs[period:]:
+        a = (a * (period - 1) + tr) / period
+    return a
+
+--- КОНЕЦ ФАЙЛА: ./bot/strategy/indicators.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/strategy/learner.py ---
+import json
+import time
+from pathlib import Path
+
+from loguru import logger
+
+from bot.core.remote_state import download_state, upload_state
+
+STATE_FILE = Path("storage/learner.json")
+REMOTE_PATH = "learner.json"
+
+KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "news_pos", "hype", "indep"]
+
+SAT_LIMIT_BASE = 20.0
+SAT_LIMIT_MAX = 30.0
+SAT_LIMIT_MIN = 10.0
+SAT_SIZE_BASE = 2.0
+
+TIERS = ["TOP20", "MID", "SMALL", "MICRO"]
+
+
+class Learner:
+    """Самообучение: веса + адаптив + сектора + тиры + типы выходов + стиль."""
+
+    def __init__(self):
+        self.weights = {k: 1.0 for k in KEYS}
+        self.results = []
+        self.threshold_adj = 0.0
+        self.sector_stats = {}
+        self.tier_stats = {}
+        self.exit_stats = {}
+        self.kind_stats = {}
+        self._last_upload = 0.0
+        self._load()
+
+    def _load(self):
+        data = None
+        try:
+            if STATE_FILE.exists():
+                data = json.loads(STATE_FILE.read_text())
+        except Exception as e:
+            logger.error(f"learner load error: {e}")
+        if data is None:
+            data = download_state(REMOTE_PATH)
+        if data:
+            self.weights.update(data.get("weights", {}))
+            self.results = data.get("results", [])
+            self.threshold_adj = float(data.get("threshold_adj", 0))
+            self.sector_stats = data.get("sector_stats", {})
+            self.tier_stats = data.get("tier_stats", {})
+            self.exit_stats = data.get("exit_stats", {})
+            self.kind_stats = data.get("kind_stats", {})
+            logger.info("learner: опыт загружен")
+
+    def save(self):
+        payload = {
+            "weights": self.weights,
+            "results": self.results[-200:],
+            "threshold_adj": self.threshold_adj,
+            "sector_stats": {k: v[-50:] for k, v in self.sector_stats.items()},
+            "tier_stats": {k: v[-50:] for k, v in self.tier_stats.items()},
+            "exit_stats": {k: v[-50:] for k, v in self.exit_stats.items()},
+            "kind_stats": {k: v[-50:] for k, v in self.kind_stats.items()},
+        }
+        try:
+            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            STATE_FILE.write_text(json.dumps(payload, ensure_ascii=False))
+        except Exception as e:
+            logger.error(f"learner save error: {e}")
+        if time.time() - self._last_upload > 60:
+            self._last_upload = time.time()
+            upload_state(REMOTE_PATH, payload)
+
+    def weight(self, key):
+        return self.weights.get(key, 1.0)
+
+    def record(self, keys, win, pnl_pct=0.0, sector=None, tier=None,
+               exit_type=None, runner_bonus=0.0, kind=None, soft=False):
+        """Одна запись на позицию. soft=True → половинный штраф при убытке."""
+        self.results.append(1 if win else 0)
+        self.results = self.results[-200:]
+        if sector:
+            hist = self.sector_stats.setdefault(sector, [])
+            hist.append(round(pnl_pct, 2))
+            self.sector_stats[sector] = hist[-50:]
+        if tier:
+            hist = self.tier_stats.setdefault(tier, [])
+            hist.append(round(pnl_pct, 2))
+            self.tier_stats[tier] = hist[-50:]
+        if exit_type:
+            eh = self.exit_stats.setdefault(exit_type, [])
+            eh.append(round(pnl_pct, 2))
+            self.exit_stats[exit_type] = eh[-50:]
+        if kind:
+            kh = self.kind_stats.setdefault(kind, [])
+            kh.append(round(pnl_pct, 2))
+            self.kind_stats[kind] = kh[-50:]
+
+        abs_pnl = abs(pnl_pct)
+        if abs_pnl >= 3.0:
+            delta = 0.10 if win else -0.10
+        elif abs_pnl >= 1.0:
+            delta = 0.05 if win else -0.05
+        else:
+            delta = 0.03 if win else -0.03
+        if runner_bonus > 5.0:
+            delta += 0.05
+        if soft and not win:
+            delta *= 0.5
+
+        for k in keys:
+            if k in self.weights:
+                self.weights[k] = round(min(1.7, max(0.3, self.weights[k] + delta)), 3)
+
+        # ЭКВАЛАЙЗЕР: сумма весов постоянна (= числу сигналов), поэтому веса —
+        # это «относительная важность». Наказанный сигнал проседает, остальные
+        # пропорционально приподнимаются; «все в пол» самовосстанавливается.
+        target = float(len(self.weights))          # 9.0
+        cur = sum(self.weights.values())
+        if cur > 0:
+            k = target / cur
+            self.weights = {
+                w: round(min(1.7, max(0.3, v * k)), 3)
+                for w, v in self.weights.items()
+            }
+
+        self.save()
+        logger.info(f"learner: win={win} pnl={pnl_pct:+.2f}% delta={delta:+.3f} "
+                    f"exit={exit_type} runner={runner_bonus:.1f}% soft={soft} "
+                    f"keys={keys} sector={sector} tier={tier} kind={kind}")
+
+    def sector_bias(self, sector):
+        hist = self.sector_stats.get(sector) or []
+        if len(hist) < 3:
+            return 0.0
+        wr = sum(1 for p in hist if p > 0) / len(hist)
+        avg = sum(hist) / len(hist)
+        bias = (wr - 0.5) + max(-0.5, min(0.5, avg * 0.25))
+        return round(max(-1.0, min(1.0, bias)), 2)
+
+    def tier_bias(self, tier):
+        hist = self.tier_stats.get(tier) or []
+        if len(hist) < 5:
+            return 0.0
+        wr = sum(1 for p in hist if p > 0) / len(hist)
+        avg = sum(hist) / len(hist)
+        bias = (wr - 0.5) + max(-0.25, min(0.25, avg * 0.25))
+        return round(max(-0.5, min(0.5, bias)), 2)
+
+    def satellite_limit(self):
+        core = self.kind_stats.get("core") or []
+        sat = self.kind_stats.get("satellite") or []
+        if len(core) >= 3 and len(sat) >= 3:
+            avg_core = sum(core) / len(core)
+            avg_sat = sum(sat) / len(sat)
+            if avg_sat > avg_core + 0.5:
+                return SAT_LIMIT_MAX
+            if avg_sat < avg_core - 0.5:
+                return SAT_LIMIT_MIN
+        return SAT_LIMIT_BASE
+
+    def satellite_size_pct(self):
+        return round(SAT_SIZE_BASE * self.satellite_limit() / SAT_LIMIT_BASE, 2)
+
+    def reset(self):
+        self.weights = {k: 1.0 for k in KEYS}
+        self.results = []
+        self.threshold_adj = 0.0
+        self.sector_stats = {}
+        self.tier_stats = {}
+        self.exit_stats = {}
+        self.kind_stats = {}
+        self.save()
+        logger.info("learner: опыт сброшен")
+
+    def reset_stats(self):
+        self.results = []
+        self.threshold_adj = 0.0
+        self.sector_stats = {}
+        self.tier_stats = {}
+        self.exit_stats = {}
+        self.kind_stats = {}
+        self.save()
+        logger.info("learner: статистика сброшена (веса сохранены)")
+
+    def winrate(self):
+        last = self.results[-20:]
+        return (sum(last) / len(last), len(last)) if last else (0.0, 0)
+
+    def risk_mode(self, profit_factor, max_dd_pct, total_trades=0):
+        adj = 0.0
+        enough = total_trades >= 5
+        if enough and profit_factor is not None:
+            if profit_factor < 0.5:
+                adj += 1.5
+            elif profit_factor < 1.0:
+                adj += 0.5
+            elif profit_factor > 1.5 and max_dd_pct and max_dd_pct < 8:
+                adj -= 0.5
+        if max_dd_pct and max_dd_pct > 15:
+            adj += 0.5
+        if adj >= 1.5:
+            mode = "STRICT"
+        elif adj >= 0.5:
+            mode = "CAUTIOUS"
+        elif adj <= -0.5:
+            mode = "AGGRESSIVE"
+        else:
+            mode = "NORMAL"
+        return mode, adj
+
+    def update_threshold(self, profit_factor, max_dd_pct, total_trades=0):
+        _, dyn_adj = self.risk_mode(profit_factor, max_dd_pct, total_trades)
+        wr_adj = 0.0
+        if total_trades >= 10:
+            last = self.results[-20:]
+            if last:
+                wr = sum(last) / len(last)
+                if wr < 0.35:
+                    wr_adj = 0.5
+        self.threshold_adj = dyn_adj + wr_adj
+        self.save()
+        return self.threshold_adj
+
+    def summary(self):
+        wr, n = self.winrate()
+        top = sorted(self.weights.items(), key=lambda kv: kv[1], reverse=True)
+        txt = ", ".join(f"{k} {v:.2f}" for k, v in top[:3])
+        return f"wr {wr:.0%} ({n}) · топ: {txt} · строгость {self.threshold_adj:+.1f}"
+
+
+learner = Learner()
+--- КОНЕЦ ФАЙЛА: ./bot/strategy/learner.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/strategy/scanner.py ---
+import time
+
+import httpx
+from loguru import logger
+
+from bot.exchange.market_data import market_data
+from bot.strategy.indicators import ema, rsi, atr
+from bot.strategy.learner import learner
+from bot.strategy.shadow import shadow
+from bot.news.cmc import (get_coin_name, get_sectors_for_pool,
+                          get_ranks_for_pool, tier_of, TIER_EMOJI)
+from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sentiment
+
+SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
+FILTERED_BY_NEWS = []
+
+SAT_ATR_PCT = 1.2
+SCORE_MAX = 10.0
+
+_instruments_cache = {"data": None, "ts": 0}
+
+STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
+                "USD1", "USDD", "EUR", "EURT", "AEUR", "USDT",
+                "RLUSD", "PYUSD", "EURI", "USDS", "USD0", "FRAX",
+                "LUSD", "GUSD", "XUSD", "USDX", "CUSD", "SUSD"}
+
+
+def is_tradable(symbol):
+    if not symbol.endswith("USDT"):
+        return False
+    base = symbol[:-4]
+    if base in STABLE_BASES:
+        return False
+    if base.endswith(("3L", "3S", "5L", "5S")):
+        return False
+    return True
+
+
+def raw_max_score(regime):
+    """Теоретический максимум «сырого» скора при ТЕКУЩИХ весах (без режимного бонуса)."""
+    m = sum(learner.weight(k) for k in
+            ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
+    m += learner.weight("indep")
+    m += max(learner.weight("news_pos"), learner.weight("hype"))
+    m += 1.0   # потолок секторного бонуса
+    m += 0.5   # потолок тир-бонуса
+    return m
+
+
+def threshold(regime):
+    """Порог на независимой 10-балльной шкале; строгость рынка — только здесь."""
+    base = {"bull": 5.0, "neutral": 6.0, "bear": 7.0}.get(regime, 6.0)
+    thr = base + learner.threshold_adj + shadow.threshold_nudge()
+    return round(max(min(thr, SCORE_MAX - 0.5), SCORE_MAX * 0.5), 2)
+
+
+def _returns(closes):
+    return [(b - a) / a for a, b in zip(closes, closes[1:]) if a]
+
+
+def _corr(a, b):
+    n = min(len(a), len(b))
+    if n < 10:
+        return 0.0
+    a, b = a[-n:], b[-n:]
+    ma, mb = sum(a) / n, sum(b) / n
+    cov = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    va = sum((x - ma) ** 2 for x in a)
+    vb = sum((y - mb) ** 2 for y in b)
+    if va <= 0 or vb <= 0:
+        return 0.0
+    return cov / (va * vb) ** 0.5
+
+
+async def get_regime():
+    # 1. Получаем макро-тренд по BTC
+    candles = await market_data.get_kline("BTCUSDT", "60", 250)
+    if len(candles) < 60:
+        return "neutral", {}
+    closes = [c["close"] for c in candles]
+    e50, e200, last = ema(closes, 50)[-1], ema(closes, 200)[-1], closes[-1]
+    
+    if last > e50 > e200:
+        regime = "bull"
+    elif last < e50 < e200:
+        regime = "bear"
+    else:
+        regime = "neutral"
+
+    # 2. Оцениваем "температуру альтов" (Market Breadth), если биток спит
+    if regime == "neutral":
+        tickers = await market_data.get_tickers()
+        if tickers:
+            tradable = [s for s, t in tickers.items() if is_tradable(s) and t["quote_volume"] >= 500_000]
+            if tradable:
+                # Считаем процент альтов, которые выросли более чем на 3% за 24 часа
+                green_alts = sum(1 for s in tradable if tickers[s]["change_pct"] > 3.0)
+                breadth_pct = (green_alts / len(tradable)) * 100
+                
+                # Если больше 25% ликвидных альтов уверенно растут - это альтсезон (локальный)
+                if breadth_pct >= 25.0:
+                    regime = "bull"
+                    logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые. Режим принудительно переведен в 'bull' (Альтсезон).")
+                else:
+                    logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые. Режим остается 'neutral'.")
+
+    return regime, {"btc": last, "ema50": e50, "ema200": e200}
+
+
+async def fetch_new_listings():
+    now = time.time()
+    if _instruments_cache["data"] is not None and now - _instruments_cache["ts"] < 3600:
+        raw = _instruments_cache["data"]
+    else:
+        raw = []
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                cursor = ""
+                for page in range(5):
+                    params = {"category": "spot", "limit": 1000}
+                    if cursor:
+                        params["cursor"] = cursor
+                    r = await c.get("https://api.bybit.com/v5/market/instruments-info", params=params)
+                    if r.status_code != 200:
+                        logger.error(f"Bybit API returned status {r.status_code}")
+                        break
+                    try:
+                        data = r.json()
+                    except Exception as e:
+                        logger.error(f"Bybit API non-JSON response: {e}")
+                        break
+                    result = data.get("result", {})
+                    items = result.get("list", [])
+                    if not items:
+                        break
+                    raw += items
+                    cursor = result.get("nextPageCursor", "") or ""
+                    if not cursor:
+                        break
+            _instruments_cache["data"], _instruments_cache["ts"] = raw, now
+            logger.info(f"Instruments loaded: {len(raw)} spot symbols")
+        except Exception as e:
+            logger.error(f"Bybit instruments error: {e}")
+            raw = []
+
+    now_ms = int(now * 1000)
+    out = []
+    for ins in raw:
+        sym = ins.get("symbol", "")
+        if not sym.endswith("USDT"):
+            continue
+        if ins.get("status", "") != "Trading":
+            continue
+        try:
+            launch = int(ins.get("launchTime", 0) or 0)
+        except Exception:
+            launch = 0
+        if launch <= 0:
+            continue
+        out.append((sym, (now_ms - launch) / 3600000))
+    return out
+def score_symbol(candles, t, regime):
+    closes = [c["close"] for c in candles]
+    last = closes[-1]
+    e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
+    e12, e26 = ema(closes, 12)[-1], ema(closes, 26)[-1]
+    r = rsi(closes)
+    vols = [c["volume"] for c in candles]
+    base_vol = sum(vols[-21:-1]) / 20 if len(vols) > 21 else (sum(vols) / max(1, len(vols)))
+    vol_ratio = vols[-1] / base_vol if base_vol else 1.0
+
+    w = shadow.signal_windows()
+    score, reasons, keys = 0.0, [], []
+    if last > e50: score += learner.weight("ema50"); reasons.append("цена выше EMA50"); keys.append("ema50")
+    if e21 > e50: score += learner.weight("ema21"); reasons.append("EMA21>EMA50"); keys.append("ema21")
+    if e12 > e26: score += learner.weight("impulse"); reasons.append("импульс роста"); keys.append("impulse")
+    if 40 <= r <= w["rsi_hi"]: 
+        score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
+    elif r > w["rsi_hi"]: 
+        score -= 1.5; reasons.append(f"перегрев RSI {r:.0f}") # Штраф за покупку на хаях
+
+    if vol_ratio > w["vol_lo"]: score += learner.weight("volume"); reasons.append(f"объём x{vol_ratio:.1f}"); keys.append("volume")
+    
+    if 0 < t["change_pct"] < w["chg_hi"]: 
+        score += learner.weight("chg24h"); reasons.append(f"24ч +{t['change_pct']:.1f}%"); keys.append("chg24h")
+    elif t["change_pct"] >= w["chg_hi"]: 
+        score -= 1.0; reasons.append(f"памп +{t['change_pct']:.1f}% (уже поздно)") # Штраф за улетевший поезд
+    if t["quote_volume"] < 500_000: score -= 1
+
+    signal_values = {"rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio}
+    return score, reasons, keys, signal_values
+
+
+def normalize(raw, regime):
+    """Сырой скор → 10-балльная шкала (как в scan)."""
+    rm = raw_max_score(regime)
+    if rm <= 0:
+        return 0.0
+    return round(max(0.0, min(SCORE_MAX, raw / rm * SCORE_MAX)), 2)
+
+
+async def live_score(sym, t, regime, news_items=None):
+    """Оценка ТОЙ ЖЕ линейкой, что и scan: свечи 120, indep, сектор/тир,
+    новости/хайп, нормализация."""
+    candles = await market_data.get_kline(sym, "15", 120)
+    if len(candles) < 60:
+        return None, candles
+    raw, _, _, _ = score_symbol(candles, t, regime)
+
+    btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
+    btc_ret = _returns([c["close"] for c in btc_candles])
+    corr = _corr(_returns([c["close"] for c in candles]), btc_ret)
+    if corr > 0.85 and regime == "neutral":
+        raw -= 1
+    elif corr < 0.45:
+        raw += learner.weight("indep")
+
+    base = sym[:-4]
+    sectors_map = await get_sectors_for_pool([base])
+    ranks_map = await get_ranks_for_pool([base])
+    sb = learner.sector_bias(sectors_map.get(base, "Other"))
+    if sb:
+        raw += sb
+    tb = learner.tier_bias(tier_of(ranks_map.get(base)))
+    if tb:
+        raw += tb
+
+    if news_items is not None:
+        name = await get_coin_name(base)
+        neg, pos, mentions, _ = check_sentiment(news_items, [base, name])
+        if pos > neg:
+            raw += learner.weight("news_pos")
+        elif mentions >= 2:
+            raw += learner.weight("hype")
+
+    return normalize(raw, regime), candles
+async def scan(regime, tickers, limit=20):  # УВЕЛИЧИЛИ ЛИМИТ ОЧЕРЕДИ
+    tradable = [s for s, t in tickers.items()
+                if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
+
+    by_vol = sorted(tradable, key=lambda s: tickers[s]["quote_volume"], reverse=True)[:40]
+    by_chg = sorted([s for s in tradable if 0 < tickers[s]["change_pct"] < 25],
+                    key=lambda s: tickers[s]["change_pct"], reverse=True)[:20]
+
+    by_momentum = []
+    for sym in tradable[:50]:
+        candles = await market_data.get_kline(sym, "60", 168)
+        if len(candles) >= 100:
+            chg_7d = (candles[-1]["close"] - candles[0]["close"]) / candles[0]["close"] * 100
+            if 5 < chg_7d < 50:
+                by_momentum.append((sym, chg_7d))
+    by_momentum = [s for s, _ in sorted(by_momentum, key=lambda x: x[1], reverse=True)][:15]
+
+    by_volatility = []
+    for sym in tradable[:50]:
+        candles = await market_data.get_kline(sym, "15", 60)
+        if len(candles) >= 30:
+            a = atr(candles)
+            last = candles[-1]["close"]
+            atr_pct = (a / last) * 100 if last else 0
+            if atr_pct > 2.5:
+                by_volatility.append((sym, atr_pct))
+    by_volatility = [s for s, _ in sorted(by_volatility, key=lambda x: x[1], reverse=True)][:10]
+
+    sources = await fetch_new_listings()
+    try:
+        rss = await fetch_listings_cache()
+        now_ts = int(time.time())
+        sources += [(l["symbol"], (now_ts - l["ts"]) / 3600) for l in rss]
+    except Exception as e:
+        logger.debug(f"RSS listings unavailable: {e}")
+
+    by_listings = []
+    seen = set()
+    for sym, age_h in sorted(sources, key=lambda x: x[1]):
+        if sym in seen or not (24 <= age_h <= 336):
+            continue
+        seen.add(sym)
+        if sym in tickers and is_tradable(sym) and tickers[sym]["quote_volume"] >= 500_000:
+            by_listings.append((sym, age_h))
+            logger.info(f"NEW LISTING: {sym} ({age_h:.1f}h old)")
+    by_listings = by_listings[:10]
+
+    pool = list(dict.fromkeys(by_vol + by_chg + by_momentum + by_volatility +
+                              [s for s, _ in by_listings]))
+    pool_bases = list({s[:-4] for s in pool})
+
+    sectors_map = await get_sectors_for_pool(pool_bases)
+    ranks_map = await get_ranks_for_pool(pool_bases)
+
+    news_items = await fetch_news_cache()
+    btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
+    btc_ret = _returns([c["close"] for c in btc_candles])
+
+    raw_max = raw_max_score(regime)
+
+    scored = []
+    for sym in pool:
+        candles = await market_data.get_kline(sym, "15", 120)
+        if len(candles) < 60:
+            continue
+        a = atr(candles)
+        last_price = tickers[sym]["last"]
+        atr_pct = (a / last_price) * 100 if last_price else 0
+        if a <= 0 or atr_pct < 0.25:
+            continue
+        score, reasons, keys, signal_values = score_symbol(candles, tickers[sym], regime)
+
+        corr = _corr(_returns([c["close"] for c in candles]), btc_ret)
+        if corr > 0.85 and regime == "neutral":
+            score -= 1
+            reasons.append(f"зеркало BTC (corr {corr:.2f})")
+        elif corr < 0.45:
+            score += learner.weight("indep")
+            reasons.append(f"независима от BTC (corr {corr:.2f})")
+            keys.append("indep")
+
+        kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
+        base = sym[:-4]
+        sector = sectors_map.get(base, "Other")
+        tier = tier_of(ranks_map.get(base))
+
+        sb = learner.sector_bias(sector)
+        if sb:
+            score += sb
+            reasons.append(f"сектор {sector}: {sb:+.2f}")
+        tb = learner.tier_bias(tier)
+        if tb:
+            score += tb
+            reasons.append(f"тир {TIER_EMOJI[tier]}: {tb:+.2f}")
+
+        name = await get_coin_name(base)
+        neg, pos, mentions, _ = check_sentiment(news_items, [base, name])
+        
+        # Токсичный фон: негатива больше позитива И он составляет не менее 20% от всех новостей по монете
+        is_toxic = neg > 0 and neg > pos and neg >= (mentions * 0.2)
+        
+        if is_toxic:
+            logger.info(f"{sym}: пропущен из-за негативного новостного фона ({neg} нег. из {mentions} упом.)")
+            # Передаем строку формата "2/10", чтобы красиво выводилось по команде /news
+            FILTERED_BY_NEWS.append({"symbol": sym, "neg_count": f"{neg}/{mentions}", "time": int(time.time())})
+            FILTERED_BY_NEWS[:] = FILTERED_BY_NEWS[-10:]
+            continue
+        if pos > neg:
+            score += learner.weight("news_pos")
+            reasons.append(f"позитивный новостной фон ({pos})")
+            keys.append("news_pos")
+        elif mentions >= 2:
+            score += learner.weight("hype")
+            reasons.append(f"медиа-хайп ({mentions} упом.)")
+            keys.append("hype")
+
+        rm = raw_max
+        score10 = (score / rm * SCORE_MAX) if rm > 0 else 0.0
+        score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)
+        
+        # Определяем "Ракету" (Моментум)
+        sv = signal_values
+        is_momentum = (sv.get("rsi", 0) > 68 and sv.get("volume", 0) > 2.0 and "impulse" in keys)
+
+        scored.append({"symbol": sym, "score": score10, "reasons": reasons,
+                       "reason_keys": keys, "atr": a, "last": last_price,
+                       "liquidity": tickers[sym]["quote_volume"],
+                       "corr": round(corr, 2), "atr_pct": round(atr_pct, 2),
+                       "kind": kind, "sector": sector, "tier": tier,
+                       "signal_values": signal_values,
+                       "is_momentum": is_momentum})
+
+    scored.sort(key=lambda c: c["score"], reverse=True)
+
+    thr = threshold(regime)
+    try:
+        shadow.observe(scored, regime, thr)
+        shadow.tick(tickers)
+        shadow.autotune()
+    except Exception as e:
+        logger.error(f"shadow error: {e}")
+
+    parts_html, parts_plain = [], []
+    for c in scored[:5]:
+        k_tag = "🛰" if c.get("kind") == "satellite" else "🏛"
+        parts_html.append(
+            f"{k_tag} <b>{c['symbol'][:-4]}</b> {TIER_EMOJI.get(c['tier'], '🐭')} · "
+            f"<i>{c['sector']}</i> · {c['score']:.1f}/{thr:g} · ₿ {c['corr']:.2f}"
+        )
+        keys_short = "+".join(c["reason_keys"][:5])
+        parts_plain.append(f"{c['symbol']} {c['score']:.1f}/{thr:g} [{keys_short}] btc{c['corr']:.2f}")
+    SCAN_SUMMARY["text"] = " | ".join(parts_html) or "сигналов нет"
+    SCAN_SUMMARY["thr"] = thr
+    SCAN_SUMMARY["ts"] = time.time()
+    logger.info(f"Scan top: {' | '.join(parts_plain) or 'сигналов нет'}")
+
+    new_set = set(s for s, _ in by_listings)
+    candidates = []
+    for c in scored:
+        if c["score"] < thr:
+            continue
+        c["is_new"] = c["symbol"] in new_set
+        candidates.append(c)
+
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    return candidates[:limit]
+
+--- КОНЕЦ ФАЙЛА: ./bot/strategy/scanner.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/strategy/shadow.py ---
+import os
+import json
+import time
+from pathlib import Path
+
+from loguru import logger
+
+from bot.core.remote_state import download_state, upload_state
+from bot.strategy.learner import learner
+
+STATE_FILE = Path(os.getenv("STORAGE_DIR", "storage")) / "shadow.json"
+REMOTE_PATH = "shadow.json"
+
+OBS_GAP = 2.0            # порог наблюдения = thr - 2
+H4 = 4 * 3600
+H24 = 24 * 3600
+PUMP_PCT = 3.0
+MAX_EPISODES = 300
+COOLDOWN = 24 * 3600
+
+
+def _band(score):
+    if score < 5:
+        return "0-5"
+    if score < 6:
+        return "5-6"
+    if score < 7:
+        return "6-7"
+    return "7+"
+
+
+class Shadow:
+    """Теневой журнал: наблюдает монеты (в т.ч. упущенные), копит агрегаты,
+    мягко тюнит порог/веса/охоту/SL. Хранит копейки данных."""
+
+    def __init__(self):
+        self.episodes = {}
+        self.agg = {}
+        self.cooldown = {}
+        self.tuning = {
+            "auto": True,
+            "thr_nudge": 0.0,
+            "hunt": -0.004, "near": -0.0015, "capture": +0.002,
+            "sl_mult": 1.0, "tp_mult": 1.0,
+            "signal_windows": {"rsi_hi": 90, "chg_hi": 30, "vol_lo": 1.3},
+        }
+        self._last_upload = 0.0
+        self._last_tune = 0.0
+        self._load()
+
+    def _load(self):
+        data = None
+        try:
+            if STATE_FILE.exists():
+                data = json.loads(STATE_FILE.read_text())
+        except Exception as e:
+            logger.error(f"shadow load error: {e}")
+        if data is None:
+            data = download_state(REMOTE_PATH)
+        if data:
+            self.episodes = data.get("episodes", {})
+            self.agg = data.get("agg", {})
+            self.cooldown = data.get("cooldown", {})
+            self.tuning.update(data.get("tuning", {}))
+            logger.info(f"shadow: загружен ({len(self.episodes)} эпизодов)")
+
+    def save(self):
+        payload = {"episodes": self.episodes, "agg": self.agg,
+                   "cooldown": self.cooldown, "tuning": self.tuning}
+        try:
+            STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            STATE_FILE.write_text(json.dumps(payload, ensure_ascii=False))
+        except Exception as e:
+            logger.error(f"shadow save error: {e}")
+        if time.time() - self._last_upload > 60:
+            self._last_upload = time.time()
+            upload_state(REMOTE_PATH, payload)
+
+    # ---------- наблюдение ----------
+    def observe(self, scored, regime, thr):
+        from bot.exchange.paper_exchange import paper
+        now = time.time()
+        obs_thr = thr - OBS_GAP
+        for c in scored:
+            sym = c["symbol"]
+            if sym in self.episodes:
+                ep = self.episodes[sym]
+                if c["score"] > ep["max_score"]:
+                    ep["max_score"] = c["score"]
+                continue
+            if c["score"] < obs_thr:
+                continue
+            if now < self.cooldown.get(sym, 0):
+                continue
+            if len(self.episodes) >= MAX_EPISODES:
+                continue
+            traded = (sym in paper.positions or
+                      any(o["symbol"] == sym for o in paper.orders))
+            self.episodes[sym] = {
+                "ts": now, "price": c["last"], "max_score": c["score"],
+                "regime": regime, "sector": c.get("sector"), "tier": c.get("tier"),
+                "keys": c.get("reason_keys", []), "traded": bool(traded),
+                "hi": c["last"], "lo": c["last"], "p4": None,
+                "signal_values": c.get("signal_values", {}),
+            }
+
+    def tick(self, tickers):
+        now = time.time()
+        for sym, ep in list(self.episodes.items()):
+            t = tickers.get(sym)
+            if not t:
+                continue
+            last = t["last"]
+            ep["hi"] = max(ep["hi"], last)
+            ep["lo"] = min(ep["lo"], last)
+            age = now - ep["ts"]
+            if ep["p4"] is None and age >= H4:
+                ep["p4"] = last
+            if age >= H24:
+                self._close(sym, ep, last)
+        self.save()
+
+    def _close(self, sym, ep, last):
+        dec = ep["price"]
+        self.episodes.pop(sym, None)
+        self.cooldown[sym] = time.time() + COOLDOWN
+        if dec <= 0:
+            return
+        move24 = (last - dec) / dec * 100
+        move4 = ((ep["p4"] or last) - dec) / dec * 100
+        mae = (ep["lo"] - dec) / dec * 100
+        mfe = (ep["hi"] - dec) / dec * 100
+        key = f"{ep['regime']}|{_band(ep['max_score'])}"
+        a = self.agg.setdefault(key, {
+            "n": 0, "sum4": 0.0, "sum24": 0.0, "pumps4": 0, "pumps24": 0,
+            "traded": 0, "sum_mae": 0.0, "sum_mfe": 0.0, "sum_pull": 0.0,
+            "keys_pump": {}, "keys_all": {},
+        })
+        a["n"] += 1
+        a["sum4"] += move4
+        a["sum24"] += move24
+        if move4 >= PUMP_PCT:
+            a["pumps4"] += 1
+        if move24 >= PUMP_PCT:
+            a["pumps24"] += 1
+            for k in ep["keys"]:
+                a["keys_pump"][k] = a["keys_pump"].get(k, 0) + 1
+            sv = ep.get("signal_values", {})
+            for k, v in sv.items():
+                a.setdefault("signal_values_pump", {}).setdefault(k, []).append(v)
+        for k in ep["keys"]:
+            a["keys_all"][k] = a["keys_all"].get(k, 0) + 1
+        if ep["traded"]:
+            a["traded"] += 1
+        a["sum_mae"] += mae
+        a["sum_mfe"] += mfe
+        a["sum_pull"] += mae   # pullback ≈ макс. просадка после сигнала
+
+    # ---------- автотюн (раз в час) ----------
+    def autotune(self):
+        if not self.tuning["auto"]:
+            return
+        now = time.time()
+        if now - self._last_tune < 3600:
+            return
+        self._last_tune = now
+
+        # Калибровка порога: если под порогом копятся пампы — мягко ослабляем.
+        nudge = 0.0
+        base = {"bull": 5.0, "neutral": 6.5, "bear": 8.0}
+        for reg, b in base.items():
+            a = self.agg.get(f"{reg}|{_band(b - 1.0)}")
+            if a and a["n"] >= 10:
+                missed = a["n"] - a["traded"]
+                if missed >= 5:
+                    pump_rate = a["pumps24"] / a["n"]
+                    avg = a["sum24"] / a["n"]
+                    if pump_rate >= 0.3 and avg >= 2.0:
+                        nudge -= 0.25
+        self.tuning["thr_nudge"] = round(max(-0.5, min(0.5, nudge)), 2)
+
+        # Охота: глубина = ~60% типичного отката.
+        pull = self._avg("sum_pull")
+        if pull is not None:
+            self.tuning["hunt"] = round(max(-0.01, min(-0.002, pull / 100 * 0.6)), 4)
+
+        # SL: если победители терпят просадку — чуть расширяем.
+        sm = self._avg("sum_mae")
+        if sm is not None:
+            self.tuning["sl_mult"] = round(max(0.8, min(1.5, 1.0 + abs(sm) / 100 * 0.3)), 2)
+
+        self._apply_weight_lift()
+        self._calibrate_signal_windows()
+        self.save()
+        logger.info(f"shadow autotune: {self.tuning}")
+
+    def _apply_weight_lift(self):
+        kp, ka = {}, {}
+        for a in self.agg.values():
+            for k, v in a["keys_pump"].items():
+                kp[k] = kp.get(k, 0) + v
+            for k, v in a["keys_all"].items():
+                ka[k] = ka.get(k, 0) + v
+        total_pump = sum(kp.values()) or 1
+        total_all = sum(ka.values()) or 1
+        base_rate = total_pump / total_all
+        for k in list(learner.weights):
+            if ka.get(k, 0) >= 10 and base_rate > 0:
+                lift = (kp.get(k, 0) / ka.get(k, 0)) / base_rate
+                if lift > 1.2:
+                    learner.weights[k] = round(min(1.7, learner.weights[k] + 0.05), 3)
+                elif lift < 0.8:
+                    learner.weights[k] = round(max(0.3, learner.weights[k] - 0.05), 3)
+        learner.save()
+
+
+    def _calibrate_signal_windows(self):
+        """Калибровка окон сигналов (RSI, chg24h, volume) по распределению у пампов."""
+        pump_values = {"rsi": [], "chg24h": [], "volume": []}
+        for a in self.agg.values():
+            sv = a.get("signal_values_pump", {})
+            for k in pump_values:
+                pump_values[k].extend(sv.get(k, []))
+        
+        if len(pump_values["rsi"]) < 50:
+            return
+        
+        w = self.tuning["signal_windows"]
+        
+        rsi_sorted = sorted(pump_values["rsi"])
+        rsi_p90 = rsi_sorted[int(len(rsi_sorted) * 0.9)]
+        target_rsi = max(80, min(95, round(rsi_p90)))
+        w["rsi_hi"] = int(round(w["rsi_hi"] * 0.8 + target_rsi * 0.2))
+        
+        chg_sorted = sorted(pump_values["chg24h"])
+        chg_p90 = chg_sorted[int(len(chg_sorted) * 0.9)]
+        target_chg = max(20, min(50, round(chg_p90)))
+        w["chg_hi"] = int(round(w["chg_hi"] * 0.8 + target_chg * 0.2))
+        
+        vol_sorted = sorted(pump_values["volume"])
+        vol_p10 = vol_sorted[int(len(vol_sorted) * 0.1)]
+        target_vol = max(1.0, min(3.0, round(vol_p10, 1)))
+        w["vol_lo"] = round(w["vol_lo"] * 0.8 + target_vol * 0.2, 1)
+        
+        logger.info(f"shadow windows: rsi≤{w['rsi_hi']} chg≤{w['chg_hi']} vol≥{w['vol_lo']}")
+
+    def signal_windows(self):
+        return self.tuning.get("signal_windows", {"rsi_hi": 90, "chg_hi": 30, "vol_lo": 1.3})
+    
+
+    def _avg(self, field, min_n=10):
+        tn = sum(a["n"] for a in self.agg.values())
+        ts = sum(a[field] for a in self.agg.values())
+        return ts / tn if tn >= min_n else None
+
+    # ---------- геттеры ----------
+    def threshold_nudge(self):
+        return self.tuning["thr_nudge"] if self.tuning["auto"] else 0.0
+
+    def hunt(self):
+        return self.tuning["hunt"]
+
+    def near(self):
+        return self.tuning["near"]
+
+    def capture(self):
+        return self.tuning["capture"]
+
+    def sl_mult(self):
+        return self.tuning["sl_mult"] if self.tuning["auto"] else 1.0
+
+    def tp_mult(self):
+        return self.tuning["tp_mult"] if self.tuning["auto"] else 1.0
+
+    def set_auto(self, on):
+        self.tuning["auto"] = bool(on)
+        self.save()
+        return self.tuning["auto"]
+
+    # ---------- вывод ----------
+    def learn_lines(self):
+        out = ["👁 <b>Теневой журнал</b> · упущенные возможности (24ч)"]
+        out.append(f"   автотюн: {'🟢 вкл' if self.tuning['auto'] else '🔴 выкл'} · "
+                   f"эпизодов: {len(self.episodes)}")
+        shown = False
+        for key in sorted(self.agg):
+            a = self.agg[key]
+            if a["n"] < 3:
+                continue
+            reg, band = key.split("|")
+            avg = a["sum24"] / a["n"]
+            out.append(f"   {reg} · {band}: {a['n']} набл. · ср. {avg:+.1f}% · "
+                       f"пампов {a['pumps24']} · взяли {a['traded']}")
+            shown = True
+        if not shown:
+            out.append("   (накапливается)")
+        t = self.tuning
+        w = t.get("signal_windows", {})
+        out.append(f"   тюнинг: порог {t['thr_nudge']:+.2f} · охота {t['hunt']*100:+.2f}% · "
+                   f"SL ×{t['sl_mult']:.2f}")
+        out.append(f"   окна: RSI ≤{w.get('rsi_hi', 90)} · chg ≤{w.get('chg_hi', 30)}% · "
+                   f"vol ≥{w.get('vol_lo', 1.3)}×")
+        return out
+
+    def stats_text(self):
+        return "\n".join(self.learn_lines())
+
+
+shadow = Shadow()
+
+--- КОНЕЦ ФАЙЛА: ./bot/strategy/shadow.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/strategy/sizing.py ---
+TIERS = [
+    (150, 5, 30),
+    (250, 10, 50),
+    (500, 15, 75),
+    (1000, 25, 120),
+    (2500, 40, 200),
+    (5000, 75, 350),
+    (10000, 125, 600),
+]
+
+RISK_PER_TRADE_PCT = 1.0
+SAT_SIZE_PCT = 2.0   # базовый размер сателлита (факт приходит через sat_size_pct)
+SAT_RISK_PCT = 0.5
+
+
+def tier_limits(equity):
+    for bound, mn, mx in TIERS:
+        if equity <= bound:
+            return mn, mx
+    return max(150.0, equity * 0.008), equity * 0.02
+
+
+def portfolio_limits(equity):
+    """Адаптивные лимиты НА СЕКТОР (включая Other) в зависимости от баланса.
+    Общее число позиций НЕ ограничено — только свободными средствами
+    и размером позиции (buy_size) + лимитом сателлитов."""
+    if equity <= 150:
+        return 2, 2
+    if equity <= 250:
+        return 3, 2
+    if equity <= 500:
+        return 4, 3
+    if equity <= 1000:
+        return 6, 8
+    if equity <= 2500:
+        return 8, 10
+    if equity <= 5000:
+        return 10, 12
+    return 12, 15
+
+
+def kelly_multiplier(realized):
+    """Half-Kelly по истории сделок. None — мало данных (используем базовый размер)."""
+    if len(realized) < 10:
+        return None
+    wins = [r["pnl"] for r in realized if r["pnl"] > 0]
+    losses = [r["pnl"] for r in realized if r["pnl"] <= 0]
+    if not wins or not losses:
+        return None
+    p = len(wins) / len(realized)
+    avg_win = sum(wins) / len(wins)
+    avg_loss = abs(sum(losses) / len(losses))
+    b = avg_win / avg_loss if avg_loss else 0
+    if b <= 0:
+        return 0.0
+    kelly = (b * p - (1 - p)) / b
+    return round(max(0.0, min(kelly * 0.5, 1.0)), 3)
+
+
+def buy_size(equity, score, liquidity, free_usdt, sl_dist_pct=1.0,
+             kind="core", realized=None, sat_size_pct=2.0):
+    # --- САТЕЛЛИТ: адаптивный размер (приходит из learner), широкий стоп ---
+    if kind == "satellite":
+        size = equity * sat_size_pct / 100
+        if sl_dist_pct > 0:
+            size = min(size, equity * SAT_RISK_PCT / sl_dist_pct)
+        size = min(size, free_usdt * 0.95)
+        return round(size, 2)
+
+    # --- CORE: сетка по equity + сила сигнала + Kelly ---
+    lo, hi = tier_limits(equity)
+    strength = max(0.0, min(1.0, (score - 5) / 3.5))
+    size = lo + (hi - lo) * strength
+    if liquidity < 500_000:
+        size = lo
+    km = kelly_multiplier(realized or [])
+    if km is not None:
+        size *= (0.5 + 0.5 * km)
+    if sl_dist_pct > 0:
+        size_risk = equity * RISK_PER_TRADE_PCT / sl_dist_pct
+        size = min(size, size_risk)
+    size = min(size, free_usdt * 0.95, equity * 0.20)
+    return round(size, 2)
+
+--- КОНЕЦ ФАЙЛА: ./bot/strategy/sizing.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/utils/__init__.py ---
+def fmt_price(p) -> str:
+    """Красивая цена: адаптивное число знаков."""
+    p = float(p)
+    if p >= 1000:
+        return f"{p:,.2f}"
+    if p >= 1:
+        return f"{p:.4f}"
+    if p >= 0.01:
+        return f"{p:.6f}"
+    return f"{p:.8f}"
+
+
+def fmt_usdt(x) -> str:
+    return f"{float(x):.2f}"
+
+
+def fmt_pct(x) -> str:
+    return f"{float(x):+.2f}%"
+
+
+def fmt_sym(s) -> str:
+    if s.endswith("USDT"):
+        return s[:-4] + "/USDT"
+    return s
+
+--- КОНЕЦ ФАЙЛА: ./bot/utils/__init__.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/utils/format.py ---
+def fmt_price(p) -> str:
+    """Красивая цена: адаптивное число знаков."""
+    p = float(p)
+    if p >= 1000:
+        return f"{p:,.2f}"
+    if p >= 1:
+        return f"{p:.4f}"
+    if p >= 0.01:
+        return f"{p:.6f}"
+    return f"{p:.8f}"
+
+
+def fmt_usdt(x) -> str:
+    return f"{float(x):.2f}"
+
+
+def fmt_pct(x) -> str:
+    return f"{float(x):+.2f}%"
+
+
+def fmt_sym(s) -> str:
+    if s.endswith("USDT"):
+        return s[:-4] + "/USDT"
+    return s
+
+--- КОНЕЦ ФАЙЛА: ./bot/utils/format.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/core/__init__.py ---
+# пакет core
+
+--- КОНЕЦ ФАЙЛА: ./bot/core/__init__.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/core/orchestrator.py ---
+import time
+
+from loguru import logger
+
+from bot.exchange.market_data import market_data
+from bot.exchange.paper_exchange import paper
+from bot.strategy.scanner import get_regime, scan, score_symbol, threshold, live_score
+from bot.strategy.sizing import buy_size, portfolio_limits
+from bot.strategy.indicators import atr, ema
+from bot.core.state import bot_state
+from bot.news.cmc import get_coin_name, TIER_EMOJI
+from bot.news.rss_news import fetch_news_cache, check_sentiment
+from bot.strategy.learner import learner
+from bot.strategy.shadow import shadow
+from bot.utils.format import fmt_price, fmt_pct, fmt_sym
+
+CYCLE_SECONDS = 300
+FEE_PCT = 0.10
+MIN_TP_PCT = 0.60
+MIN_SL_PCT = 0.35
+MAX_SL_PCT = 3.0
+MIN_RR = 1.5
+SAT_MAX_SL_PCT = 5.0
+MIN_RR_SAT = 2.0
+MIN_EARLY_EXIT_PCT = 1.0
+_notify_cb = None
+_reconciled = False
+_last_mode = None
+_last_regime = None
+_fomo_cooldowns = {}  # память для отмененных ордеров: {symbol: expire_timestamp}
+
+
+def usd(x):
+    return f"${x:,.2f}"
+
+
+def pnl_emoji(x):
+    return "🟢" if x > 0.05 else ("🔴" if x < -0.05 else "🟡")
+
+
+def pair_html(sym, sector, kind_tag="🏛", tier=None):
+    em = TIER_EMOJI.get(tier, "") if tier else ""
+    return f"{kind_tag} <b>{sym}</b>{' ' + em if em else ''} · <i>{sector}</i>"
+
+
+def kind_tag_of(d):
+    return "🛰" if d.get("kind") == "satellite" else "🏛"
+
+
+def funding_line(x):
+    return f"\n🏦 в накопления {usd(x)}" if x > 0 else ""
+
+
+def corr_txt(d):
+    v = d.get("corr") if isinstance(d, dict) else None
+    return f" · ₿ {v:.2f}" if v is not None else ""
+
+
+def entry_offset(score, thr, regime, atr_pct, is_momentum=False):
+    """Смещение входа: гибридная логика (ракета vs снайпер)."""
+    hunt = shadow.hunt()  # выученный откат (обычно отрицательный, от -0.4% до -1.0%)
+    
+    if is_momentum:
+        # Ракета: залетаем агрессивно по рынку или чуть выше
+        return max(shadow.capture(), atr_pct / 100 * 0.1)
+    
+    surplus = score - thr
+    if regime == "bear":
+        return hunt * 1.5  # Медвежка: берем только глубокие откаты
+    elif regime == "neutral":
+        return hunt * 1.2  # Боковик: ждем откат чуть глубже обычного
+        
+    # Бычий рынок (Снайпер)
+    if surplus >= 3.0:
+        return max(shadow.near(), -atr_pct / 100 * 0.3)
+    if surplus >= 1.5:
+        return min(hunt, -atr_pct / 100 * 0.5)
+        
+    return hunt * 1.5  # Слабый сигнал — берем только на проливе
+
+
+def set_notifier(cb):
+    global _notify_cb
+    _notify_cb = cb
+
+
+async def notify(text):
+    if _notify_cb:
+        try:
+            await _notify_cb(text)
+        except Exception as e:
+            logger.error(f"notify error: {e}")
+
+
+# ==================== СВЕРКА СОСТОЯНИЯ ПРИ СТАРТЕ ====================
+async def startup_reconciliation():
+    logger.info("=== RECONCILE START ===")
+    prices = await market_data.get_tickers()
+    if not prices:
+        logger.error("Reconcile: нет цен, пропуск")
+        return
+    actions = []
+
+    for sym, pos in list(paper.positions.items()):
+        entry = pos.get("avg", 0)
+        if not entry:
+            continue
+        candles = await market_data.get_kline(sym, "15", 120)
+        if len(candles) < 60:
+            continue
+        a = atr(candles)
+        if a <= 0:
+            continue
+        fixed = []
+        tp_dist = (pos.get("tp", 0) - entry) / entry * 100 if pos.get("tp") else 0
+        if not pos.get("tp1_done") and (not pos.get("tp") or pos["tp"] <= entry or tp_dist < MIN_TP_PCT):
+            d = max(min(2.0 * a / entry * 100, MAX_SL_PCT * 2), MIN_TP_PCT)
+            pos["tp"] = round(entry * (1 + d / 100), 10)
+            fixed.append(f"TP {fmt_price(pos['tp'])}")
+
+        if pos.get("tp1_done"):
+            breakeven_price = entry * (1 + (FEE_PCT * 2) / 100)
+            if pos.get("sl", 0) < breakeven_price:
+                pos["sl"] = round(breakeven_price, 10)
+                fixed.append(f"SL {fmt_price(pos['sl'])} (безубыток)")
+        else:
+            sl = pos.get("sl", 0)
+            sl_dist = (entry - sl) / entry * 100 if sl else 0
+            max_sl = SAT_MAX_SL_PCT if pos.get("kind") == "satellite" else MAX_SL_PCT
+            if not sl or (sl < entry and (sl_dist > max_sl or sl_dist < MIN_SL_PCT)):
+                d = max(min(1.2 * a / entry * 100, max_sl), MIN_SL_PCT)
+                pos["sl"] = round(entry * (1 - d / 100), 10)
+                fixed.append(f"SL {fmt_price(pos['sl'])}")
+        if fixed:
+            actions.append(f"{pair_html(sym[:-4], pos.get('sector') or 'Other', kind_tag_of(pos), pos.get('tier'))} · {' · '.join(fixed)}")
+    paper.save()
+
+    regime, _ = await get_regime()
+    thr = threshold(regime)
+    for order in list(paper.orders):
+        sym = order["symbol"]
+        t = prices.get(sym)
+        if not t:
+            paper.cancel_order(order["id"])
+            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер снят (нет данных)")
+            continue
+        score, candles = await live_score(sym, t, regime)
+        if score is None:
+            continue
+        a = atr(candles)
+        if score < thr - 2:
+            paper.cancel_order(order["id"])
+            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер снят · ⭐ {score:.1f} ниже {thr - 2:g}")
+        elif a > 0:
+            atr_pct = a / t["last"] * 100
+            is_mom = order.get("is_momentum", False)
+            off = entry_offset(score, thr, regime, atr_pct, is_mom)
+            old_price = order["price"]
+            order["price"] = t["last"] * (1 + off)
+            
+            price_icon = "⬆️" if order["price"] > old_price else ("⬇️" if order["price"] < old_price else "🔄")
+            
+            order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
+            order["sl"] = min(order["price"] - 1.2 * a, order["price"] * (1 - MIN_SL_PCT / 100))
+            order["created"] = int(time.time())
+            order["requotes"] = 0
+            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер перевыставлен {price_icon} · ⭐ {score:.1f}")
+    paper.save()
+
+    for line in actions:
+        logger.info(f"RECONCILE: {line}")
+    logger.info(f"=== RECONCILE END ({len(actions)} действий) ===")
+    if actions:
+        await notify("🧩 <b>Переоценка после старта</b>\n" + "\n".join(f"• {a}" for a in actions[:10]))
+
+
+async def maybe_reconcile():
+    global _reconciled
+    if _reconciled:
+        return
+    _reconciled = True
+    try:
+        await startup_reconciliation()
+    except Exception as e:
+        logger.exception(f"Reconcile error: {e}")
+
+
+# ==================== ТОРГОВЫЙ ЦИКЛ ====================
+async def run_cycle():
+    global _last_mode, _last_regime
+    await maybe_reconcile()
+
+    if bot_state.paused or not bot_state.trading_enabled:
+        logger.info("Цикл пропущен: торговля на паузе или остановлена")
+        return
+
+    logger.info("=== CYCLE START ===")
+    tickers = await market_data.get_tickers()
+    if not tickers:
+        logger.error("Нет тикеров — цикл пропущен")
+        return
+
+    metrics = paper.get_metrics(tickers)
+    new_thr_adj = learner.update_threshold(
+        metrics["profit_factor"], metrics["max_drawdown_pct"], metrics["total_trades"]
+    )
+    mode, _ = learner.risk_mode(
+        metrics["profit_factor"], metrics["max_drawdown_pct"], metrics["total_trades"]
+    )
+    
+    if _last_mode is not None and mode != _last_mode:
+        m_em = {"NORMAL": "🟢", "CAUTIOUS": "🟡", "STRICT": "🔴", "AGGRESSIVE": "🚀"}
+        old_e, new_e = m_em.get(_last_mode, '⚪'), m_em.get(mode, '⚪')
+        await notify(f"🎚 <b>Смена режима риска</b>\n{old_e} {_last_mode} ➡️ {new_e} <b>{mode}</b>")
+    _last_mode = mode
+
+    pf = metrics["profit_factor"]
+    pf_txt = "∞" if pf == float("inf") else (f"{pf:.2f}" if pf is not None else "—")
+    logger.info(f"METRICS: PF={pf_txt} | DD={metrics['max_drawdown_pct']:.1f}% | "
+                f"mode={mode} | thr_adj={new_thr_adj:+.1f}")
+
+    news_items = await fetch_news_cache()
+
+    # 1. Исполнения покупок
+    for f in paper.check_fills(tickers):
+        pos = paper.positions.get(f["symbol"])
+        if pos is not None:
+            pos["kind"] = f.get("kind", "core")
+            pos["sector"] = f.get("sector", "Other")
+            pos["tier"] = f.get("tier")
+            pos["regime_entry"] = f.get("regime")
+            pos["corr"] = f.get("corr", 0.5)
+            paper.save()
+        kind_tag = kind_tag_of(f)
+        sector = (pos.get("sector") if pos else None) or f.get("sector") or "Other"
+        tier = (pos.get("tier") if pos else None) or f.get("tier")
+        tp_pct = (f["tp"] - f["price"]) / f["price"] * 100
+        sl_pct = (f["sl"] - f["price"]) / f["price"] * 100
+        await notify(
+            f"🛒 <b>Покупка</b> · {pair_html(f['symbol'][:-4], sector, kind_tag, tier)}\n"
+            f"💵 {usd(f['qty'] * f['price'])} · 📥 {fmt_price(f['price'])}{corr_txt(f)}\n"
+            f"🎯 {fmt_price(f['tp'])} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(f['sl'])} ({fmt_pct(sl_pct)})"
+        )
+
+    # 2. Оценка рынка
+    regime, info = await get_regime()
+    logger.info(f"Regime: {regime} | {info}")
+    
+    if _last_regime is not None and regime != _last_regime:
+        r_em = {"bull": "🟢", "neutral": "🟡", "bear": "🔴"}
+        r_tx = {"bull": "бычий", "neutral": "нейтральный", "bear": "медвежий"}
+        old_str = f"{r_em.get(_last_regime, '⚪')} {r_tx.get(_last_regime, _last_regime)}"
+        new_str = f"{r_em.get(regime, '⚪')} <b>{r_tx.get(regime, regime)}</b>"
+        await notify(f"🧭 <b>Смена фазы рынка</b>\n{old_str} ➡️ {new_str}\n₿ {fmt_price(info.get('btc', 0))}")
+    _last_regime = regime
+
+    # 3. ЭКСТРЕННЫЙ РИСК-МЕНЕДЖМЕНТ
+    btc_t = tickers.get("BTCUSDT", {})
+    btc_c = await market_data.get_kline("BTCUSDT", "60", 3)
+    drop_1h = 0.0
+    if len(btc_c) >= 2 and btc_c[-2]["close"] > 0:
+        drop_1h = (btc_c[-1]["close"] - btc_c[-2]["close"]) / btc_c[-2]["close"] * 100
+    if drop_1h <= -3 or btc_t.get("change_pct", 0) <= -6:
+        if paper.positions or paper.orders:
+            for ex in paper.sell_all(tickers):
+                await notify(
+                    f"🚨 <b>Экстренный выход</b> · {pair_html(ex['symbol'][:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · "
+                    f"{pnl_emoji(ex['pnl_pct'])} {ex['pnl']:+.2f}% · {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
+                    f"{funding_line(ex.get('transferred', 0))}"
+                )
+            await notify("🚨 <b>Риск-менеджмент</b>: резкий дамп рынка — всё в $.")
+        return
+
+# 4. УПРАВЛЕНИЕ ПОЗИЦИЯМИ
+    current_time = int(time.time())
+    for sym, pos in list(paper.positions.items()):
+        t = tickers.get(sym)
+        if not t:
+            continue
+        score_pos, candles = await live_score(sym, t, regime, news_items)
+        if score_pos is None:
+            continue
+        closes = [c["close"] for c in candles]
+        a = atr(candles)
+        if a <= 0:
+            continue
+        last = t["last"]
+        pos["max_price"] = max(pos.get("max_price", 0.0), last)
+        pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
+        e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
+        thr = threshold(regime)
+        trend_broken = last < e50 and e21 < e50
+
+        # 4.0 НОВОСТНАЯ ПРОВЕРКА ПОЗИЦИИ
+        base = sym[:-4]
+        name = await get_coin_name(base)
+        neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
+        
+        is_toxic = neg > 0 and neg > pos_news and neg >= (mentions * 0.2)
+        if is_toxic:
+            _fomo_cooldowns[sym] = current_time + 7200  # пауза 2 часа
+            if pnl_pct >= MIN_EARLY_EXIT_PCT:
+                ex = paper._sell(sym, last, "НОВОСТИ ⚠️", regime_now=regime)
+                await notify(
+                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · новостной выход ⚠️ {neg}/{mentions}\n"
+                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}"
+                    f"{funding_line(ex.get('transferred', 0))}"
+                )
+                continue
+            elif pnl_pct <= 0:
+                ex = paper._sell(sym, last, "НОВОСТИ 🛑", regime_now=regime)
+                await notify(
+                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · новостная резка 🛑 {neg}/{mentions}\n"
+                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}"
+                    f"{funding_line(ex.get('transferred', 0))}"
+                )
+                continue
+
+        # 4а. ЧАСТИЧНЫЙ TP
+        if not pos.get("tp1_done") and last >= pos["tp"]:
+            half = pos["qty"] / 2
+            ex = paper.sell_partial(sym, half, pos["tp"], "TP1 🎯")
+            pos["tp1_done"] = True
+            
+            # Честный безубыток с учетом комиссий за вход и выход (0.2%)
+            breakeven_price = pos["avg"] * (1 + (FEE_PCT * 2) / 100)
+            pos["sl"] = max(pos["sl"], breakeven_price)
+            
+            pos["tp"] = round(pos["tp"] + 1.5 * a, 10)
+            paper.save()
+            await notify(
+                f"🎯 <b>TP1</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · 50%\n"
+                f"📊 {fmt_price(ex['price'])} · 🔥 {fmt_pct(ex['pnl_pct'])} · 💵 прибыль {usd(ex['pnl'])}"
+                f"{funding_line(ex.get('transferred', 0))}\n"
+                f"остаток бежит · 🎯 {fmt_price(pos['tp'])} · 🔒 <b>{fmt_price(pos['sl'])} (безубыток)</b>"
+            )
+            continue
+
+        # 4б. ИНВАЛИДАЦИЯ + серая зона + regime-инвалидация
+        signal_weak = trend_broken or score_pos <= thr - 2
+
+        pos_corr = pos.get("corr", 0.5)
+        btc_dependent = pos_corr >= 0.45
+
+        regime_danger = False
+        if pos.get("regime_entry") == "bull" and btc_dependent:
+            if regime == "bear":
+                regime_danger = True
+            elif regime == "neutral" and score_pos < thr:
+                regime_danger = True
+
+        if signal_weak or (regime_danger and pnl_pct <= -0.5):
+            _fomo_cooldowns[sym] = current_time + 7200  # пауза 2 часа на слом тренда
+            if pnl_pct >= MIN_EARLY_EXIT_PCT:
+                ex = paper._sell(sym, last, "СИГНАЛ ИСЯК 📉", regime_now=regime)
+                await notify(
+                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · сигнал ослаб 📉\n"
+                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}"
+                    f"{funding_line(ex.get('transferred', 0))}"
+                )
+                continue
+            if pnl_pct <= -0.5:
+                ex = paper._sell(sym, last, "ИНВАЛИДАЦИЯ 🛑", regime_now=regime)
+                await notify(
+                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · резка убытка 🛑\n"
+                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}"
+                    f"{funding_line(ex.get('transferred', 0))}"
+                )
+                continue
+
+        # 4в. РАННЕР
+        new_sl = None
+        if pos.get("tp1_done") and last > e21 > e50 and score_pos >= thr and last >= pos["tp"] - 0.3 * a:
+            new_tp = max(pos["tp"], last + 1.5 * a)
+            if new_tp > pos["tp"]:
+                pos["tp"] = round(new_tp, 10)
+                new_sl = max(new_sl or pos["sl"], pos["avg"] + 0.5 * a)
+                await notify(
+                    f"🎯 <b>TP поднят</b> (раннер) · {pair_html(sym[:-4], pos.get('sector') or 'Other', kind_tag_of(pos), pos.get('tier'))}\n"
+                    f"🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])}"
+                )
+
+        # 4г. Трейлинг SL — динамический поджим
+        if new_sl is None:
+            new_sl = pos["sl"]
+            
+        max_p = pos.get("max_price", last)
+        breakeven_price = pos["avg"] * (1 + (FEE_PCT * 2) / 100)
+
+        if max_p >= pos["avg"] + 1.0 * a:
+            new_sl = max(new_sl, breakeven_price)
+        if max_p >= pos["avg"] + 1.5 * a:
+            new_sl = max(new_sl, max_p - 1.0 * a)
+        if max_p >= pos["avg"] + 2.5 * a:
+            new_sl = max(new_sl, max_p - 0.5 * a)
+
+        if new_sl and new_sl > pos["sl"]:
+            new_sl_r = round(new_sl, 10)
+            if new_sl_r > pos["sl"]:
+                pos["sl"] = new_sl_r
+                pos["max_sl"] = max(pos.get("max_sl", 0), pos["sl"])
+                logger.info(f"SL поднят {sym} -> {pos['sl']}")
+        paper.save()
+
+    # 5. Выходы остатка по TP/SL
+    for ex in paper.check_exits(tickers, regime_now=regime):
+        runner_txt = ""
+        if ex.get("runner_bonus", 0) > 5:
+            runner_txt = f"\n🏃 пробежка +{ex['runner_bonus']:.1f}% выше TP1"
+        ind = "🔥" if ex.get("exit_type") == "TP1_RUN" else pnl_emoji(ex["pnl_pct"])
+        await notify(
+            f"💸 <b>Продажа</b> · {pair_html(ex['symbol'][:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · {ex['reason']}\n"
+            f"{ind} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}{runner_txt}"
+            f"{funding_line(ex.get('transferred', 0))}"
+        )
+
+    # 6. Неисполненные ордера (живая проверка сигнала + реквота по offset)
+    thr = threshold(regime)
+    for order in list(paper.orders):
+        t = tickers.get(order["symbol"])
+        if not t:
+            continue
+
+        base = order["symbol"][:-4]
+        o_pair = pair_html(base, order.get("sector") or "Other", kind_tag_of(order), order.get("tier"))
+        name = await get_coin_name(base)
+        neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
+        
+        is_toxic = neg > 0 and neg > pos_news and neg >= (mentions * 0.2)
+        if is_toxic:
+            paper.cancel_order(order["id"])
+            _fomo_cooldowns[order["symbol"]] = current_time + 7200
+            await notify(f"⚠️ <b>Ордер снят</b> · {o_pair} · негатив {neg}/{mentions} (пауза 2ч)")
+            continue
+
+        score_now, candles = await live_score(order["symbol"], t, regime, news_items)
+        if score_now is None:
+            continue
+        a = atr(candles)
+        if a <= 0:
+            continue
+        if score_now < thr - 2:
+            paper.cancel_order(order["id"])
+            _fomo_cooldowns[order["symbol"]] = current_time + 7200
+            await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал умер (пауза 2ч)")
+            continue
+
+        if (current_time - order["created"]) < 900:
+            continue
+        if order.get("requotes", 0) >= 2:
+            paper.cancel_order(order["id"])
+            _fomo_cooldowns[order["symbol"]] = current_time + 1800
+            await notify(f"❌ <b>Ордер снят</b> · {o_pair} · 3 попытки без исполнения (пауза 30м)")
+            continue
+        if score_now < thr:
+            paper.cancel_order(order["id"])
+            _fomo_cooldowns[order["symbol"]] = current_time + 3600
+            await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал ослаб (пауза 1ч)")
+            continue
+            
+        paper.cancel_order(order["id"])
+        
+        atr_pct = a / t["last"] * 100
+        is_mom = order.get("is_momentum", False)
+        off = entry_offset(score_now, thr, regime, atr_pct, is_mom)
+        
+        ideal_price = t["last"] * (1 + off)
+        old_price = order["price"]
+        
+        if is_mom:
+            # Для ракеты разрешаем погоню (до 3 раз), стоп короткий
+            order["price"] = ideal_price
+            price_icon = "⬆️" if ideal_price > old_price else "⬇️"
+            sl_dist = 0.6 * a  # Короткий стоп (-0.6 ATR)
+        else:
+            # Для снайпера: если улетела больше чем на 1.5 ATR - снимаем
+            if t["last"] > old_price + 1.5 * a:
+                _fomo_cooldowns[order["symbol"]] = current_time + 1800
+                await notify(f"🚀 <b>Ордер снят (Улетела)</b> · {o_pair} · пауза 30м")
+                continue
+            # Лимитку вверх не двигаем, только вниз или на месте
+            if ideal_price > old_price:
+                order["price"] = old_price
+                price_icon = "⏸"
+            else:
+                order["price"] = ideal_price
+                price_icon = "⬇️"
+            sl_dist = 1.2 * a  # Стандартный стоп
+
+        order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
+        order["sl"] = min(order["price"] - sl_dist, order["price"] * (1 - MIN_SL_PCT / 100))
+        order["created"] = current_time
+        order["requotes"] = order.get("requotes", 0) + 1
+        paper.orders.append(order)
+        paper.save()
+        
+        mode_txt = "Ракета" if is_mom else "Снайпер"
+        await notify(
+            f"🔁 <b>Ордер {price_icon}</b> · {o_pair} ({mode_txt})\n"
+            f"📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · попытка {order['requotes'] + 1}"
+        )
+
+# 7. Сканирование и покупки / ротация
+    candidates = await scan(regime, tickers, limit=20)  # Даем сканеру отдавать топ-20
+
+    equity = paper.equity(tickers)
+    thr = threshold(regime)
+    sec_lim, other_lim = portfolio_limits(equity)
+    sat_limit = learner.satellite_limit()
+    sat_size = learner.satellite_size_pct()
+    logger.info(f"PORTFOLIO LIMITS: equity={equity:.0f} | "
+                f"лимит на сектор={sec_lim} | лимит Other={other_lim} | "
+                f"лимит сателлитов={sat_limit:.0f}% · размер сателлита={sat_size:.1f}%")
+
+    # Очистка старых кулдаунов (чтобы не копились в памяти бесконечно)
+    current_time = int(time.time())
+    for k in list(_fomo_cooldowns.keys()):
+        if _fomo_cooldowns[k] < current_time:
+            del _fomo_cooldowns[k]
+
+    for cand in candidates:
+        sym = cand["symbol"]
+        
+        # Если монета на паузе (кулдаун еще не истек) — пропускаем её
+        if _fomo_cooldowns.get(sym, 0) > current_time:
+            continue
+            
+        if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
+            continue
+
+        kind = cand.get("kind", "core")
+        sector = cand.get("sector", "Other")
+
+        # --- Проверка лимитов сектора и внутрисекторная ротация ---
+        lim = other_lim if sector == "Other" else sec_lim
+        sector_count = sum(
+            1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector
+        ) + sum(1 for o in paper.orders if (o.get("sector") or "Other") == sector)
+
+        if sector_count >= lim:
+            sector_positions = [
+                (s, p) for s, p in paper.positions.items()
+                if (p.get("sector") or "Other") == sector
+            ]
+            rotated = False
+            if sector_positions:
+                weakest_sym, weakest_pos = min(sector_positions, key=lambda kv: kv[1].get("score", 0))
+                weakest_score = weakest_pos.get("score", 0)
+                t_weak = tickers.get(weakest_sym)
+                if t_weak:
+                    weak_pnl = (t_weak["last"] - weakest_pos["avg"]) / weakest_pos["avg"] * 100
+                    
+                    can_rotate = False
+                    if sector == "Other":
+                        can_rotate = cand["score"] >= weakest_score + 1.0 and not weakest_pos.get("tp1_done") and weak_pnl >= -2.0
+                    else:
+                        can_rotate = cand["score"] >= weakest_score + 1.5 and not weakest_pos.get("tp1_done") and -0.5 <= weak_pnl < 2.0
+
+                    if can_rotate:
+                        ex = paper._sell(weakest_sym, t_weak["last"], "РОТАЦИЯ СЕКТОРА 🔄", regime_now=regime)
+                        sector_count -= 1
+                        await notify(
+                            f"🔄 <b>Ротация сектора</b> {sector} · <b>{weakest_sym[:-4]}</b> → <b>{sym[:-4]}</b>\n"
+                            f"{pnl_emoji(weak_pnl)} {fmt_pct(weak_pnl)} · ⭐ {weakest_score:.1f} → {cand['score']:.1f}\n"
+                            f"💵 {usd(ex['pnl'])}{funding_line(ex.get('transferred', 0))}"
+                        )
+                        logger.info(f"{sym}: ротация сектора — продан {weakest_sym} "
+                                    f"(score {weakest_score:.1f}, pnl {weak_pnl:+.2f}%) "
+                                    f"для {sym} (score {cand['score']:.1f})")
+                        rotated = True
+            
+            if not rotated:
+                logger.info(f"{sym}: пропущен — сектор {sector} переполнен, слабаков для ротации нет")
+                continue
+
+        # --- Проверка лимита сателлитов ---
+        if kind == "satellite":
+            sat_exposure = sum(
+                p["qty"] * tickers.get(s, {}).get("last", 0)
+                for s, p in paper.positions.items() if p.get("kind") == "satellite"
+            ) + sum(
+                o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite"
+            )
+            if sat_exposure >= equity * sat_limit / 100:
+                logger.info(f"{sym}: пропущен — лимит сателлитов исчерпан ({sat_limit:.0f}%)")
+                continue
+
+        # --- Расчет точек входа и стопов ---
+        is_mom = cand.get("is_momentum", False)
+        off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], is_mom)
+        entry = cand["last"] * (1 + off)
+        a = cand["atr"]
+        if a <= 0:
+            logger.info(f"{sym}: пропущен — нулевой ATR")
+            continue
+
+        if kind == "satellite":
+            base_sl_mult = 0.75 if is_mom else 1.5
+            sl_dist_pct = max(min(base_sl_mult * a / entry * 100 * shadow.sl_mult(), SAT_MAX_SL_PCT), 2.0)
+            tp_dist_pct = max(min(2.5 * a / entry * 100 * shadow.tp_mult(), 12.0), sl_dist_pct * MIN_RR_SAT)
+            sl = entry * (1 - sl_dist_pct / 100)
+            tp = entry * (1 + tp_dist_pct / 100)
+            min_rr = MIN_RR_SAT
+        else:
+            sl_dist_atr = 0.6 * a if is_mom else 1.2 * a
+            sl_dist_raw = sl_dist_atr * shadow.sl_mult()
+            tp_dist_raw = max(2.0 * a * shadow.tp_mult(), sl_dist_raw * MIN_RR)
+            sl = entry - sl_dist_raw
+            tp = entry + tp_dist_raw
+            tp = max(tp, entry * (1 + MIN_TP_PCT / 100))
+            sl = min(sl, entry * (1 - MIN_SL_PCT / 100))
+            sl_dist_pct = (entry - sl) / entry * 100
+            min_rr = MIN_RR
+            if sl_dist_pct > MAX_SL_PCT:
+                logger.info(f"{sym}: пропущен — SL слишком далеко ({sl_dist_pct:.1f}%)")
+                continue
+
+        sl_dist = (entry - sl) / entry * 100
+        rr = (tp - entry) / (entry - sl) if entry > sl else 0
+        if tp <= entry or sl >= entry or rr < min_rr:
+            logger.info(f"{sym}: пропущен — плохой Risk/Reward (R:R = {rr:.2f})")
+            continue
+
+        size = buy_size(equity, cand["score"], cand["liquidity"], paper.usdt,
+                        sl_dist, kind=kind, realized=paper.realized,
+                        sat_size_pct=sat_size)
+        if size < 5:
+            logger.info(f"{sym}: пропущен — размер позиции < 5$")
+            continue
+
+        # --- Проверка баланса и ОБЩАЯ РОТАЦИЯ ---
+        pending_amount = sum(o["qty"] * o["price"] for o in paper.orders)
+        if pending_amount + size > paper.usdt:
+            freed_space = False
+            
+            # 1. Пытаемся снять слабый ордер
+            if paper.orders:
+                worst_order = min(paper.orders, key=lambda o: o.get("score", 0))
+                worst_score = worst_order.get("score", 0)
+                if cand["score"] >= worst_score + 1.0:
+                    paper.cancel_order(worst_order["id"])
+                    pending_amount -= worst_order["qty"] * worst_order["price"]
+                    await notify(
+                        f"🔄 <b>Ротация ордера</b> · <b>{worst_order['symbol'][:-4]}</b> снят\n"
+                        f"Место для <b>{sym[:-4]}</b> · ⭐ {worst_score:.1f} → {cand['score']:.1f}"
+                    )
+                    logger.info(f"{sym}: ротация — снят ордер {worst_order['symbol']}")
+                    freed_space = True
+
+            # 2. Если всё еще нет денег, пытаемся продать слабую позицию
+            if (pending_amount + size > paper.usdt) and paper.positions:
+                worst_sym, worst_pos = min(paper.positions.items(), key=lambda kv: kv[1].get("score", 0))
+                worst_score = worst_pos.get("score", 0)
+                t_weak = tickers.get(worst_sym)
+                if t_weak:
+                    weak_pnl = (t_weak["last"] - worst_pos["avg"]) / worst_pos["avg"] * 100
+                    if cand["score"] >= worst_score + 1.5 and not worst_pos.get("tp1_done") and weak_pnl >= -2.0:
+                        ex = paper._sell(worst_sym, t_weak["last"], "ОБЩАЯ РОТАЦИЯ 🔄", regime_now=regime)
+                        await notify(
+                            f"🔄 <b>Общая ротация</b> · <b>{worst_sym[:-4]}</b> → <b>{sym[:-4]}</b>\n"
+                            f"{pnl_emoji(weak_pnl)} {fmt_pct(weak_pnl)} · ⭐ {worst_score:.1f} → {cand['score']:.1f}\n"
+                            f"💵 {usd(ex['pnl'])}{funding_line(ex.get('transferred', 0))}"
+                        )
+                        logger.info(f"{sym}: общая ротация — продан {worst_sym}")
+                        freed_space = True
+
+            # Если места так и не появилось — пропускаем этого кандидата и идем к следующему
+            if pending_amount + size > paper.usdt:
+                logger.info(f"{sym}: пропущен — нет свободных средств и слабаков для ротации")
+                continue
+
+        # --- Финальное выставление ордера ---
+        qty = size / entry
+        order = paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl,
+                                      score=cand["score"],
+                                      reason_keys=cand.get("reason_keys", []))
+        order["kind"] = kind
+        order["sector"] = sector
+        order["tier"] = cand.get("tier")
+        order["corr"] = cand.get("corr")
+        order["regime"] = regime
+        order["is_momentum"] = is_mom
+        paper.save()
+        tp_pct = (tp - entry) / entry * 100
+        sl_pct = (sl - entry) / entry * 100
+        kind_tag = "🛰" if kind == "satellite" else "🏛"
+        new_tag = "· 🆕 " if cand.get("is_new") else ""
+        mode_tag = "🚀 Ракета" if is_mom else "🎯 Снайпер"
+        await notify(
+            f"📋 <b>Ордер ({mode_tag})</b> {new_tag}· {pair_html(sym[:-4], sector, kind_tag, cand.get('tier'))}\n"
+            f"💵 {usd(size)} · 📥 {fmt_price(entry)} ({off * 100:+.2f}%){corr_txt(cand)}\n"
+            f"🎯 {fmt_price(tp)} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
+            f"⭐ {cand['score']:.1f} · 🧠 {'; '.join(cand['reasons'][:3])}"
+        )
+
+    logger.info("=== CYCLE END ===")
+
+--- КОНЕЦ ФАЙЛА: ./bot/core/orchestrator.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/core/remote_state.py ---
+import os
+import base64
+import time
+import threading
+
+import httpx
+from loguru import logger
+
+_lock = threading.Lock()
+GITHUB_API = "https://api.github.com"
+_last_get_sha = {}  # кэш SHA по path: {path: sha}
+
+
+def _headers():
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"} if token else {}
+
+
+def _repo():
+    return os.getenv("GITHUB_REPO", "").strip()
+
+
+def _do(method, url, **kwargs):
+    try:
+        with httpx.Client(timeout=20) as c:
+            r = c.request(method, url, headers=_headers(), **kwargs)
+        return r.status_code, r.json() if r.content else {}
+    except Exception as e:
+        logger.error(f"remote_state request error: {e}")
+        return 0, {}
+
+
+def ensure_branch():
+    """Создаёт ветку learner-state, если её нет."""
+    repo = _repo()
+    if not repo or not os.getenv("GITHUB_TOKEN"):
+        return
+    code, main_ref = _do("GET", f"{GITHUB_API}/repos/{repo}/git/ref/heads/main")
+    if code != 200:
+        logger.error(f"remote_state: не удалось получить main ref: {code}")
+        return
+    sha = main_ref.get("object", {}).get("sha")
+    code, _ = _do("POST", f"{GITHUB_API}/repos/{repo}/git/refs",
+                  json={"ref": "refs/heads/learner-state", "sha": sha})
+    if code in (201, 422):
+        logger.info("remote_state: ветка learner-state готова")
+
+
+def _get_sha(path):
+    """Получить актуальный SHA файла из ветки learner-state."""
+    repo = _repo()
+    code, data = _do("GET", f"{GITHUB_API}/repos/{repo}/contents/{path}",
+                     params={"ref": "learner-state"})
+    if code == 200:
+        sha = data.get("sha")
+        _last_get_sha[path] = sha
+        return sha, data.get("content", "")
+    return None, ""
+
+
+def download_state(path):
+    """Скачать JSON-файл из ветки learner-state."""
+    repo = _repo()
+    if not repo or not os.getenv("GITHUB_TOKEN"):
+        return None
+    try:
+        code, data = _do("GET", f"{GITHUB_API}/repos/{repo}/contents/{path}",
+                         params={"ref": "learner-state"})
+        if code != 200:
+            return None
+        raw = base64.b64decode(data.get("content", "")).decode()
+        import json
+        return json.loads(raw)
+    except Exception as e:
+        logger.error(f"remote_state download error: {e}")
+        return None
+
+
+def upload_state(path, payload):
+    """Загрузить JSON в ветку learner-state с retry на 409 Conflict."""
+    repo = _repo()
+    if not repo or not os.getenv("GITHUB_TOKEN"):
+        return
+
+    import json
+    content = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode()).decode()
+    message = f"auto: update {path}"
+
+    # Сериализуем записи по path, чтобы два файла не дрались одновременно
+    with _lock:
+        for attempt in range(3):
+            # Получаем свежий SHA перед каждой попыткой
+            sha, old_content = _get_sha(path)
+
+            body = {
+                "message": message,
+                "content": content,
+                "branch": "learner-state",
+            }
+            if sha:
+                body["sha"] = sha
+
+            code, data = _do("PUT", f"{GITHUB_API}/repos/{repo}/contents/{path}", json=body)
+
+            if code in (200, 201):
+                # Успех — обновляем кэш SHA
+                new_sha = data.get("content", {}).get("sha")
+                if new_sha:
+                    _last_get_sha[path] = new_sha
+                return
+
+            if code == 409:
+                # Конфликт версий — ждём и пробуем снова со свежим SHA
+                logger.warning(f"remote_state: 409 conflict on {path}, retry {attempt+1}/3")
+                time.sleep(0.5)
+                continue
+
+            # Другая ошибка — логируем и выходим
+            logger.error(f"remote_state upload error: {code} {data}")
+            return
+
+        logger.error(f"remote_state: 3 попытки не помогли для {path}")
+
+--- КОНЕЦ ФАЙЛА: ./bot/core/remote_state.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/core/state.py ---
+import json
+from pathlib import Path
+
+from loguru import logger
+
+PAUSED_FILE = Path("storage/paused_orders.json")
+
+
+class BotState:
+    def __init__(self):
+        self.trading_enabled = True
+        self.paused = False
+
+    def pause(self, orders):
+        self.paused = True
+        try:
+            PAUSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+            PAUSED_FILE.write_text(json.dumps(orders, ensure_ascii=False))
+        except Exception as e:
+            logger.error(f"pause save error: {e}")
+
+    def resume(self):
+        self.paused = False
+        orders = []
+        try:
+            if PAUSED_FILE.exists():
+                orders = json.loads(PAUSED_FILE.read_text())
+                PAUSED_FILE.unlink()
+        except Exception as e:
+            logger.error(f"resume load error: {e}")
+        return orders
+
+    def fresh_start(self):
+        self.paused = False
+        self.trading_enabled = True
+        try:
+            if PAUSED_FILE.exists():
+                PAUSED_FILE.unlink()
+        except Exception:
+            pass
+
+
+bot_state = BotState()
+
+--- КОНЕЦ ФАЙЛА: ./bot/core/state.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/exchange/__init__.py ---
+# пакет exchange
+
+--- КОНЕЦ ФАЙЛА: ./bot/exchange/__init__.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/exchange/bybit_client.py ---
+import os
+import asyncio
+
+from loguru import logger
+
+
+class BybitClient:
+    """Клиент Bybit API v5 через официальную библиотеку pybit."""
+
+    def __init__(self):
+        self.api_key = os.getenv("BYBIT_API_KEY", "").strip()
+        self.api_secret = os.getenv("BYBIT_API_SECRET", "").strip()
+        self.testnet = os.getenv("BYBIT_TESTNET", "true").lower() == "true"
+        self.base_url = (
+            "https://api-testnet.bybit.com" if self.testnet else "https://api.bybit.com"
+        )
+        self.last_error = None
+
+    def _session(self):
+        from pybit.unified_trading import HTTP
+
+        return HTTP(
+            testnet=self.testnet,
+            api_key=self.api_key,
+            api_secret=self.api_secret,
+            recv_window=5000,
+            logging_level="ERROR",
+        )
+
+    async def get_wallet_balance(self, account_type: str):
+        """Возвращает словарь кошелька или None."""
+        self.last_error = None
+
+        def _call():
+            session = self._session()
+            return session.get_wallet_balance(accountType=account_type)
+
+        try:
+            data = await asyncio.to_thread(_call)
+        except Exception as e:
+            self.last_error = str(e)
+            logger.error(f"Bybit (pybit) ошибка: {e}")
+            return None
+
+        if isinstance(data, dict) and data.get("retCode") != 0:
+            self.last_error = f"retCode={data.get('retCode')}, retMsg={data.get('retMsg')}"
+            logger.error(f"Bybit API error: {data}")
+            return None
+
+        try:
+            return data["result"]["list"][0]
+        except Exception:
+            self.last_error = f"неожиданный ответ: {str(data)[:200]}"
+            logger.error(f"Bybit unexpected response: {data}")
+            return None
+
+--- КОНЕЦ ФАЙЛА: ./bot/exchange/bybit_client.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/exchange/market_data.py ---
+import httpx
+from loguru import logger
+
+MAINNET_PUBLIC = "https://api.bybit.com"
+
+
+class MarketData:
+    """Публичные рыночные данные Bybit (без API-ключа)."""
+
+    def __init__(self, base_url: str = MAINNET_PUBLIC):
+        self.base_url = base_url
+
+    async def get_tickers(self) -> dict:
+        """{symbol: {last, quote_volume, change_pct, high, low}} по всем парам USDT."""
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                self.base_url + "/v5/market/tickers", params={"category": "spot"}
+            )
+        data = resp.json()
+        if data.get("retCode") != 0:
+            logger.error(f"Tickers error: {data}")
+            return {}
+        result = {}
+        for t in data["result"]["list"]:
+            if t["symbol"].endswith("USDT"):
+                result[t["symbol"]] = {
+                    "last": float(t["lastPrice"]),
+                    "quote_volume": float(t.get("turnover24h", 0)),
+                    "change_pct": float(t.get("price24hPcnt", 0)) * 100,
+                    "high": float(t.get("highPrice24h", 0)),
+                    "low": float(t.get("lowPrice24h", 0)),
+                }
+        return result
+
+    async def get_kline(self, symbol: str, interval: str = "15", limit: int = 200) -> list:
+        """Свечи по возрастанию времени: [{ts, open, high, low, close, volume}, ...]"""
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                self.base_url + "/v5/market/kline",
+                params={"category": "spot", "symbol": symbol, "interval": interval, "limit": limit},
+            )
+        data = resp.json()
+        if data.get("retCode") != 0:
+            logger.error(f"Kline error {symbol}: {data}")
+            return []
+        candles = []
+        for r in data["result"]["list"]:
+            candles.append({
+                "ts": int(r[0]),
+                "open": float(r[1]),
+                "high": float(r[2]),
+                "low": float(r[3]),
+                "close": float(r[4]),
+                "volume": float(r[5]),
+            })
+        candles.reverse()
+        return candles
+
+
+market_data = MarketData()
+
+--- КОНЕЦ ФАЙЛА: ./bot/exchange/market_data.py ---
+
+--- НАЧАЛО ФАЙЛА: ./bot/exchange/paper_exchange.py ---
+import os
+import json
+import time
+from pathlib import Path
+
+from loguru import logger
+
+from bot.strategy.learner import learner
+from bot.core.remote_state import download_state, upload_state
+
+REMOTE_PATH = "paper_state.json"
+
+
+class PaperExchange:
+    """Виртуальная биржа с резервированием состояния в GitHub."""
+
+    FEE_PCT = 0.10
+
+    def __init__(self, start_usdt: float = 1000.0):
+        self.state_file = Path(os.getenv("STORAGE_DIR", "storage")) / "paper_state.json"
+        self.start_usdt = start_usdt
+        self.usdt = start_usdt
+        self.funding = 0.0
+        self.positions = {}
+        self.orders = []
+        self.trades = []
+        self.realized = []
+        self._last_upload = 0.0
+        self._load()
+        self._migrate_sectors()
+
+    def _load(self):
+        data = None
+        try:
+            if self.state_file.exists():
+                data = json.loads(self.state_file.read_text())
+        except Exception as e:
+            logger.error(f"Paper load error: {e}")
+        if data is None:
+            data = download_state(REMOTE_PATH)
+        if data:
+            self.usdt = data.get("usdt", self.start_usdt)
+            self.funding = data.get("funding", 0.0)
+            self.positions = data.get("positions", {})
+            self.orders = data.get("orders", [])
+            self.trades = data.get("trades", [])
+            self.realized = data.get("realized", [])
+            logger.info(f"Paper state загружен: USDT={self.usdt:.2f}, позиций={len(self.positions)}")
+
+    def _migrate_sectors(self):
+        try:
+            from bot.news.cmc import sector_of
+        except ImportError:
+            return
+        migrated = 0
+        for sym, pos in self.positions.items():
+            base = sym[:-4] if sym.endswith("USDT") else sym
+            new_sector = sector_of(base)
+            if new_sector and new_sector != pos.get("sector"):
+                pos["sector"] = new_sector
+                migrated += 1
+        for order in self.orders:
+            base = order["symbol"][:-4] if order["symbol"].endswith("USDT") else order["symbol"]
+            new_sector = sector_of(base)
+            if new_sector and new_sector != order.get("sector"):
+                order["sector"] = new_sector
+                migrated += 1
+        if migrated:
+            logger.info(f"Миграция секторов: переопределено {migrated} позиций/ордеров")
+            self.save()
+        else:
+            logger.info("Миграция секторов: все секторы актуальны")
+
+    def save(self):
+        payload = {
+            "usdt": self.usdt,
+            "funding": self.funding,
+            "positions": self.positions,
+            "orders": self.orders,
+            "trades": self.trades,
+            "realized": self.realized,
+        }
+        try:
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            self.state_file.write_text(json.dumps(payload, ensure_ascii=False))
+        except Exception as e:
+            logger.error(f"Paper save error: {e}")
+        if time.time() - self._last_upload > 60:
+            self._last_upload = time.time()
+            upload_state(REMOTE_PATH, payload)
+
+    def _resolve_sector(self, symbol, fallback_sector=None):
+        if fallback_sector and fallback_sector != "Other":
+            return fallback_sector
+        try:
+            from bot.news.cmc import sector_of
+            base = symbol[:-4] if symbol.endswith("USDT") else symbol
+            return sector_of(base) or "Other"
+        except Exception:
+            return "Other"
+
+    def place_limit_buy(self, symbol, qty, price, tp, sl, score=0, reason_keys=None):
+        order = {
+            "id": f"paper-{int(time.time() * 1000)}",
+            "side": "Buy",
+            "symbol": symbol,
+            "qty": qty,
+            "price": price,
+            "tp": tp,
+            "sl": sl,
+            "score": score,
+            "reason_keys": reason_keys or [],
+            "requotes": 0,
+            "created": int(time.time()),
+        }
+        self.orders.append(order)
+        self.save()
+        return order
+
+    def cancel_order(self, order_id):
+        self.orders = [o for o in self.orders if o["id"] != order_id]
+        self.save()
+
+    def check_fills(self, prices):
+        fills = []
+        for order in list(self.orders):
+            last = prices.get(order["symbol"], {}).get("last")
+            if last is None:
+                continue
+            if order["side"] == "Buy" and last <= order["price"]:
+                cost = order["qty"] * order["price"]
+                fee = cost * self.FEE_PCT / 100
+                if cost + fee <= self.usdt:
+                    self.usdt -= cost + fee
+                    pos = self.positions.setdefault(order["symbol"], {"qty": 0.0, "avg": 0.0})
+                    total = pos["qty"] + order["qty"]
+                    pos["avg"] = (pos["avg"] * pos["qty"] + cost) / total
+                    pos["qty"] = total
+                    pos["tp"] = order["tp"]
+                    pos["sl"] = order["sl"]
+                    pos["max_sl"] = order["sl"]
+                    pos["score"] = order.get("score", 0)
+                    pos["reason_keys"] = order.get("reason_keys", [])
+                    pos["kind"] = order.get("kind", "core")
+                    pos["sector"] = self._resolve_sector(order["symbol"], order.get("sector"))
+                    pos["tier"] = order.get("tier")
+                    pos["regime_entry"] = order.get("regime")
+                    pos["max_price"] = order["price"]
+                    pos["entry_time"] = int(time.time())
+                    self.trades.append({
+                        "side": "Buy",
+                        "symbol": order["symbol"],
+                        "qty": order["qty"],
+                        "price": order["price"],
+                        "time": int(time.time()),
+                    })
+                    self.orders.remove(order)
+                    fills.append(order)
+                    logger.info(f"PAPER FILL BUY {order['symbol']} {order['qty']} @ {order['price']}")
+        self.save()
+        return fills
+
+    def check_exits(self, prices, regime_now=None):
+        results = []
+        for sym in list(self.positions):
+            last = prices.get(sym, {}).get("last")
+            if last is None:
+                continue
+            pos = self.positions[sym]
+            if last >= pos["tp"]:
+                results.append(self._sell(sym, pos["tp"], "TP ✅", regime_now=regime_now))
+            elif last <= pos["sl"]:
+                results.append(self._sell(sym, pos["sl"], "SL 🛡", regime_now=regime_now))
+        return results
+
+    def sell_partial(self, sym, qty_part, price, reason):
+        pos = self.positions.get(sym)
+        if not pos:
+            return None
+        qty_part = min(qty_part, pos["qty"])
+        proceeds = qty_part * price
+        cost_part = qty_part * pos["avg"]
+        fee_buy = cost_part * self.FEE_PCT / 100
+        fee_sell = proceeds * self.FEE_PCT / 100
+        pnl = (proceeds - fee_sell) - (cost_part + fee_buy)
+        pnl_pct = pnl / (cost_part + fee_buy) * 100 if cost_part else 0.0
+
+        pos["partial_pnl"] = pos.get("partial_pnl", 0.0) + pnl
+        pos["partial_cost"] = pos.get("partial_cost", 0.0) + (cost_part + fee_buy)
+        pos["tp1_price"] = price
+        pos["max_price"] = max(pos.get("max_price", 0.0), price)
+
+        self.usdt += proceeds - fee_sell
+        transferred = 0.0
+        if pnl > 0:
+            transferred = round(pnl * 0.62, 4)
+            self.usdt -= transferred
+            self.funding += transferred
+        pos["qty"] -= qty_part
+        self.realized.append({
+            "symbol": sym, "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 2),
+            "reason": reason, "time": int(time.time()), "partial": True,
+            "sector": self._resolve_sector(sym, pos.get("sector")),
+            "tier": pos.get("tier"), "kind": pos.get("kind", "core"),
+        })
+        self.trades.append({
+            "side": "Sell(part)", "symbol": sym, "qty": qty_part,
+            "price": price, "time": int(time.time()),
+        })
+        self.save()
+        return {
+            "symbol": sym, "price": price, "pnl": pnl,
+            "pnl_pct": pnl_pct, "reason": reason, "transferred": transferred,
+            "sector": self._resolve_sector(sym, pos.get("sector")),
+            "tier": pos.get("tier"), "kind": pos.get("kind", "core"),
+        }
+
+    def _sell(self, sym, price, reason, regime_now=None):
+        pos = self.positions.pop(sym)
+        proceeds = pos["qty"] * price
+        cost = pos["qty"] * pos["avg"]
+        fee_buy = cost * self.FEE_PCT / 100
+        fee_sell = proceeds * self.FEE_PCT / 100
+        pnl_final = (proceeds - fee_sell) - (cost + fee_buy)
+        pnl_final_pct = pnl_final / (cost + fee_buy) * 100 if (cost + fee_buy) else 0.0
+
+        partial_pnl = pos.get("partial_pnl", 0.0)
+        partial_cost = pos.get("partial_cost", 0.0)
+        total_pnl = partial_pnl + pnl_final
+        total_cost = partial_cost + (cost + fee_buy)
+        total_pnl_pct = total_pnl / total_cost * 100 if total_cost else pnl_final_pct
+
+        if reason.startswith("TP"):
+            exit_type = "TP1_RUN" if pos.get("tp1_done") else "TP"
+        elif reason.startswith("SL"):
+            exit_type = "TP1_SL" if pos.get("tp1_done") else "SL"
+        else:
+            exit_type = "EARLY"
+
+        # Смена режима рынка: убыток не вина сигнала → мягкий штраф + тип SL_REGIME
+        soft = False
+        regime_changed = (
+            regime_now is not None
+            and pos.get("regime_entry")
+            and regime_now != pos["regime_entry"]
+        )
+        if regime_changed and total_pnl < 0 and exit_type in ("SL", "EARLY"):
+            exit_type = "SL_REGIME"
+            soft = True
+
+        runner_bonus = 0.0
+        tp1_price = pos.get("tp1_price")
+        max_price = pos.get("max_price", 0.0)
+        if tp1_price and max_price > tp1_price:
+            runner_bonus = (max_price - tp1_price) / tp1_price * 100
+
+        sector = self._resolve_sector(sym, pos.get("sector"))
+        tier = pos.get("tier")
+        kind = pos.get("kind", "core")
+        try:
+            learner.record(pos.get("reason_keys", []), total_pnl > 0,
+                           total_pnl_pct, sector=sector, tier=tier,
+                           exit_type=exit_type, runner_bonus=runner_bonus,
+                           kind=kind, soft=soft)
+        except Exception as e:
+            logger.error(f"learner record error: {e}")
+
+        self.usdt += proceeds - fee_sell
+        transferred = 0.0
+        if pnl_final > 0:
+            transferred = round(pnl_final * 0.62, 4)
+            self.usdt -= transferred
+            self.funding += transferred
+        self.realized.append({
+            "symbol": sym, "pnl": round(total_pnl, 4), "pnl_pct": round(total_pnl_pct, 2),
+            "reason": reason, "time": int(time.time()), "exit_type": exit_type,
+            "sector": sector, "tier": tier, "kind": kind,
+        })
+        self.trades.append({
+            "side": "Sell", "symbol": sym, "qty": pos["qty"],
+            "price": price, "time": int(time.time()),
+        })
+        self.save()
+        return {
+            "symbol": sym, "price": price, "pnl": total_pnl,
+            "pnl_pct": total_pnl_pct, "reason": reason, "transferred": transferred,
+            "exit_type": exit_type, "runner_bonus": runner_bonus,
+            "sector": sector, "tier": tier, "kind": kind,
+        }
+
+    def sell_all(self, prices):
+        results = []
+        for sym in list(self.positions):
+            last = prices.get(sym, {}).get("last")
+            if last:
+                results.append(self._sell(sym, last, "EXITALL 🛑"))
+        self.orders = []
+        self.save()
+        return results
+
+    def reset_stats(self):
+        self.realized = []
+        self.trades = []
+        self.save()
+        logger.info("paper: торговая статистика сброшена")
+
+    def equity(self, prices):
+        eq = self.usdt + self.funding
+        for sym, pos in self.positions.items():
+            eq += pos["qty"] * prices.get(sym, {}).get("last", 0)
+        return eq
+
+    def get_metrics(self, prices=None):
+        if prices is None:
+            prices = {}
+        finals = [r for r in self.realized if not r.get("partial")]
+        partial_count = len(self.realized) - len(finals)
+
+        wins = [r for r in finals if r["pnl"] > 0]
+        losses = [r for r in finals if r["pnl"] <= 0]
+        sum_win = sum(r["pnl"] for r in wins)
+        sum_loss = abs(sum(r["pnl"] for r in losses))
+        if sum_loss == 0:
+            profit_factor = None if sum_win == 0 else float("inf")
+        else:
+            profit_factor = sum_win / sum_loss
+
+        eq = self.start_usdt
+        peak = eq
+        max_dd = 0.0
+        for r in finals:
+            eq += r["pnl"]
+            if eq > peak:
+                peak = eq
+            if peak > 0:
+                dd = (peak - eq) / peak * 100
+                if dd > max_dd:
+                    max_dd = dd
+
+        total_trades = len(finals)
+        if total_trades > 0:
+            avg_win = sum_win / len(wins) if wins else 0
+            avg_loss = sum_loss / len(losses) if losses else 0
+            winrate = len(wins) / total_trades
+            lossrate = 1 - winrate
+            expectancy = (winrate * avg_win) - (lossrate * avg_loss)
+        else:
+            expectancy = 0
+
+        total_pnl = sum(r["pnl"] for r in finals)
+        recovery_factor = total_pnl / max_dd if max_dd > 0 else 0
+
+        wr, n = learner.winrate()
+        return {
+            "profit_factor": profit_factor,
+            "max_drawdown_pct": max_dd,
+            "winrate": wr,
+            "win_count": len(wins),
+            "loss_count": len(losses),
+            "total_trades": total_trades,
+            "partial_count": partial_count,
+            "total_pnl": total_pnl,
+            "expectancy": expectancy,
+            "recovery_factor": recovery_factor,
+        }
+
+
+paper = PaperExchange()
+
+--- КОНЕЦ ФАЙЛА: ./bot/exchange/paper_exchange.py ---
+
