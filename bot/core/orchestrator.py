@@ -620,6 +620,7 @@ async def run_cycle():
         entry = cand["last"] * (1 + off)
         a = cand["atr"]
         if a <= 0:
+            logger.info(f"{sym}: пропущен — нулевой ATR")
             continue
 
         if kind == "satellite":
@@ -633,27 +634,34 @@ async def run_cycle():
         else:
             # Для Core: ракета = короткий стоп (0.6 ATR), снайпер = стандартный (1.2 ATR)
             sl_dist_atr = 0.6 * a if is_mom else 1.2 * a
-            sl = entry - sl_dist_atr * shadow.sl_mult()
-            tp = entry + 2.0 * a * shadow.tp_mult()
+            sl_dist_raw = sl_dist_atr * shadow.sl_mult()
+            
+            # Умный TP: гарантируем, что RR всегда будет не меньше MIN_RR, даже если стоп расширился из-за автотюна
+            tp_dist_raw = max(2.0 * a * shadow.tp_mult(), sl_dist_raw * MIN_RR)
+            
+            sl = entry - sl_dist_raw
+            tp = entry + tp_dist_raw
+            
             tp = max(tp, entry * (1 + MIN_TP_PCT / 100))
             sl = min(sl, entry * (1 - MIN_SL_PCT / 100))
             sl_dist_pct = (entry - sl) / entry * 100
             min_rr = MIN_RR
             if sl_dist_pct > MAX_SL_PCT:
-                logger.info(f"{sym}: пропущен — SL слишком далеко ({sl_dist_pct:.1f}%)")
+                logger.info(f"{sym}: пропущен — SL слишком далеко ({sl_dist_pct:.1f}% > {MAX_SL_PCT}%)")
                 continue
 
         sl_dist = (entry - sl) / entry * 100
         rr = (tp - entry) / (entry - sl) if entry > sl else 0
         if tp <= entry or sl >= entry or rr < min_rr:
+            logger.info(f"{sym}: пропущен — плохой Risk/Reward (R:R = {rr:.2f}, мин. {min_rr})")
             continue
 
         size = buy_size(equity, cand["score"], cand["liquidity"], paper.usdt,
                         sl_dist, kind=kind, realized=paper.realized,
                         sat_size_pct=sat_size)
         if size < 5:
+            logger.info(f"{sym}: пропущен — размер позиции ({size:.2f}$) меньше лимита биржи (5$)")
             continue
-
         pending_amount = sum(o["qty"] * o["price"] for o in paper.orders)
         if pending_amount + size > paper.usdt:
             rotated_order = False
