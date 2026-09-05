@@ -233,12 +233,6 @@ class Learner:
 
     def summary(self):
         wr, n = self.winrate()
-        top = sorted(self.weights.items(), key=lambda kv: kv[1], reverse=True)
-        txt = ", ".join(f"{k} {v:.2f}" for k, v in top[:3])
-        return f"wr {wr:.0%} ({n}) · топ: {txt} · строгость {self.threshold_adj:+.1f}"
-
-    def summary(self):
-        wr, n = self.winrate()
         top = sorted(self.weights.items(), key=lambda kv: kv[1], reverse=True)[:3]
         txt = ", ".join(f"{k} {v:.2f}" for k, v in top[:3])
         return f"wr {wr:.0%} ({n}) · топ: {txt} · строгость {self.threshold_adj:+.1f}"
