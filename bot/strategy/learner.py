@@ -237,5 +237,34 @@ class Learner:
         txt = ", ".join(f"{k} {v:.2f}" for k, v in top[:3])
         return f"wr {wr:.0%} ({n}) · топ: {txt} · строгость {self.threshold_adj:+.1f}"
 
+    def summary(self):
+        wr, n = self.winrate()
+        top = sorted(self.weights.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        txt = ", ".join(f"{k} {v:.2f}" for k, v in top[:3])
+        return f"wr {wr:.0%} ({n}) · топ: {txt} · строгость {self.threshold_adj:+.1f}"
+
+    def entry_mode_bias(self, mode):
+        """Возвращает (бонус_к_скору, множитель_сайза). Тюним ТОЛЬКО Ракеты! Снайпер всегда (0.0, 1.0)."""
+        if mode != "rocket":
+            return 0.0, 1.0  # Снайпер — это база, его не трогаем
+            
+        rock_hist = self.entry_stats.get("rocket") or []
+        snip_hist = self.entry_stats.get("sniper") or []
+        
+        # Если мало статистики, торгуем базу
+        if len(rock_hist) < 3 or len(snip_hist) < 3:
+            return 0.0, 1.0
+            
+        r_avg = sum(rock_hist) / len(rock_hist)
+        s_avg = sum(snip_hist) / len(snip_hist)
+        diff = r_avg - s_avg
+        
+        if diff >= 0.5:
+            return 0.3, 1.3   # Пробои отлично работают -> даем ракетам буст
+        elif diff <= -0.5:
+            return -0.3, 0.7  # Пробои ложные (пилилово) -> режем ракетам сайз и скор
+        
+        return 0.0, 1.0
+
 
 learner = Learner()
