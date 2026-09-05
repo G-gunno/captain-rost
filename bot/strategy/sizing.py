@@ -58,12 +58,13 @@ def kelly_multiplier(realized):
 
 
 def buy_size(equity, score, liquidity, free_usdt, sl_dist_pct=1.0,
-             kind="core", realized=None, sat_size_pct=2.0):
+             kind="core", realized=None, sat_size_pct=2.0, size_multiplier=1.0):
     # --- САТЕЛЛИТ: адаптивный размер (приходит из learner), широкий стоп ---
     if kind == "satellite":
         size = equity * sat_size_pct / 100
         if sl_dist_pct > 0:
             size = min(size, equity * SAT_RISK_PCT / sl_dist_pct)
+        size *= size_multiplier  # Применяем умный множитель режима (Ракеты)
         size = min(size, free_usdt * 0.95)
         return round(size, 2)
 
@@ -79,5 +80,7 @@ def buy_size(equity, score, liquidity, free_usdt, sl_dist_pct=1.0,
     if sl_dist_pct > 0:
         size_risk = equity * RISK_PER_TRADE_PCT / sl_dist_pct
         size = min(size, size_risk)
+        
+    size *= size_multiplier  # Применяем умный множитель режима (Ракеты)
     size = min(size, free_usdt * 0.95, equity * 0.20)
     return round(size, 2)
