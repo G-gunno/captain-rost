@@ -384,13 +384,7 @@ async def scan(regime, tickers, limit=20):  # УВЕЛИЧИЛИ ЛИМИТ ОЧ
                        "kind": kind, "sector": sector, "tier": tier,
                        "signal_values": signal_values,
                        "is_momentum": is_momentum,
-                       "size_mult": mode_size_mult}) # Передаем множитель
-                       "reason_keys": keys, "atr": a, "last": last_price,
-                       "liquidity": tickers[sym]["quote_volume"],
-                       "corr": round(corr, 2), "atr_pct": round(atr_pct, 2),
-                       "kind": kind, "sector": sector, "tier": tier,
-                       "signal_values": signal_values,
-                       "is_momentum": is_momentum})
+                       "size_mult": mode_size_mult})
 
     scored.sort(key=lambda c: c["score"], reverse=True)
 
