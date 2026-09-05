@@ -30,6 +30,7 @@ class Learner:
         self.tier_stats = {}
         self.exit_stats = {}
         self.kind_stats = {}
+        self.entry_stats = {}
         self._last_upload = 0.0
         self._load()
 
@@ -50,6 +51,7 @@ class Learner:
             self.tier_stats = data.get("tier_stats", {})
             self.exit_stats = data.get("exit_stats", {})
             self.kind_stats = data.get("kind_stats", {})
+            self.entry_stats = data.get("entry_stats", {})
             logger.info("learner: опыт загружен")
 
     def save(self):
@@ -61,6 +63,7 @@ class Learner:
             "tier_stats": {k: v[-50:] for k, v in self.tier_stats.items()},
             "exit_stats": {k: v[-50:] for k, v in self.exit_stats.items()},
             "kind_stats": {k: v[-50:] for k, v in self.kind_stats.items()},
+            "entry_stats": {k: v[-50:] for k, v in self.entry_stats.items()},
         }
         try:
             STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -75,7 +78,7 @@ class Learner:
         return self.weights.get(key, 1.0)
 
     def record(self, keys, win, pnl_pct=0.0, sector=None, tier=None,
-               exit_type=None, runner_bonus=0.0, kind=None, soft=False):
+               exit_type=None, runner_bonus=0.0, kind=None, soft=False, entry_mode=None):
         """Одна запись на позицию. soft=True → половинный штраф при убытке."""
         self.results.append(1 if win else 0)
         self.results = self.results[-200:]
@@ -95,6 +98,10 @@ class Learner:
             kh = self.kind_stats.setdefault(kind, [])
             kh.append(round(pnl_pct, 2))
             self.kind_stats[kind] = kh[-50:]
+        if entry_mode:
+            em_h = self.entry_stats.setdefault(entry_mode, [])
+            em_h.append(round(pnl_pct, 2))
+            self.entry_stats[entry_mode] = em_h[-50:]
 
         abs_pnl = abs(pnl_pct)
         if abs_pnl >= 3.0:
@@ -170,6 +177,7 @@ class Learner:
         self.tier_stats = {}
         self.exit_stats = {}
         self.kind_stats = {}
+        self.entry_stats = {}
         self.save()
         logger.info("learner: опыт сброшен")
 
@@ -180,6 +188,7 @@ class Learner:
         self.tier_stats = {}
         self.exit_stats = {}
         self.kind_stats = {}
+        self.entry_stats = {}
         self.save()
         logger.info("learner: статистика сброшена (веса сохранены)")
 
