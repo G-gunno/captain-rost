@@ -199,184 +199,62 @@ def normalize(raw, regime):
     return round(max(0.0, min(SCORE_MAX, raw / rm * SCORE_MAX)), 2)
 
 
-async def live_score(sym, t, regime, news_items=None):
-    """Оценка ТОЙ ЖЕ линейкой, что и scan: свечи 120, indep, сектор/тир,
-    новости/хайп, нормализация."""
-    candles = await market_data.get_kline(sym, "15", 120)
-    if len(candles) < 60:
-        return None, candles
-    raw, _, _, _ = score_symbol(candles, t, regime)
-
-    btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
-    btc_ret = _returns([c["close"] for c in btc_candles])
-    corr = _corr(_returns([c["close"] for c in candles]), btc_ret)
-    if corr > 0.85 and regime == "neutral":
-        raw -= 1
-    elif corr < 0.45:
-        raw += learner.weight("indep")
-
-    base = sym[:-4]
-    sectors_map = await get_sectors_for_pool([base])
-    ranks_map = await get_ranks_for_pool([base])
-    sb = learner.sector_bias(sectors_map.get(base, "Other"))
-    if sb:
-        raw += sb
-    tb = learner.tier_bias(tier_of(ranks_map.get(base)))
-    if tb:
-        raw += tb
-
-    if news_items is not None:
-        name = await get_coin_name(base)
-        neg, pos, mentions, _ = check_sentiment(news_items, [base, name])
-        if pos > neg:
-            raw += learner.weight("news_pos")
-        elif mentions >= 2:
-            raw += learner.weight("hype")
-
+async def live_score(sym, t, regime, news_items=None, deriv_t=None): # <-- Добавлен deriv_t
+# ... код ...
     score10 = normalize(raw, regime)
     
-    # Применяем бонус к живому скору (только для ракет)
     _, _, keys_live, sv_live = score_symbol(candles, t, regime)
     is_mom_live = (sv_live.get("rsi", 0) >= 65 and sv_live.get("volume", 0) >= 1.5 and "impulse" in keys_live)
     entry_mode_live = "rocket" if is_mom_live else "sniper"
     mode_score_bonus, _ = learner.entry_mode_bias(entry_mode_live)
     
     if mode_score_bonus != 0.0:
-        score10 = round(max(0.0, min(SCORE_MAX, score10 + mode_score_bonus)), 2)
+        score10 += mode_score_bonus
         
+    # --- Влияние Фьючерсного рынка ---
+    if deriv_t:
+        funding = deriv_t.get("funding", 0)
+        # Если лонгисты жестко переплачивают, Ракета рискует нарваться на дамп
+        if funding > 0.05 and entry_mode_live == "rocket":
+            score10 -= 0.5
+        # Отрицательный фандинг — шортисты в ловушке, топливо для роста
+        elif funding < -0.01:
+            score10 += 0.5
+            
+    score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)    
     return score10, candles
-async def scan(regime, tickers, limit=20):  # УВЕЛИЧИЛИ ЛИМИТ ОЧЕРЕДИ
-    tradable = [s for s, t in tickers.items()
-                if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
-
-    by_vol = sorted(tradable, key=lambda s: tickers[s]["quote_volume"], reverse=True)[:40]
-    by_chg = sorted([s for s in tradable if 0 < tickers[s]["change_pct"] < 25],
-                    key=lambda s: tickers[s]["change_pct"], reverse=True)[:20]
-
-    by_momentum = []
-    for sym in tradable[:50]:
-        candles = await market_data.get_kline(sym, "60", 168)
-        if len(candles) >= 100:
-            chg_7d = (candles[-1]["close"] - candles[0]["close"]) / candles[0]["close"] * 100
-            if 5 < chg_7d < 50:
-                by_momentum.append((sym, chg_7d))
-    by_momentum = [s for s, _ in sorted(by_momentum, key=lambda x: x[1], reverse=True)][:15]
-
-    by_volatility = []
-    for sym in tradable[:50]:
-        candles = await market_data.get_kline(sym, "15", 60)
-        if len(candles) >= 30:
-            a = atr(candles)
-            last = candles[-1]["close"]
-            atr_pct = (a / last) * 100 if last else 0
-            if atr_pct > 2.5:
-                by_volatility.append((sym, atr_pct))
-    by_volatility = [s for s, _ in sorted(by_volatility, key=lambda x: x[1], reverse=True)][:10]
-
-    sources = await fetch_new_listings()
-    try:
-        rss = await fetch_listings_cache()
-        now_ts = int(time.time())
-        sources += [(l["symbol"], (now_ts - l["ts"]) / 3600) for l in rss]
-    except Exception as e:
-        logger.debug(f"RSS listings unavailable: {e}")
-
-    by_listings = []
-    seen = set()
-    for sym, age_h in sorted(sources, key=lambda x: x[1]):
-        if sym in seen or not (24 <= age_h <= 336):
-            continue
-        seen.add(sym)
-        if sym in tickers and is_tradable(sym) and tickers[sym]["quote_volume"] >= 500_000:
-            by_listings.append((sym, age_h))
-            logger.info(f"NEW LISTING: {sym} ({age_h:.1f}h old)")
-    by_listings = by_listings[:10]
-
-    pool = list(dict.fromkeys(by_vol + by_chg + by_momentum + by_volatility +
-                              [s for s, _ in by_listings]))
-    pool_bases = list({s[:-4] for s in pool})
-
-    sectors_map = await get_sectors_for_pool(pool_bases)
-    ranks_map = await get_ranks_for_pool(pool_bases)
-    await fetch_missing_names(pool_bases)  # <--- МАССОВО ГРУЗИМ ИМЕНА БЕЗ ОШИБОК CMC
-
-    news_items = await fetch_news_cache()
-    btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
-    btc_ret = _returns([c["close"] for c in btc_candles])
-
+  
+async def scan(regime, tickers, deriv_tickers, limit=20): # <-- Добавлен deriv_tickers
+# ... код загрузки ...
     raw_max = raw_max_score(regime)
 
     scored = []
     for sym in pool:
-        candles = await market_data.get_kline(sym, "15", 120)
-        if len(candles) < 60:
-            continue
-        a = atr(candles)
-        last_price = tickers[sym]["last"]
-        atr_pct = (a / last_price) * 100 if last_price else 0
-        if a <= 0 or atr_pct < 0.25:
-            continue
-        score, reasons, keys, signal_values = score_symbol(candles, tickers[sym], regime)
-
-        corr = _corr(_returns([c["close"] for c in candles]), btc_ret)
-        if corr > 0.85 and regime == "neutral":
-            score -= 1
-            reasons.append(f"зеркало BTC (corr {corr:.2f})")
-        elif corr < 0.45:
-            score += learner.weight("indep")
-            reasons.append(f"независима от BTC (corr {corr:.2f})")
-            keys.append("indep")
-
-        kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
-        base = sym[:-4]
-        sector = sectors_map.get(base, "Other")
-        tier = tier_of(ranks_map.get(base))
-
-        sb = learner.sector_bias(sector)
-        if sb:
-            score += sb
-            reasons.append(f"сектор {sector}: {sb:+.2f}")
-        tb = learner.tier_bias(tier)
-        if tb:
-            score += tb
-            reasons.append(f"тир {TIER_EMOJI[tier]}: {tb:+.2f}")
-
-        name = await get_coin_name(base)
-        neg, pos, mentions, _ = check_sentiment(news_items, [base, name])
+# ... код проверки токсичности ...
+        score10 = (score / raw_max * SCORE_MAX) if raw_max > 0 else 0.0
         
-        # Токсичный фон: негатива больше позитива И он составляет не менее 20% от всех новостей по монете
-        is_toxic = neg > 0 and neg > pos and neg >= (mentions * 0.2)
-        
-        if is_toxic:
-            logger.info(f"{sym}: пропущен из-за негативного новостного фона ({neg} нег. из {mentions} упом.)")
-            # Передаем строку формата "2/10", чтобы красиво выводилось по команде /news
-            FILTERED_BY_NEWS.append({"symbol": sym, "neg_count": f"{neg}/{mentions}", "time": int(time.time())})
-            FILTERED_BY_NEWS[:] = FILTERED_BY_NEWS[-10:]
-            continue
-        if pos > neg:
-            score += learner.weight("news_pos")
-            reasons.append(f"позитивный новостной фон ({pos})")
-            keys.append("news_pos")
-        elif mentions >= 2:
-            score += learner.weight("hype")
-            reasons.append(f"медиа-хайп ({mentions} упом.)")
-            keys.append("hype")
-
-        rm = raw_max
-        score10 = (score / rm * SCORE_MAX) if rm > 0 else 0.0
-        score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)
-        
-        # Определяем "Ракету" (Моментум)
         sv = signal_values
         is_momentum = (sv.get("rsi", 0) >= 65 and sv.get("volume", 0) >= 1.5 and "impulse" in keys)
         
-        # Умный сайзинг и бонус скора (только для ракет)
         entry_mode = "rocket" if is_momentum else "sniper"
         mode_score_bonus, mode_size_mult = learner.entry_mode_bias(entry_mode)
         
         if mode_score_bonus != 0.0:
-            score10 = round(max(0.0, min(SCORE_MAX, score10 + mode_score_bonus)), 2)
+            score10 += mode_score_bonus
             reasons.append(f"стат. входов (🚀): {mode_score_bonus:+.1f}")
+            
+        # --- Влияние Фьючерсного рынка ---
+        deriv_t = deriv_tickers.get(sym)
+        if deriv_t:
+            funding = deriv_t.get("funding", 0)
+            if funding > 0.05 and is_momentum:
+                score10 -= 0.5
+                reasons.append(f"перегрев лонгов Фьюч ({-0.5})")
+            elif funding < -0.01:
+                score10 += 0.5
+                reasons.append(f"шорт-сквиз потенциал Фьюч ({+0.5})")
+
+        score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)
 
         scored.append({"symbol": sym, "score": score10, "reasons": reasons,
                        "reason_keys": keys, "atr": a, "last": last_price,
