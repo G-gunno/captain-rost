@@ -500,8 +500,8 @@ async def run_cycle():
             f"📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · попытка {order['requotes'] + 1}"
         )
 
-    # 7. Сканирование и покупки / ротация
-    candidates = await scan(regime, tickers)
+# 7. Сканирование и покупки / ротация
+    candidates = await scan(regime, tickers, limit=20)  # Даем сканеру отдавать топ-20
 
     equity = paper.equity(tickers)
     thr = threshold(regime)
@@ -510,31 +510,15 @@ async def run_cycle():
     sat_size = learner.satellite_size_pct()
     logger.info(f"PORTFOLIO LIMITS: equity={equity:.0f} | "
                 f"лимит на сектор={sec_lim} | лимит Other={other_lim} | "
-                f"лимит сателлитов={sat_limit:.0f}% · размер сателлита={sat_size:.1f}% | "
-                f"всего позиций: без лимита")
-
-    if paper.usdt < 10 and candidates and paper.positions:
-        best = candidates[0]
-        weakest_sym, weakest_pos = min(paper.positions.items(), key=lambda kv: kv[1].get("score", 0))
-        t = tickers.get(weakest_sym)
-        if t:
-            pnl_pct = (t["last"] - weakest_pos["avg"]) / weakest_pos["avg"] * 100 if weakest_pos["avg"] else 0
-            if pnl_pct >= 1.0 and best["score"] >= weakest_pos.get("score", 0) + 1:
-                ex = paper._sell(weakest_sym, t["last"], "РОТАЦИЯ 🔄", regime_now=regime)
-                await notify(
-                    f"🔄 <b>Ротация</b> · <b>{weakest_sym[:-4]}</b> → <b>{best['symbol'][:-4]}</b>\n"
-                    f"{pnl_emoji(pnl_pct)} {fmt_pct(pnl_pct)} · ⭐ {best['score']:.1f}"
-                    f"{funding_line(ex.get('transferred', 0))}"
-                )
+                f"лимит сателлитов={sat_limit:.0f}% · размер сателлита={sat_size:.1f}%")
 
     # Очистка старых кулдаунов (чтобы не копились в памяти бесконечно)
+    current_time = int(time.time())
     for k in list(_fomo_cooldowns.keys()):
         if _fomo_cooldowns[k] < current_time:
             del _fomo_cooldowns[k]
 
     for cand in candidates:
-        if paper.usdt < 10:
-            break
         sym = cand["symbol"]
         
         # Если монета на паузе (кулдаун еще не истек) — пропускаем её
@@ -547,6 +531,7 @@ async def run_cycle():
         kind = cand.get("kind", "core")
         sector = cand.get("sector", "Other")
 
+        # --- Проверка лимитов сектора и внутрисекторная ротация ---
         lim = other_lim if sector == "Other" else sec_lim
         sector_count = sum(
             1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector
@@ -558,33 +543,18 @@ async def run_cycle():
                 if (p.get("sector") or "Other") == sector
             ]
             rotated = False
-
-            if sector == "Other" and sector_positions:
-                other_symbols = [s[:-4] for s, _ in sector_positions]
-                logger.info(f"Other позиции: {', '.join(other_symbols)}")
-
             if sector_positions:
-                weakest_sym, weakest_pos = min(
-                    sector_positions, key=lambda kv: kv[1].get("score", 0)
-                )
+                weakest_sym, weakest_pos = min(sector_positions, key=lambda kv: kv[1].get("score", 0))
                 weakest_score = weakest_pos.get("score", 0)
                 t_weak = tickers.get(weakest_sym)
                 if t_weak:
                     weak_pnl = (t_weak["last"] - weakest_pos["avg"]) / weakest_pos["avg"] * 100
-
+                    
+                    can_rotate = False
                     if sector == "Other":
-                        can_rotate = (
-                            cand["score"] >= weakest_score + 1.0
-                            and not weakest_pos.get("tp1_done")
-                            and weak_pnl >= -2.0
-                        )
+                        can_rotate = cand["score"] >= weakest_score + 1.0 and not weakest_pos.get("tp1_done") and weak_pnl >= -2.0
                     else:
-                        can_rotate = (
-                            cand["score"] >= weakest_score + 1.5
-                            and not weakest_pos.get("tp1_done")
-                            and weak_pnl >= -0.5
-                            and weak_pnl < 2.0
-                        )
+                        can_rotate = cand["score"] >= weakest_score + 1.5 and not weakest_pos.get("tp1_done") and -0.5 <= weak_pnl < 2.0
 
                     if can_rotate:
                         ex = paper._sell(weakest_sym, t_weak["last"], "РОТАЦИЯ СЕКТОРА 🔄", regime_now=regime)
@@ -598,12 +568,12 @@ async def run_cycle():
                                     f"(score {weakest_score:.1f}, pnl {weak_pnl:+.2f}%) "
                                     f"для {sym} (score {cand['score']:.1f})")
                         rotated = True
-            if sector_count >= lim:
-                reason = ("слабых кандидатов для ротации нет" if not rotated
-                          else "после ротации лимит всё ещё заполнен")
-                logger.info(f"{sym}: пропущен — сектор {sector} переполнен ({sector_count}/{lim}, {reason})")
+            
+            if not rotated:
+                logger.info(f"{sym}: пропущен — сектор {sector} переполнен, слабаков для ротации нет")
                 continue
 
+        # --- Проверка лимита сателлитов ---
         if kind == "satellite":
             sat_exposure = sum(
                 p["qty"] * tickers.get(s, {}).get("last", 0)
@@ -615,6 +585,7 @@ async def run_cycle():
                 logger.info(f"{sym}: пропущен — лимит сателлитов исчерпан ({sat_limit:.0f}%)")
                 continue
 
+        # --- Расчет точек входа и стопов ---
         is_mom = cand.get("is_momentum", False)
         off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], is_mom)
         entry = cand["last"] * (1 + off)
@@ -624,7 +595,6 @@ async def run_cycle():
             continue
 
         if kind == "satellite":
-            # Для ракеты стоп режем в 2 раза
             base_sl_mult = 0.75 if is_mom else 1.5
             sl_dist_pct = max(min(base_sl_mult * a / entry * 100 * shadow.sl_mult(), SAT_MAX_SL_PCT), 2.0)
             tp_dist_pct = max(min(2.5 * a / entry * 100 * shadow.tp_mult(), 12.0), sl_dist_pct * MIN_RR_SAT)
@@ -632,60 +602,74 @@ async def run_cycle():
             tp = entry * (1 + tp_dist_pct / 100)
             min_rr = MIN_RR_SAT
         else:
-            # Для Core: ракета = короткий стоп (0.6 ATR), снайпер = стандартный (1.2 ATR)
             sl_dist_atr = 0.6 * a if is_mom else 1.2 * a
             sl_dist_raw = sl_dist_atr * shadow.sl_mult()
-            
-            # Умный TP: гарантируем, что RR всегда будет не меньше MIN_RR, даже если стоп расширился из-за автотюна
             tp_dist_raw = max(2.0 * a * shadow.tp_mult(), sl_dist_raw * MIN_RR)
-            
             sl = entry - sl_dist_raw
             tp = entry + tp_dist_raw
-            
             tp = max(tp, entry * (1 + MIN_TP_PCT / 100))
             sl = min(sl, entry * (1 - MIN_SL_PCT / 100))
             sl_dist_pct = (entry - sl) / entry * 100
             min_rr = MIN_RR
             if sl_dist_pct > MAX_SL_PCT:
-                logger.info(f"{sym}: пропущен — SL слишком далеко ({sl_dist_pct:.1f}% > {MAX_SL_PCT}%)")
+                logger.info(f"{sym}: пропущен — SL слишком далеко ({sl_dist_pct:.1f}%)")
                 continue
 
         sl_dist = (entry - sl) / entry * 100
         rr = (tp - entry) / (entry - sl) if entry > sl else 0
         if tp <= entry or sl >= entry or rr < min_rr:
-            logger.info(f"{sym}: пропущен — плохой Risk/Reward (R:R = {rr:.2f}, мин. {min_rr})")
+            logger.info(f"{sym}: пропущен — плохой Risk/Reward (R:R = {rr:.2f})")
             continue
 
         size = buy_size(equity, cand["score"], cand["liquidity"], paper.usdt,
                         sl_dist, kind=kind, realized=paper.realized,
                         sat_size_pct=sat_size)
         if size < 5:
-            logger.info(f"{sym}: пропущен — размер позиции ({size:.2f}$) меньше лимита биржи (5$)")
+            logger.info(f"{sym}: пропущен — размер позиции < 5$")
             continue
+
+        # --- Проверка баланса и ОБЩАЯ РОТАЦИЯ ---
         pending_amount = sum(o["qty"] * o["price"] for o in paper.orders)
         if pending_amount + size > paper.usdt:
-            rotated_order = False
-            while paper.orders and pending_amount + size > paper.usdt:
-                worst = min(paper.orders, key=lambda o: o.get("score", 0))
-                worst_score = worst.get("score", 0)
+            freed_space = False
+            
+            # 1. Пытаемся снять слабый ордер
+            if paper.orders:
+                worst_order = min(paper.orders, key=lambda o: o.get("score", 0))
+                worst_score = worst_order.get("score", 0)
                 if cand["score"] >= worst_score + 1.0:
-                    paper.cancel_order(worst["id"])
-                    pending_amount -= worst["qty"] * worst["price"]
+                    paper.cancel_order(worst_order["id"])
+                    pending_amount -= worst_order["qty"] * worst_order["price"]
                     await notify(
-                        f"🔄 <b>Ротация ордера</b> · <b>{worst['symbol'][:-4]}</b> снят\n"
+                        f"🔄 <b>Ротация ордера</b> · <b>{worst_order['symbol'][:-4]}</b> снят\n"
                         f"Место для <b>{sym[:-4]}</b> · ⭐ {worst_score:.1f} → {cand['score']:.1f}"
                     )
-                    logger.info(f"{sym}: ротация — снят {worst['symbol']} "
-                                f"(score {worst_score:.1f}) для {sym} (score {cand['score']:.1f})")
-                    rotated_order = True
-                else:
-                    break
+                    logger.info(f"{sym}: ротация — снят ордер {worst_order['symbol']}")
+                    freed_space = True
+
+            # 2. Если всё еще нет денег, пытаемся продать слабую позицию
+            if (pending_amount + size > paper.usdt) and paper.positions:
+                worst_sym, worst_pos = min(paper.positions.items(), key=lambda kv: kv[1].get("score", 0))
+                worst_score = worst_pos.get("score", 0)
+                t_weak = tickers.get(worst_sym)
+                if t_weak:
+                    weak_pnl = (t_weak["last"] - worst_pos["avg"]) / worst_pos["avg"] * 100
+                    if cand["score"] >= worst_score + 1.5 and not worst_pos.get("tp1_done") and weak_pnl >= -2.0:
+                        ex = paper._sell(worst_sym, t_weak["last"], "ОБЩАЯ РОТАЦИЯ 🔄", regime_now=regime)
+                        await notify(
+                            f"🔄 <b>Общая ротация</b> · <b>{worst_sym[:-4]}</b> → <b>{sym[:-4]}</b>\n"
+                            f"{pnl_emoji(weak_pnl)} {fmt_pct(weak_pnl)} · ⭐ {worst_score:.1f} → {cand['score']:.1f}\n"
+                            f"💵 {usd(ex['pnl'])}{funding_line(ex.get('transferred', 0))}"
+                        )
+                        logger.info(f"{sym}: общая ротация — продан {worst_sym}")
+                        freed_space = True
+
+            # Если места так и не появилось — пропускаем этого кандидата и идем к следующему
             if pending_amount + size > paper.usdt:
-                reason = "не хватает свободных средств" if not rotated_order else "новый сигнал слабее худшего"
-                logger.info(f"{sym}: пропущен — {reason} "
-                            f"(pending {pending_amount:.0f} + {size:.0f} > free {paper.usdt:.0f})")
+                logger.info(f"{sym}: пропущен — нет свободных средств и слабаков для ротации")
                 continue
 
+        # --- Финальное выставление ордера ---
         qty = size / entry
         order = paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl,
                                       score=cand["score"],
