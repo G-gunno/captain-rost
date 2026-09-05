@@ -260,5 +260,23 @@ class Learner:
         
         return 0.0, 1.0
 
+    def kelly_multiplier(self, mode):
+        """Индивидуальный Half-Kelly для конкретной стратегии входа."""
+        hist = self.entry_stats.get(mode) or []
+        if len(hist) < 10:
+            return None
+        wins = [p for p in hist if p > 0]
+        losses = [p for p in hist if p <= 0]
+        if not wins or not losses:
+            return None
+        p = len(wins) / len(hist)
+        avg_win = sum(wins) / len(wins)
+        avg_loss = abs(sum(losses) / len(losses))
+        b = avg_win / avg_loss if avg_loss else 0
+        if b <= 0:
+            return 0.0
+        kelly = (b * p - (1 - p)) / b
+        return round(max(0.0, min(kelly * 0.5, 1.0)), 3)
+
 
 learner = Learner()
