@@ -328,11 +328,21 @@ async def run_cycle():
             
             pos["tp"] = round(pos["tp"] + 1.5 * a, 10)
             paper.save()
+            
+            # Динамическое форматирование строки SL (как в /status)
+            sl_pct = (pos["sl"] - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
+            if sl_pct >= 0.5:
+                sl_str = f"📈 <b>{fmt_price(pos['sl'])} (+{sl_pct:.2f}%)</b>"
+            elif sl_pct >= 0.15: # Учитываем комиссию ~0.2%
+                sl_str = f"🔒 <b>{fmt_price(pos['sl'])} (безубыток)</b>"
+            else:
+                sl_str = f"🛡 <b>{fmt_price(pos['sl'])} ({sl_pct:+.2f}%)</b>"
+                
             await notify(
                 f"🎯 <b>TP1</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · 50%\n"
                 f"📊 {fmt_price(ex['price'])} · 🔥 {fmt_pct(ex['pnl_pct'])} · 💵 прибыль {usd(ex['pnl'])}"
                 f"{funding_line(ex.get('transferred', 0))}\n"
-                f"остаток бежит · 🎯 {fmt_price(pos['tp'])} · 🔒 <b>{fmt_price(pos['sl'])} (безубыток)</b>"
+                f"остаток бежит · 🎯 {fmt_price(pos['tp'])} · {sl_str}"
             )
             continue
 
