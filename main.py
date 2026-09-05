@@ -537,7 +537,16 @@ async def cmd_status(update, context):
                 msg.append(f"   📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)}")
                 tp_pct = (pos["tp"] - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
                 sl_pct = (pos["sl"] - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
-                msg.append(f"   🎯 {fmt_price(pos['tp'])} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(pos['sl'])} ({fmt_pct(sl_pct)})")
+                
+                # Визуализация SL
+                if sl_pct >= 0.5:
+                    sl_str = f"📈 <b>{fmt_price(pos['sl'])} ({fmt_pct(sl_pct)})</b>"
+                elif sl_pct >= 0.15: # Учитываем комиссию ~0.2%
+                    sl_str = f"🔒 <b>{fmt_price(pos['sl'])} ({fmt_pct(sl_pct)})</b>"
+                else:
+                    sl_str = f"🛡 {fmt_price(pos['sl'])} ({fmt_pct(sl_pct)})"
+                    
+                msg.append(f"   🎯 {fmt_price(pos['tp'])} ({fmt_pct(tp_pct)}) · {sl_str}")
         else:
             msg.append("📦 <b>Позиции</b>: нет")
         msg.append("")
