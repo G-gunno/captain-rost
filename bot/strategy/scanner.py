@@ -234,7 +234,7 @@ async def live_score(sym, t, regime, news_items=None):
             raw += learner.weight("hype")
 
     return normalize(raw, regime), candles
-async def scan(regime, tickers, limit=5):
+async def scan(regime, tickers, limit=20):  # УВЕЛИЧИЛИ ЛИМИТ ОЧЕРЕДИ
     tradable = [s for s, t in tickers.items()
                 if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
 
