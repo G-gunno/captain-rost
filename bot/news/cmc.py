@@ -245,27 +245,56 @@ async def _get(path, params):
         return None
 
 
+async def fetch_missing_names(symbols):
+    """Массовая загрузка имен монет (чтобы не убивать лимиты API)."""
+    need = [s for s in symbols if s not in _cache.get("info", {}) or time.time() - _cache["info"][s].get("ts", 0) > 86400]
+    if not need:
+        return
+    
+    key = os.getenv("CMC_API_KEY", "").strip()
+    headers = {"X-CMC_PRO_API_KEY": key} if key else {}
+    
+    async with httpx.AsyncClient(timeout=10) as c:
+        for i in range(0, len(need), 100):
+            chunk = need[i:i+100]
+            try:
+                r = await c.get(f"{CMC_BASE}/v1/cryptocurrency/info", params={"symbol": ",".join(chunk)}, headers=headers)
+                data = r.json()
+                if data and "data" in data:
+                    for s in chunk:
+                        arr = data["data"].get(s) or data["data"].get(s.upper())
+                        name = ""
+                        if isinstance(arr, list) and arr:
+                            name = arr[0].get("name", "")
+                        elif isinstance(arr, dict):
+                            name = arr.get("name", "")
+                        _cache.setdefault("info", {})[s] = {"name": name, "ts": time.time()}
+            except Exception as e:
+                logger.error(f"CMC fetch_missing_names error: {e}")
+            await asyncio.sleep(1.0) # Защита от лимитов
+
 async def get_coin_name(symbol: str) -> str:
-    info = _cache["info"].get(symbol)
+    """Возвращает имя из кэша (или делает резервный одиночный запрос)."""
+    info = _cache.get("info", {}).get(symbol)
     if info and time.time() - info["ts"] < 86400:
         return info["name"]
+        
     data = await _get("/v1/cryptocurrency/info", {"symbol": symbol})
     name = ""
-    if data:
-        arr = data.get("data", {}).get(symbol) or data.get("data", {}).get(symbol.upper())
+    if data and "data" in data:
+        arr = data["data"].get(symbol) or data["data"].get(symbol.upper())
         if isinstance(arr, list) and arr:
             name = arr[0].get("name", "")
         elif isinstance(arr, dict):
             name = arr.get("name", "")
-    _cache["info"][symbol] = {"name": name, "ts": time.time()}
+    _cache.setdefault("info", {})[symbol] = {"name": name, "ts": time.time()}
     return name
-
 
 def get_stats():
     key = os.getenv("CMC_API_KEY", "").strip()
     return {
         "api_key_set": bool(key),
-        "cache_count": len(_cache["info"]),
+        "cache_count": len(_cache.get("info", {})),
         "sectors_learned": len(_sector_cache),
         "ranks_cached": len(_ranks["data"]),
     }
