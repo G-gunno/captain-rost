@@ -233,7 +233,18 @@ async def live_score(sym, t, regime, news_items=None):
         elif mentions >= 2:
             raw += learner.weight("hype")
 
-    return normalize(raw, regime), candles
+    score10 = normalize(raw, regime)
+    
+    # Применяем бонус к живому скору (только для ракет)
+    _, _, keys_live, sv_live = score_symbol(candles, t, regime)
+    is_mom_live = (sv_live.get("rsi", 0) > 68 and sv_live.get("volume", 0) > 2.0 and "impulse" in keys_live)
+    entry_mode_live = "rocket" if is_mom_live else "sniper"
+    mode_score_bonus, _ = learner.entry_mode_bias(entry_mode_live)
+    
+    if mode_score_bonus != 0.0:
+        score10 = round(max(0.0, min(SCORE_MAX, score10 + mode_score_bonus)), 2)
+        
+    return score10, candles
 async def scan(regime, tickers, limit=20):  # УВЕЛИЧИЛИ ЛИМИТ ОЧЕРЕДИ
     tradable = [s for s, t in tickers.items()
                 if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
@@ -357,8 +368,23 @@ async def scan(regime, tickers, limit=20):  # УВЕЛИЧИЛИ ЛИМИТ ОЧ
         # Определяем "Ракету" (Моментум)
         sv = signal_values
         is_momentum = (sv.get("rsi", 0) > 68 and sv.get("volume", 0) > 2.0 and "impulse" in keys)
+        
+        # Умный сайзинг и бонус скора (только для ракет)
+        entry_mode = "rocket" if is_momentum else "sniper"
+        mode_score_bonus, mode_size_mult = learner.entry_mode_bias(entry_mode)
+        
+        if mode_score_bonus != 0.0:
+            score10 = round(max(0.0, min(SCORE_MAX, score10 + mode_score_bonus)), 2)
+            reasons.append(f"стат. входов (🚀): {mode_score_bonus:+.1f}")
 
         scored.append({"symbol": sym, "score": score10, "reasons": reasons,
+                       "reason_keys": keys, "atr": a, "last": last_price,
+                       "liquidity": tickers[sym]["quote_volume"],
+                       "corr": round(corr, 2), "atr_pct": round(atr_pct, 2),
+                       "kind": kind, "sector": sector, "tier": tier,
+                       "signal_values": signal_values,
+                       "is_momentum": is_momentum,
+                       "size_mult": mode_size_mult}) # Передаем множитель
                        "reason_keys": keys, "atr": a, "last": last_price,
                        "liquidity": tickers[sym]["quote_volume"],
                        "corr": round(corr, 2), "atr_pct": round(atr_pct, 2),
