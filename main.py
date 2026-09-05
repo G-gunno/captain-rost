@@ -562,7 +562,7 @@ async def cmd_status(update, context):
                 tier_em = TIER_EMOJI.get(o.get("tier") or "", "")
                 
                 # Добавляем иконку режима (Ракета или Снайпер)
-                mode_emoji = "🚀" if o.get("is_momentum") else "🎯"
+                mode_emoji = "🚀" if o.get("is_momentum") else "🏹"
                 
                 # Считаем дистанцию ордера от текущей рыночной цены
                 last_price = prices.get(o["symbol"], {}).get("last", 0)
