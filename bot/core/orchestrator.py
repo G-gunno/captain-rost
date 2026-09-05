@@ -27,6 +27,7 @@ _notify_cb = None
 _reconciled = False
 _last_mode = None
 _last_regime = None
+_fomo_cooldowns = {}  # память для отмененных ордеров: {symbol: expire_timestamp}
 
 
 def usd(x):
@@ -457,7 +458,8 @@ async def run_cycle():
             continue
         if order.get("requotes", 0) >= 2:
             paper.cancel_order(order["id"])
-            await notify(f"❌ <b>Ордер снят</b> · {o_pair} · 3 попытки без исполнения")
+            _fomo_cooldowns[order["symbol"]] = now + 600  # пауза 10 минут
+            await notify(f"❌ <b>Ордер снят</b> · {o_pair} · 3 попытки без исполнения (пауза 1ч)")
             continue
         if score_now < thr:
             paper.cancel_order(order["id"])
@@ -483,7 +485,8 @@ async def run_cycle():
         else:
             # Для снайпера: если улетела больше чем на 1.5 ATR - снимаем
             if t["last"] > old_price + 1.5 * a:
-                await notify(f"🚀 <b>Ордер снят (Улетела)</b> · {o_pair} · ждем других")
+                _fomo_cooldowns[order["symbol"]] = now + 7200  # пауза 2 часа
+                await notify(f"🚀 <b>Ордер снят (Улетела)</b> · {o_pair} · пауза 2ч")
                 continue
             # Лимитку вверх не двигаем, только вниз или на месте
             if ideal_price > old_price:
@@ -501,9 +504,9 @@ async def run_cycle():
         paper.orders.append(order)
         paper.save()
         
-        mode_txt = "Ракета" if is_mom else "Снайпер"
+        mode_tag = "🚀 Ракета" if is_mom else "🎯 Снайпер"
         await notify(
-            f"🔁 <b>Ордер {price_icon}</b> · {o_pair} ({mode_txt})\n"
+            f"🔁 <b>Ордер перевыставлен {price_icon} ({mode_tag})</b> · {o_pair}\n"
             f"📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · попытка {order['requotes'] + 1}"
         )
 
@@ -536,10 +539,21 @@ async def run_cycle():
                     f"{funding_line(ex.get('transferred', 0))}"
                 )
 
+    # Очистка старых кулдаунов (чтобы не копились в памяти бесконечно)
+    current_time = int(time.time())
+    for k in list(_fomo_cooldowns.keys()):
+        if _fomo_cooldowns[k] < current_time:
+            del _fomo_cooldowns[k]
+
     for cand in candidates:
         if paper.usdt < 10:
             break
         sym = cand["symbol"]
+        
+        # Если монета на паузе (кулдаун еще не истек) — пропускаем её
+        if _fomo_cooldowns.get(sym, 0) > current_time:
+            continue
+            
         if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
             continue
 
