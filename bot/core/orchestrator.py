@@ -148,10 +148,21 @@ async def startup_reconciliation():
         if score is None:
             continue
         a = atr(candles)
+        
+        # 1. Сигнал полностью умер
         if score < thr - 2:
             paper.cancel_order(order["id"])
-            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер снят · ⭐ {score:.1f} ниже {thr - 2:g}")
-        elif a > 0:
+            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер снят (умер) · ⭐ {score:.1f} < {thr - 2:g}")
+            continue
+            
+        # 2. Сигнал ослаб (ниже порога входа)
+        if score < thr:
+            paper.cancel_order(order["id"])
+            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер снят (ослаб) · ⭐ {score:.1f} < {thr:g}")
+            continue
+            
+        # 3. Сигнал актуален -> Перевыставляем
+        if a > 0:
             atr_pct = a / t["last"] * 100
             is_mom = order.get("is_momentum", False)
             off = entry_offset(score, thr, regime, atr_pct, is_mom)
