@@ -1,0 +1,91 @@
+name: Generate AI Context
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build-snapshot:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Даем боту права на запись в репозиторий
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Create Python script and run
+        run: |
+          cat << 'EOF' > make_snapshot.py
+          import os
+
+          OUTPUT_FILE = "ai_context.txt"
+          IGNORE_DIRS = {".git", "__pycache__", "venv", "env", ".idea", ".vscode", ".github"}
+          IGNORE_EXTS = {".jpg", ".jpeg", ".png", ".pyc", ".env", ".md", ".log"}
+          IGNORE_FILES = {OUTPUT_FILE, "make_snapshot.py", "Dockerfile"}
+
+          def is_ignored(file_name):
+              if file_name in IGNORE_FILES:
+                  return True
+              _, ext = os.path.splitext(file_name)
+              if ext.lower() in IGNORE_EXTS:
+                  return True
+              return False
+
+          with open(OUTPUT_FILE, "w", encoding="utf-8") as out:
+              out.write("=== СТРУКТУРА ПРОЕКТА ===\n")
+              for root, dirs, files in os.walk("."):
+                  dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+                  level = root.replace(".", "").count(os.sep)
+                  indent = " " * 4 * level
+                  folder_name = os.path.basename(root)
+                  if folder_name and folder_name != ".":
+                      out.write(f"{indent}[Папка] {folder_name}/\n")
+                  
+                  subindent = " " * 4 * (level + (1 if folder_name != "." else 0))
+                  for f in sorted(files):
+                      if not is_ignored(f):
+                          out.write(f"{subindent}{f}\n")
+                          
+              out.write("\n=== КОД ФАЙЛОВ ===\n\n")
+              for root, dirs, files in os.walk("."):
+                  dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+                  for file in sorted(files):
+                      if is_ignored(file):
+                          continue
+                      file_path = os.path.join(root, file)
+                      out.write(f"--- НАЧАЛО ФАЙЛА: {file_path} ---\n")
+                      try:
+                          with open(file_path, "r", encoding="utf-8") as f:
+                              out.write(f.read())
+                      except Exception as e:
+                          out.write(f"Ошибка чтения файла: {e}\n")
+                      out.write(f"\n--- КОНЕЦ ФАЙЛА: {file_path} ---\n\n")
+          EOF
+          python make_snapshot.py
+
+      - name: Push to orphan branch
+        run: |
+          # Настраиваем Git-бота
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Создаем чистую, изолированную ветку без истории
+          git checkout --orphan ai-context
+          
+          # Удаляем все остальные файлы из этой ветки (чтобы не дублировать код)
+          git rm -rf . || true
+          
+          # Добавляем только наш свежий снимок
+          git add ai_context.txt
+          
+          # Коммитим и жестко перезаписываем ветку
+          git commit -m "Update AI context snapshot [skip ci]"
+          git push origin ai-context --force
