@@ -193,7 +193,7 @@ class PaperExchange:
         self.usdt += proceeds - fee_sell
         transferred = 0.0
         if pnl > 0:
-            transferred = round(pnl * 0.62, 4)
+            transferred = round(pnl * 0.30, 4)  # Отчисляем 30% в копилку, 70% идет на реинвест
             self.usdt -= transferred
             self.funding += transferred
         pos["qty"] -= qty_part
@@ -268,7 +268,7 @@ class PaperExchange:
         self.usdt += proceeds - fee_sell
         transferred = 0.0
         if pnl_final > 0:
-            transferred = round(pnl_final * 0.62, 4)
+            transferred = round(pnl_final * 0.30, 4)  # Отчисляем 30% в копилку, 70% идет на реинвест
             self.usdt -= transferred
             self.funding += transferred
         self.realized.append({
