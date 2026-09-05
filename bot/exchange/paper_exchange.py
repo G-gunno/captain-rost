@@ -145,6 +145,7 @@ class PaperExchange:
                     pos["sector"] = self._resolve_sector(order["symbol"], order.get("sector"))
                     pos["tier"] = order.get("tier")
                     pos["regime_entry"] = order.get("regime")
+                    pos["is_momentum"] = order.get("is_momentum", False) # <--- ДОБАВИТЬ ЭТУ СТРОКУ
                     pos["max_price"] = order["price"]
                     pos["entry_time"] = int(time.time())
                     self.trades.append({
@@ -257,11 +258,12 @@ class PaperExchange:
         sector = self._resolve_sector(sym, pos.get("sector"))
         tier = pos.get("tier")
         kind = pos.get("kind", "core")
+        entry_mode = "rocket" if pos.get("is_momentum") else "sniper" # <--- ДОБАВИТЬ ЭТУ СТРОКУ
         try:
             learner.record(pos.get("reason_keys", []), total_pnl > 0,
                            total_pnl_pct, sector=sector, tier=tier,
                            exit_type=exit_type, runner_bonus=runner_bonus,
-                           kind=kind, soft=soft)
+                           kind=kind, soft=soft, entry_mode=entry_mode) # <--- ПЕРЕДАТЬ entry_mode
         except Exception as e:
             logger.error(f"learner record error: {e}")
 
