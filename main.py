@@ -271,7 +271,12 @@ async def run_all(application):
     set_notifier(send_chat)
     asyncio.create_task(cycle_loop())
     asyncio.create_task(report_loop())
-    logger.info("Цикл торговли и отчёты запущены (WEBHOOK MODE)")
+    
+    # Запускаем фоновый стример цен в реальном времени
+    from bot.exchange.market_data import start_ws_ticker_stream
+    asyncio.create_task(start_ws_ticker_stream())
+    
+    logger.info("Цикл торговли, отчёты и WebSocket запущены (WEBHOOK MODE)")
 
     web_app = web.Application()
     web_app.router.add_get("/", health_handler)
