@@ -142,7 +142,7 @@ async def startup_reconciliation():
         t = prices.get(sym)
         if not t:
             paper.cancel_order(order["id"])
-            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер снят (нет данных)")
+            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · снят 🪫 (нет данных)")
             continue
         score, candles = await live_score(sym, t, regime)
         if score is None:
@@ -152,13 +152,13 @@ async def startup_reconciliation():
         # 1. Сигнал полностью умер
         if score < thr - 2:
             paper.cancel_order(order["id"])
-            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер снят (умер) · ⭐ {score:.1f} < {thr - 2:g}")
+            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · снят 🪫 · ⭐ {score:.1f} &lt; {thr - 2:g}")
             continue
             
         # 2. Сигнал ослаб (ниже порога входа)
         if score < thr:
             paper.cancel_order(order["id"])
-            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер снят (ослаб) · ⭐ {score:.1f} < {thr:g}")
+            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · снят 🪫 · ⭐ {score:.1f} &lt; {thr:g}")
             continue
             
         # 3. Сигнал актуален -> Перевыставляем
@@ -166,16 +166,35 @@ async def startup_reconciliation():
             atr_pct = a / t["last"] * 100
             is_mom = order.get("is_momentum", False)
             off = entry_offset(score, thr, regime, atr_pct, is_mom)
-            old_price = order["price"]
-            order["price"] = t["last"] * (1 + off)
             
-            price_icon = "⬆️" if order["price"] > old_price else ("⬇️" if order["price"] < old_price else "🔄")
+            ideal_price = t["last"] * (1 + off)
+            old_price = order["price"]
+            
+            # Проверка на "улетевшую" монету для снайпера
+            if not is_mom and t["last"] > old_price + 1.5 * a:
+                paper.cancel_order(order["id"])
+                actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · снят 🚀 (улетел)")
+                continue
+
+            # Логика подтягивания цены (как в основном цикле)
+            if is_mom:
+                order["price"] = ideal_price
+                price_icon = "⬆️" if ideal_price > old_price else "⬇️"
+                sl_dist = 0.6 * a
+            else:
+                if ideal_price > old_price:
+                    order["price"] = old_price
+                    price_icon = "⏸"
+                else:
+                    order["price"] = ideal_price
+                    price_icon = "⬇️"
+                sl_dist = 1.2 * a
             
             order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
-            order["sl"] = min(order["price"] - 1.2 * a, order["price"] * (1 - MIN_SL_PCT / 100))
+            order["sl"] = min(order["price"] - sl_dist, order["price"] * (1 - MIN_SL_PCT / 100))
             order["created"] = int(time.time())
             order["requotes"] = 0
-            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер перевыставлен {price_icon} · ⭐ {score:.1f}")
+            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · перевыставлен {price_icon} · ⭐ {score:.1f}")
     paper.save()
 
     for line in actions:
