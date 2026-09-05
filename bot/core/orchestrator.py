@@ -271,7 +271,8 @@ async def run_cycle():
             await notify("🚨 <b>Риск-менеджмент</b>: резкий дамп рынка — всё в $.")
         return
 
-    # 4. УПРАВЛЕНИЕ ПОЗИЦИЯМИ
+# 4. УПРАВЛЕНИЕ ПОЗИЦИЯМИ
+    current_time = int(time.time())
     for sym, pos in list(paper.positions.items()):
         t = tickers.get(sym)
         if not t:
@@ -297,6 +298,7 @@ async def run_cycle():
         
         is_toxic = neg > 0 and neg > pos_news and neg >= (mentions * 0.2)
         if is_toxic:
+            _fomo_cooldowns[sym] = current_time + 7200  # пауза 2 часа
             if pnl_pct >= MIN_EARLY_EXIT_PCT:
                 ex = paper._sell(sym, last, "НОВОСТИ ⚠️", regime_now=regime)
                 await notify(
@@ -334,17 +336,12 @@ async def run_cycle():
             )
             continue
 
-    # 4б. ИНВАЛИДАЦИЯ + серая зона + regime-инвалидация
+        # 4б. ИНВАЛИДАЦИЯ + серая зона + regime-инвалидация
         signal_weak = trend_broken or score_pos <= thr - 2
 
-        # Проверяем зависимость от BTC
         pos_corr = pos.get("corr", 0.5)
-        btc_dependent = pos_corr >= 0.45  # независимым монетам по барабану на BTC
+        btc_dependent = pos_corr >= 0.45
 
-        # Умный переворот режима:
-        # Режем только если:
-        # 1) Рынок стал прямо медвежьим (bear) И монета зависит от BTC
-        # 2) Либо рынок стал neutral, но и собственный скор монеты просел ниже порога (score_pos < thr)
         regime_danger = False
         if pos.get("regime_entry") == "bull" and btc_dependent:
             if regime == "bear":
@@ -353,6 +350,7 @@ async def run_cycle():
                 regime_danger = True
 
         if signal_weak or (regime_danger and pnl_pct <= -0.5):
+            _fomo_cooldowns[sym] = current_time + 7200  # пауза 2 часа на слом тренда
             if pnl_pct >= MIN_EARLY_EXIT_PCT:
                 ex = paper._sell(sym, last, "СИГНАЛ ИСЯК 📉", regime_now=regime)
                 await notify(
@@ -389,15 +387,10 @@ async def run_cycle():
         max_p = pos.get("max_price", last)
         breakeven_price = pos["avg"] * (1 + (FEE_PCT * 2) / 100)
 
-        # Шаг 1: Просто подросли — страхуем честным безубытком
         if max_p >= pos["avg"] + 1.0 * a:
             new_sl = max(new_sl, breakeven_price)
-            
-        # Шаг 2: Пошел уверенный тренд — тянем с зазором в 1.0 ATR от пика
         if max_p >= pos["avg"] + 1.5 * a:
             new_sl = max(new_sl, max_p - 1.0 * a)
-            
-        # Шаг 3: Монета улетела высоко — душим цену с зазором 0.5 ATR, чтобы забрать максимум при развороте
         if max_p >= pos["avg"] + 2.5 * a:
             new_sl = max(new_sl, max_p - 0.5 * a)
 
@@ -422,7 +415,6 @@ async def run_cycle():
         )
 
     # 6. Неисполненные ордера (живая проверка сигнала + реквота по offset)
-    now = int(time.time())
     thr = threshold(regime)
     for order in list(paper.orders):
         t = tickers.get(order["symbol"])
@@ -437,7 +429,8 @@ async def run_cycle():
         is_toxic = neg > 0 and neg > pos_news and neg >= (mentions * 0.2)
         if is_toxic:
             paper.cancel_order(order["id"])
-            await notify(f"⚠️ <b>Ордер снят</b> · {o_pair} · негатив {neg}/{mentions}")
+            _fomo_cooldowns[order["symbol"]] = current_time + 7200
+            await notify(f"⚠️ <b>Ордер снят</b> · {o_pair} · негатив {neg}/{mentions} (пауза 2ч)")
             continue
 
         score_now, candles = await live_score(order["symbol"], t, regime, news_items)
@@ -448,26 +441,23 @@ async def run_cycle():
             continue
         if score_now < thr - 2:
             paper.cancel_order(order["id"])
-            await notify(
-                f"📉 <b>Ордер снят</b> · {o_pair} · сигнал умер "
-                f"({score_now:.1f} &lt; {thr - 2:.1f})"
-            )
+            _fomo_cooldowns[order["symbol"]] = current_time + 7200
+            await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал умер (пауза 2ч)")
             continue
 
-        if (now - order["created"]) < 900:
+        if (current_time - order["created"]) < 900:
             continue
         if order.get("requotes", 0) >= 2:
             paper.cancel_order(order["id"])
-            _fomo_cooldowns[order["symbol"]] = now + 600  # пауза 10 минут
-            await notify(f"❌ <b>Ордер снят</b> · {o_pair} · 3 попытки без исполнения (пауза 1ч)")
+            _fomo_cooldowns[order["symbol"]] = current_time + 1800
+            await notify(f"❌ <b>Ордер снят</b> · {o_pair} · 3 попытки без исполнения (пауза 30м)")
             continue
         if score_now < thr:
             paper.cancel_order(order["id"])
-            await notify(
-                f"📉 <b>Ордер снят</b> · {o_pair} · сигнал ослаб "
-                f"({score_now:.1f} &lt; {thr:g})"
-            )
+            _fomo_cooldowns[order["symbol"]] = current_time + 3600
+            await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал ослаб (пауза 1ч)")
             continue
+            
         paper.cancel_order(order["id"])
         
         atr_pct = a / t["last"] * 100
@@ -485,8 +475,8 @@ async def run_cycle():
         else:
             # Для снайпера: если улетела больше чем на 1.5 ATR - снимаем
             if t["last"] > old_price + 1.5 * a:
-                _fomo_cooldowns[order["symbol"]] = now + 7200  # пауза 2 часа
-                await notify(f"🚀 <b>Ордер снят (Улетела)</b> · {o_pair} · пауза 2ч")
+                _fomo_cooldowns[order["symbol"]] = current_time + 1800
+                await notify(f"🚀 <b>Ордер снят (Улетела)</b> · {o_pair} · пауза 30м")
                 continue
             # Лимитку вверх не двигаем, только вниз или на месте
             if ideal_price > old_price:
@@ -499,20 +489,18 @@ async def run_cycle():
 
         order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
         order["sl"] = min(order["price"] - sl_dist, order["price"] * (1 - MIN_SL_PCT / 100))
-        order["created"] = now
+        order["created"] = current_time
         order["requotes"] = order.get("requotes", 0) + 1
         paper.orders.append(order)
         paper.save()
         
-        mode_tag = "🚀 Ракета" if is_mom else "🎯 Снайпер"
+        mode_txt = "Ракета" if is_mom else "Снайпер"
         await notify(
-            f"🔁 <b>Ордер перевыставлен {price_icon} ({mode_tag})</b> · {o_pair}\n"
+            f"🔁 <b>Ордер {price_icon}</b> · {o_pair} ({mode_txt})\n"
             f"📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · попытка {order['requotes'] + 1}"
         )
 
     # 7. Сканирование и покупки / ротация
-    # Сканируем ВСЕГДА (даже в bear), чтобы видеть рынок; строгость держит
-    # порог (в bear до 9.5 из 10) — он сам отсеивает слабые монеты.
     candidates = await scan(regime, tickers)
 
     equity = paper.equity(tickers)
@@ -540,7 +528,6 @@ async def run_cycle():
                 )
 
     # Очистка старых кулдаунов (чтобы не копились в памяти бесконечно)
-    current_time = int(time.time())
     for k in list(_fomo_cooldowns.keys()):
         if _fomo_cooldowns[k] < current_time:
             del _fomo_cooldowns[k]
