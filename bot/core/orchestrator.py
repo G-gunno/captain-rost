@@ -136,12 +136,16 @@ async def startup_reconciliation():
             actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер снят · ⭐ {score:.1f} ниже {thr - 2:g}")
         elif a > 0:
             off = entry_offset(score, thr, regime)
+            old_price = order["price"]
             order["price"] = t["last"] * (1 + off)
+            
+            price_icon = "⬆️" if order["price"] > old_price else ("⬇️" if order["price"] < old_price else "🔄")
+            
             order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
             order["sl"] = min(order["price"] - 1.2 * a, order["price"] * (1 - MIN_SL_PCT / 100))
             order["created"] = int(time.time())
             order["requotes"] = 0
-            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер перевыставлен · ⭐ {score:.1f}")
+            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер перевыставлен {price_icon} · ⭐ {score:.1f}")
     paper.save()
 
     for line in actions:
@@ -395,7 +399,11 @@ async def run_cycle():
             continue
         paper.cancel_order(order["id"])
         off = entry_offset(score_now, thr, regime)
+        old_price = order["price"]
         order["price"] = t["last"] * (1 + off)
+        
+        price_icon = "⬆️" if order["price"] > old_price else ("⬇️" if order["price"] < old_price else "🔄")
+        
         order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
         order["sl"] = min(order["price"] - 1.2 * a, order["price"] * (1 - MIN_SL_PCT / 100))
         order["created"] = now
@@ -403,7 +411,7 @@ async def run_cycle():
         paper.orders.append(order)
         paper.save()
         await notify(
-            f"🔁 <b>Ордер перевыставлен</b> · {o_pair}\n"
+            f"🔁 <b>Ордер перевыставлен {price_icon}</b> · {o_pair}\n"
             f"📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · попытка {order['requotes'] + 1}"
         )
 
