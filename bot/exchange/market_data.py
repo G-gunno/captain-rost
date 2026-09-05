@@ -3,7 +3,6 @@ from loguru import logger
 
 MAINNET_PUBLIC = "https://api.bybit.com"
 
-
 class MarketData:
     """Публичные рыночные данные Bybit (без API-ключа)."""
 
@@ -11,7 +10,7 @@ class MarketData:
         self.base_url = base_url
 
     async def get_tickers(self) -> dict:
-        """{symbol: {last, quote_volume, change_pct, high, low}} по всем парам USDT."""
+        """{symbol: {last, bid1, ask1, quote_volume, change_pct, high, low}} по споту."""
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.get(
                 self.base_url + "/v5/market/tickers", params={"category": "spot"}
@@ -25,6 +24,8 @@ class MarketData:
             if t["symbol"].endswith("USDT"):
                 result[t["symbol"]] = {
                     "last": float(t["lastPrice"]),
+                    "bid1": float(t.get("bid1Price") or t["lastPrice"]),
+                    "ask1": float(t.get("ask1Price") or t["lastPrice"]),
                     "quote_volume": float(t.get("turnover24h", 0)),
                     "change_pct": float(t.get("price24hPcnt", 0)) * 100,
                     "high": float(t.get("highPrice24h", 0)),
@@ -32,8 +33,26 @@ class MarketData:
                 }
         return result
 
+    async def get_derivatives_tickers(self) -> dict:
+        """Получаем Open Interest и Funding Rate по линейным фьючерсам."""
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                self.base_url + "/v5/market/tickers", params={"category": "linear"}
+            )
+        data = resp.json()
+        if data.get("retCode") != 0:
+            logger.error(f"Derivatives Tickers error: {data}")
+            return {}
+        result = {}
+        for t in data.get("result", {}).get("list", []):
+            if t["symbol"].endswith("USDT"):
+                result[t["symbol"]] = {
+                    "oi": float(t.get("openInterest") or 0),
+                    "funding": float(t.get("fundingRate") or 0) * 100,
+                }
+        return result
+
     async def get_kline(self, symbol: str, interval: str = "15", limit: int = 200) -> list:
-        """Свечи по возрастанию времени: [{ts, open, high, low, close, volume}, ...]"""
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.get(
                 self.base_url + "/v5/market/kline",
@@ -55,6 +74,5 @@ class MarketData:
             })
         candles.reverse()
         return candles
-
 
 market_data = MarketData()
