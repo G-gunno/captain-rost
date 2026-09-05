@@ -55,14 +55,26 @@ def corr_txt(d):
     return f" · ₿ {v:.2f}" if v is not None else ""
 
 
-def entry_offset(score, thr, regime):
-    """Смещение входа от рынка по убеждённости (surplus над порогом, 10-шкала)."""
+def entry_offset(score, thr, regime, atr_pct):
+    """Смещение входа: снайперский откат вместо покупок по рынку."""
     surplus = score - thr
-    if regime == "bull" and surplus >= 3.0:
-        return shadow.capture()
-    if surplus >= 1.4:
-        return shadow.near()
-    return shadow.hunt()
+    hunt = shadow.hunt()  # обычно от -0.4% до -1.0% (выучено из рынка)
+    
+    if regime == "bear":
+        return hunt * 1.5  # Медвежка: берем только глубокие падающие ножи
+    elif regime == "neutral":
+        return hunt * 1.2  # Боковик: берем чуть ниже выученного отката
+        
+    # Бычий рынок
+    if surplus >= 3.0:
+        # Супер-сигнал: берем на микро-откате (никаких покупок по рынку!)
+        return max(shadow.near(), -atr_pct / 100 * 0.3)
+    if surplus >= 1.5:
+        # Нормальный сигнал: ждем стандартный выученный откат (не меньше пол-ATR)
+        return min(hunt, -atr_pct / 100 * 0.5)
+        
+    # Слабый сигнал (еле прошел порог): берем только на глубоком откате
+    return hunt * 1.5
 
 
 def set_notifier(cb):
@@ -137,7 +149,8 @@ async def startup_reconciliation():
             paper.cancel_order(order["id"])
             actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · ордер снят · ⭐ {score:.1f} ниже {thr - 2:g}")
         elif a > 0:
-            off = entry_offset(score, thr, regime)
+            atr_pct = a / t["last"] * 100
+            off = entry_offset(score, thr, regime, atr_pct)
             old_price = order["price"]
             order["price"] = t["last"] * (1 + off)
             
@@ -431,12 +444,25 @@ async def run_cycle():
             )
             continue
         paper.cancel_order(order["id"])
-        off = entry_offset(score_now, thr, regime)
+        
+        atr_pct = a / t["last"] * 100
+        off = entry_offset(score_now, thr, regime, atr_pct)
+        ideal_price = t["last"] * (1 + off)
         old_price = order["price"]
-        order["price"] = t["last"] * (1 + off)
         
-        price_icon = "⬆️" if order["price"] > old_price else ("⬇️" if order["price"] < old_price else "🔄")
-        
+        # Anti-FOMO: если цена улетела больше чем на 1.5 ATR от нашего старого ордера — отпускаем
+        if t["last"] > old_price + 1.5 * a:
+            await notify(f"🚀 <b>Ордер снят (Улетела)</b> · {o_pair} · ждем других")
+            continue
+            
+        # Не гоняемся за ценой: если новая расчетная цена выше старой, оставляем старую (не идем вверх)
+        if ideal_price > old_price:
+            order["price"] = old_price
+            price_icon = "⏸"
+        else:
+            order["price"] = ideal_price
+            price_icon = "⬇️"
+            
         order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
         order["sl"] = min(order["price"] - 1.2 * a, order["price"] * (1 - MIN_SL_PCT / 100))
         order["created"] = now
@@ -444,8 +470,8 @@ async def run_cycle():
         paper.orders.append(order)
         paper.save()
         await notify(
-            f"🔁 <b>Ордер перевыставлен {price_icon}</b> · {o_pair}\n"
-            f"📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · попытка {order['requotes'] + 1}"
+            f"🔁 <b>Ордер ждёт отката {price_icon}</b> · {o_pair}\n"
+            f"📥 {fmt_price(order['price'])} · попытка {order['requotes'] + 1}"
         )
 
     # 7. Сканирование и покупки / ротация
@@ -555,7 +581,7 @@ async def run_cycle():
                 logger.info(f"{sym}: пропущен — лимит сателлитов исчерпан ({sat_limit:.0f}%)")
                 continue
 
-        off = entry_offset(cand["score"], thr, regime)
+        off = entry_offset(cand["score"], thr, regime, cand["atr_pct"])
         entry = cand["last"] * (1 + off)
         a = cand["atr"]
         if a <= 0:
