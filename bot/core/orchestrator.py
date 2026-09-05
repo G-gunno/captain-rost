@@ -725,7 +725,7 @@ async def run_cycle():
         sl_pct = (sl - entry) / entry * 100
         kind_tag = "🛰" if kind == "satellite" else "🏛"
         new_tag = "· 🆕 " if cand.get("is_new") else ""
-        mode_tag = "🚀 Ракета" if is_mom else "🎯 Снайпер"
+        mode_tag = "🚀 Ракета" if is_mom else "🏹 Снайпер"
         await notify(
             f"📋 <b>Ордер ({mode_tag})</b> {new_tag}· {pair_html(sym[:-4], sector, kind_tag, cand.get('tier'))}\n"
             f"💵 {usd(size)} · 📥 {fmt_price(entry)} ({off * 100:+.2f}%){corr_txt(cand)}\n"
