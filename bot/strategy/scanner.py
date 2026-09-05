@@ -311,9 +311,14 @@ async def scan(regime, tickers, limit=5):
 
         name = await get_coin_name(base)
         neg, pos, mentions, _ = check_sentiment(news_items, [base, name])
-        if neg > 0 and neg > pos:
-            logger.info(f"{sym}: пропущен из-за негативного новостного фона ({neg})")
-            FILTERED_BY_NEWS.append({"symbol": sym, "neg_count": neg, "time": int(time.time())})
+        
+        # Токсичный фон: негатива больше позитива И он составляет не менее 20% от всех новостей по монете
+        is_toxic = neg > 0 and neg > pos and neg >= (mentions * 0.2)
+        
+        if is_toxic:
+            logger.info(f"{sym}: пропущен из-за негативного новостного фона ({neg} нег. из {mentions} упом.)")
+            # Передаем строку формата "2/10", чтобы красиво выводилось по команде /news
+            FILTERED_BY_NEWS.append({"symbol": sym, "neg_count": f"{neg}/{mentions}", "time": int(time.time())})
             FILTERED_BY_NEWS[:] = FILTERED_BY_NEWS[-10:]
             continue
         if pos > neg:
