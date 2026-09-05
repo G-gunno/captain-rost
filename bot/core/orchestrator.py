@@ -25,6 +25,8 @@ MIN_RR_SAT = 2.0
 MIN_EARLY_EXIT_PCT = 1.0
 _notify_cb = None
 _reconciled = False
+_last_mode = None
+_last_regime = None
 
 
 def usd(x):
@@ -168,6 +170,7 @@ async def maybe_reconcile():
 
 # ==================== ТОРГОВЫЙ ЦИКЛ ====================
 async def run_cycle():
+    global _last_mode, _last_regime
     await maybe_reconcile()
 
     if bot_state.paused or not bot_state.trading_enabled:
@@ -187,6 +190,13 @@ async def run_cycle():
     mode, _ = learner.risk_mode(
         metrics["profit_factor"], metrics["max_drawdown_pct"], metrics["total_trades"]
     )
+    
+    if _last_mode is not None and mode != _last_mode:
+        m_em = {"NORMAL": "🟢", "CAUTIOUS": "🟡", "STRICT": "🔴", "AGGRESSIVE": "🚀"}
+        old_e, new_e = m_em.get(_last_mode, '⚪'), m_em.get(mode, '⚪')
+        await notify(f"🎚 <b>Смена режима риска</b>\n{old_e} {_last_mode} ➡️ {new_e} <b>{mode}</b>")
+    _last_mode = mode
+
     pf = metrics["profit_factor"]
     pf_txt = "∞" if pf == float("inf") else (f"{pf:.2f}" if pf is not None else "—")
     logger.info(f"METRICS: PF={pf_txt} | DD={metrics['max_drawdown_pct']:.1f}% | "
@@ -217,6 +227,14 @@ async def run_cycle():
     # 2. Оценка рынка
     regime, info = await get_regime()
     logger.info(f"Regime: {regime} | {info}")
+    
+    if _last_regime is not None and regime != _last_regime:
+        r_em = {"bull": "🟢", "neutral": "🟡", "bear": "🔴"}
+        r_tx = {"bull": "бычий", "neutral": "нейтральный", "bear": "медвежий"}
+        old_str = f"{r_em.get(_last_regime, '⚪')} {r_tx.get(_last_regime, _last_regime)}"
+        new_str = f"{r_em.get(regime, '⚪')} <b>{r_tx.get(regime, regime)}</b>"
+        await notify(f"🧭 <b>Смена фазы рынка</b>\n{old_str} ➡️ {new_str}\n₿ {fmt_price(info.get('btc', 0))}")
+    _last_regime = regime
 
     # 3. ЭКСТРЕННЫЙ РИСК-МЕНЕДЖМЕНТ
     btc_t = tickers.get("BTCUSDT", {})
