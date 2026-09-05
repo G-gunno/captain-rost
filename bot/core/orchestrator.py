@@ -663,7 +663,7 @@ async def run_cycle():
 
         size = buy_size(equity, cand["score"], cand["liquidity"], paper.usdt,
                         sl_dist, kind=kind, realized=paper.realized,
-                        sat_size_pct=sat_size)
+                        sat_size_pct=sat_size, size_multiplier=cand.get("size_mult", 1.0))
         if size < 5:
             logger.info(f"{sym}: пропущен — размер позиции < 5$")
             continue
