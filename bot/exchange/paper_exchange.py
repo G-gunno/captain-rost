@@ -25,6 +25,7 @@ class PaperExchange:
         self.orders = []
         self.trades = []
         self.realized = []
+        self.market_history = []
         self._last_upload = 0.0
         self._load()
         self._migrate_sectors()
@@ -45,6 +46,7 @@ class PaperExchange:
             self.orders = data.get("orders", [])
             self.trades = data.get("trades", [])
             self.realized = data.get("realized", [])
+            self.market_history = data.get("market_history", [])
             logger.info(f"Paper state загружен: USDT={self.usdt:.2f}, позиций={len(self.positions)}")
 
     def _migrate_sectors(self):
@@ -79,6 +81,7 @@ class PaperExchange:
             "orders": self.orders,
             "trades": self.trades,
             "realized": self.realized,
+            "market_history": self.market_history,
         }
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
