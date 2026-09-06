@@ -119,25 +119,36 @@ async def startup_reconciliation():
         if a <= 0:
             continue
         fixed = []
-        tp_dist = (pos.get("tp", 0) - entry) / entry * 100 if pos.get("tp") else 0
-        if not pos.get("tp1_done") and (not pos.get("tp") or pos["tp"] <= entry or tp_dist < MIN_TP_PCT):
+        
+        # Проверяем TP со стрелочкой направления
+        old_tp = pos.get("tp", 0)
+        tp_dist = (old_tp - entry) / entry * 100 if old_tp else 0
+        if not pos.get("tp1_done") and (not old_tp or old_tp <= entry or tp_dist < MIN_TP_PCT):
             d = max(min(2.0 * a / entry * 100, MAX_SL_PCT * 2), MIN_TP_PCT)
-            pos["tp"] = round(entry * (1 + d / 100), 10)
-            fixed.append(f"TP {fmt_price(pos['tp'])}")
+            new_tp = round(entry * (1 + d / 100), 10)
+            pos["tp"] = new_tp
+            arrow = "⬆️" if new_tp > old_tp else ("⬇️" if new_tp < old_tp else "")
+            fixed.append(f"TP {fmt_price(new_tp)} {arrow}".strip())
 
+        # Проверяем SL со стрелочкой направления
+        old_sl = pos.get("sl", 0)
         if pos.get("tp1_done"):
             breakeven_price = entry * (1 + (FEE_PCT * 2) / 100)
-            if pos.get("sl", 0) < breakeven_price:
-                pos["sl"] = round(breakeven_price, 10)
-                fixed.append(f"SL {fmt_price(pos['sl'])} (безубыток)")
+            if old_sl < breakeven_price:
+                new_sl = round(breakeven_price, 10)
+                pos["sl"] = new_sl
+                arrow = "⬆️" if new_sl > old_sl else ("⬇️" if new_sl < old_sl else "")
+                fixed.append(f"SL {fmt_price(new_sl)} {arrow} (безубыток)".strip())
         else:
-            sl = pos.get("sl", 0)
-            sl_dist = (entry - sl) / entry * 100 if sl else 0
+            sl_dist = (entry - old_sl) / entry * 100 if old_sl else 0
             max_sl = SAT_MAX_SL_PCT if pos.get("kind") == "satellite" else MAX_SL_PCT
-            if not sl or (sl < entry and (sl_dist > max_sl or sl_dist < MIN_SL_PCT)):
+            if not old_sl or (old_sl < entry and (sl_dist > max_sl or sl_dist < MIN_SL_PCT)):
                 d = max(min(1.2 * a / entry * 100, max_sl), MIN_SL_PCT)
-                pos["sl"] = round(entry * (1 - d / 100), 10)
-                fixed.append(f"SL {fmt_price(pos['sl'])}")
+                new_sl = round(entry * (1 - d / 100), 10)
+                pos["sl"] = new_sl
+                arrow = "⬆️" if new_sl > old_sl else ("⬇️" if new_sl < old_sl else "")
+                fixed.append(f"SL {fmt_price(new_sl)} {arrow}".strip())
+
         if fixed:
             actions.append(f"{pair_html(sym[:-4], pos.get('sector') or 'Other', kind_tag_of(pos), pos.get('tier'))} · {' · '.join(fixed)}")
     paper.save()
@@ -176,7 +187,7 @@ async def startup_reconciliation():
             
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
-            bid1 = t.get("bid1", t["last"]) # <-- Лучший Bid
+            bid1 = t.get("bid1", t["last"])
             
             if not is_mom and t["last"] > old_price + 1.5 * a:
                 paper.cancel_order(order["id"])
@@ -188,7 +199,6 @@ async def startup_reconciliation():
                 price_icon = "⬆️" if ideal_price > old_price else "⬇️"
                 sl_dist = 0.6 * a
             else:
-                # Снайпер всегда Maker (не выше лучшего бида)
                 ideal_price = min(ideal_price, bid1)
                 if ideal_price > old_price:
                     order["price"] = old_price
