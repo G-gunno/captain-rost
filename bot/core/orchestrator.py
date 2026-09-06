@@ -499,8 +499,8 @@ async def run_cycle():
         is_toxic = neg > 0 and neg > pos_news and neg >= (mentions * 0.2)
         if is_toxic:
             paper.cancel_order(order["id"])
-            _fomo_cooldowns[order["symbol"]] = current_time + 7200
-            await notify(f"⚠️ <b>Ордер снят</b> · {o_pair} · негатив {neg}/{mentions} (пауза 2ч)")
+            _fomo_cooldowns[order["symbol"]] = current_time + 1800  # 30 минут пауза при негативе
+            await notify(f"⚠️ <b>Ордер снят</b> · {o_pair} · негатив {neg}/{mentions} (пауза 30м)")
             continue
 
         score_now, candles = await live_score(order["symbol"], t, regime, news_items)
@@ -511,21 +511,22 @@ async def run_cycle():
             continue
         if score_now < thr - 2:
             paper.cancel_order(order["id"])
-            _fomo_cooldowns[order["symbol"]] = current_time + 7200
-            await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал умер (пауза 2ч)")
+            _fomo_cooldowns[order["symbol"]] = current_time + 1800  # 30 минут пауза
+            await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал умер (пауза 30м)")
             continue
 
-        if (current_time - order["created"]) < 900:
+        # Уменьшили порог ожидания до 5 минут (300 сек) для 1-минутного цикла
+        if (current_time - order["created"]) < 300:
             continue
         if order.get("requotes", 0) >= 2:
             paper.cancel_order(order["id"])
-            _fomo_cooldowns[order["symbol"]] = current_time + 1800
-            await notify(f"❌ <b>Ордер снят</b> · {o_pair} · 3 попытки без исполнения (пауза 30м)")
+            _fomo_cooldowns[order["symbol"]] = current_time + 900  # 15 минут пауза
+            await notify(f"❌ <b>Ордер снят</b> · {o_pair} · 3 попытки без исполнения (пауза 15м)")
             continue
         if score_now < thr:
             paper.cancel_order(order["id"])
-            _fomo_cooldowns[order["symbol"]] = current_time + 3600
-            await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал ослаб (пауза 1ч)")
+            _fomo_cooldowns[order["symbol"]] = current_time + 900  # 15 минут пауза
+            await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал ослаб (пауза 15м)")
             continue
             
         paper.cancel_order(order["id"])
@@ -538,24 +539,21 @@ async def run_cycle():
         old_price = order["price"]
         
         if is_mom:
-            # Для ракеты разрешаем погоню (до 3 раз), стоп короткий
             order["price"] = ideal_price
             price_icon = "⬆️" if ideal_price > old_price else "⬇️"
-            sl_dist = 0.6 * a  # Короткий стоп (-0.6 ATR)
+            sl_dist = 0.6 * a
         else:
-            # Для снайпера: если улетела больше чем на 1.5 ATR - снимаем
             if t["last"] > old_price + 1.5 * a:
-                _fomo_cooldowns[order["symbol"]] = current_time + 1800
-                await notify(f"🚀 <b>Ордер снят (Улетела)</b> · {o_pair} · пауза 30м")
+                _fomo_cooldowns[order["symbol"]] = current_time + 600  # 10 минут пауза, если улетела
+                await notify(f"🚀 <b>Ордер снят (Улетела)</b> · {o_pair} · пауза 10м")
                 continue
-            # Лимитку вверх не двигаем, только вниз или на месте
             if ideal_price > old_price:
                 order["price"] = old_price
                 price_icon = "⏸"
             else:
                 order["price"] = ideal_price
                 price_icon = "⬇️"
-            sl_dist = 1.2 * a  # Стандартный стоп
+            sl_dist = 1.2 * a
 
         order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
         order["sl"] = min(order["price"] - sl_dist, order["price"] * (1 - MIN_SL_PCT / 100))
