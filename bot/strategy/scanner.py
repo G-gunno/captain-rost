@@ -237,7 +237,7 @@ async def live_score(sym, t, regime, news_items=None, deriv_t=None):
     
     # Применяем бонус к живому скору (только для ракет)
     _, _, keys_live, sv_live = score_symbol(candles, t, regime)
-    is_mom_live = (sv_live.get("rsi", 0) >= 65 and sv_live.get("volume", 0) >= 1.5 and "impulse" in keys_live)
+    is_mom_live = ("impulse" in keys_live and sv_live.get("rsi", 0) >= 60 and (sv_live.get("volume", 0) >= 1.5 or sv_live.get("chg24h", 0) >= 6.0))
     entry_mode_live = "rocket" if is_mom_live else "sniper"
     mode_score_bonus, _ = learner.entry_mode_bias(entry_mode_live)
     
@@ -375,7 +375,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
         score10 = (score / raw_max * SCORE_MAX) if raw_max > 0 else 0.0
 
-        is_momentum = (signal_values.get("rsi", 0) >= 65 and signal_values.get("volume", 0) >= 1.5 and "impulse" in keys)
+        is_momentum = ("impulse" in keys and signal_values.get("rsi", 0) >= 60 and (signal_values.get("volume", 0) >= 1.5 or signal_values.get("chg24h", 0) >= 6.0))
 
         entry_mode = "rocket" if is_momentum else "sniper"
         mode_score_bonus, mode_size_mult = learner.entry_mode_bias(entry_mode)
