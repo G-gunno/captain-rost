@@ -11,7 +11,7 @@ from bot.news.cmc import (get_coin_name, get_sectors_for_pool,
                           get_ranks_for_pool, tier_of, TIER_EMOJI, fetch_missing_names)
 from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sentiment
 # --- НОВЫЙ ИМПОРТ ---
-from bot.strategy.fundamental import get_macro_trend, is_sector_hot, is_danger_unlock
+from bot.strategy.fundamental import get_macro_trend, is_sector_hot, is_danger_unlock, check_coinglass_liquidation_threat
 
 SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
 FILTERED_BY_NEWS = []
@@ -264,6 +264,10 @@ async def live_score(sym, t, regime, news_items=None, deriv_t=None):
         # Отрицательный фандинг — шортисты в ловушке, топливо для роста
         elif funding < -0.01:
             score10 += 0.5
+        # --- Защита от сквизов (Coinglass) ---
+        is_sqz = await check_coinglass_liquidation_threat(sym)
+        if is_sqz:
+            score10 -= 1.5  # Жестко штрафуем монету, если толпа набилась в лонги
             
     score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)    
     return score10, candles
@@ -408,6 +412,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             score10 += mode_score_bonus
             reasons.append(f"стат. входов (🚀): {mode_score_bonus:+.1f}")
 
+        # --- Влияние Фьючерсного рынка ---
         deriv_t = deriv_tickers.get(sym)
         if deriv_t:
             funding = deriv_t.get("funding", 0)
@@ -417,6 +422,12 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             elif funding < -0.01:
                 score10 += 0.5
                 reasons.append(f"шорт-сквиз потенциал Фьюч ({+0.5})")
+
+        # Защита от сквизов (Coinglass)
+        is_sqz = await check_coinglass_liquidation_threat(sym)
+        if is_sqz:
+            score10 -= 1.5
+            reasons.append(f"риск ликвидаций Coinglass ({-1.5})")
 
         score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)
 
