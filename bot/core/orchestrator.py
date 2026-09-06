@@ -188,31 +188,40 @@ async def startup_reconciliation():
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
             bid1 = t.get("bid1", t["last"])
-            
-            if not is_mom and t["last"] > old_price + 1.5 * a:
-                paper.cancel_order(order["id"])
-                actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · снят 🚀 (улетел)")
-                continue
+
+            dev_pct = abs(ideal_price - old_price) / old_price * 100
+            price_changed = False
 
             if is_mom:
-                order["price"] = ideal_price
-                price_icon = "⬆️" if ideal_price > old_price else "⬇️"
+                if ideal_price > old_price and dev_pct >= 0.2:
+                    order["price"] = ideal_price
+                    price_icon = "⬆️"
+                    price_changed = True
+                    order["hunt_count"] = order.get("hunt_count", 0) + 1
+                elif ideal_price < old_price and dev_pct >= 0.2:
+                    order["price"] = ideal_price
+                    price_icon = "⬇️"
+                    price_changed = True
                 sl_dist = 0.6 * a
             else:
                 ideal_price = min(ideal_price, bid1)
-                if ideal_price > old_price:
-                    order["price"] = old_price
-                    price_icon = "⏸"
-                else:
+                if t["last"] > old_price + 1.5 * a:
+                    paper.cancel_order(order["id"])
+                    actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · снят 🚀 (улетел)")
+                    continue
+                    
+                if ideal_price < old_price and dev_pct >= 0.2:
                     order["price"] = ideal_price
                     price_icon = "⬇️"
+                    price_changed = True
                 sl_dist = 1.2 * a
             
             order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
             order["sl"] = min(order["price"] - sl_dist, order["price"] * (1 - MIN_SL_PCT / 100))
-            order["created"] = int(time.time())
-            order["requotes"] = 0
-            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · перевыставлен {price_icon} · ⭐ {score:.1f}")
+            
+            if price_changed:
+                order["created"] = int(time.time())
+                actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · сдвиг {price_icon} · ⭐ {score:.1f}")
     paper.save()
 
     for line in actions:
@@ -484,7 +493,7 @@ async def run_cycle():
             f"{funding_line(ex.get('transferred', 0))}"
         )
 
-    # 6. Неисполненные ордера (живая проверка сигнала + реквота по offset)
+# 6. Неисполненные ордера (живая проверка сигнала + хантинг/коррекция)
     thr = threshold(regime)
     for order in list(paper.orders):
         t = tickers.get(order["symbol"])
@@ -499,8 +508,8 @@ async def run_cycle():
         is_toxic = neg > 0 and neg > pos_news and neg >= (mentions * 0.2)
         if is_toxic:
             paper.cancel_order(order["id"])
-            _fomo_cooldowns[order["symbol"]] = current_time + 1800  # 30 минут пауза при негативе
-            await notify(f"⚠️ <b>Ордер снят</b> · {o_pair} · негатив {neg}/{mentions} (пауза 30м)")
+            _fomo_cooldowns[order["symbol"]] = current_time + 7200
+            await notify(f"⚠️ <b>Ордер снят</b> · {o_pair} · негатив {neg}/{mentions} (пауза 2ч)")
             continue
 
         score_now, candles = await live_score(order["symbol"], t, regime, news_items)
@@ -511,62 +520,88 @@ async def run_cycle():
             continue
         if score_now < thr - 2:
             paper.cancel_order(order["id"])
-            _fomo_cooldowns[order["symbol"]] = current_time + 1800  # 30 минут пауза
-            await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал умер (пауза 30м)")
+            _fomo_cooldowns[order["symbol"]] = current_time + 7200
+            await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал умер (пауза 2ч)")
             continue
 
-        # Уменьшили порог ожидания до 5 минут (300 сек) для 1-минутного цикла
-        if (current_time - order["created"]) < 300:
-            continue
-        if order.get("requotes", 0) >= 2:
-            paper.cancel_order(order["id"])
-            _fomo_cooldowns[order["symbol"]] = current_time + 900  # 15 минут пауза
-            await notify(f"❌ <b>Ордер снят</b> · {o_pair} · 3 попытки без исполнения (пауза 15м)")
-            continue
         if score_now < thr:
             paper.cancel_order(order["id"])
-            _fomo_cooldowns[order["symbol"]] = current_time + 900  # 15 минут пауза
-            await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал ослаб (пауза 15м)")
+            _fomo_cooldowns[order["symbol"]] = current_time + 3600
+            await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал ослаб (пауза 1ч)")
+            continue
+
+        # Проверка на протухание ордера (Тайм-аут 2 часа = 7200 сек)
+        if (current_time - order["created"]) > 7200:
+            paper.cancel_order(order["id"])
+            _fomo_cooldowns[order["symbol"]] = current_time + 1800
+            await notify(f"⏳ <b>Ордер снят</b> · {o_pair} · тайм-аут 2ч без исполнения")
             continue
             
-        paper.cancel_order(order["id"])
-        
         atr_pct = a / t["last"] * 100
         is_mom = order.get("is_momentum", False)
         off = entry_offset(score_now, thr, regime, atr_pct, is_mom)
         
         ideal_price = t["last"] * (1 + off)
         old_price = order["price"]
+        bid1 = t.get("bid1", t["last"])
+        
+        dev_pct = abs(ideal_price - old_price) / old_price * 100
+        action_type = None
         
         if is_mom:
-            order["price"] = ideal_price
-            price_icon = "⬆️" if ideal_price > old_price else "⬇️"
+            # Для ракеты разрешаем погоню (хантинг вверх) до 3 раз
+            if ideal_price > old_price and dev_pct >= 0.2:
+                if order.get("hunt_count", 0) >= 2:
+                    paper.cancel_order(order["id"])
+                    _fomo_cooldowns[order["symbol"]] = current_time + 1800
+                    await notify(f"🏃 <b>Ордер снят (Убежала)</b> · {o_pair} · 3 попытки догнать")
+                    continue
+                order["price"] = ideal_price
+                order["hunt_count"] = order.get("hunt_count", 0) + 1
+                action_type = "hunt"
+                price_icon = "⬆️"
+            # Если цена просела - просто корректируем ордер вниз (без траты жизней хантинга)
+            elif ideal_price < old_price and dev_pct >= 0.2:
+                order["price"] = ideal_price
+                action_type = "correct"
+                price_icon = "⬇️"
             sl_dist = 0.6 * a
         else:
+            # Для снайпера: если улетела больше чем на 1.5 ATR - снимаем
             if t["last"] > old_price + 1.5 * a:
-                _fomo_cooldowns[order["symbol"]] = current_time + 600  # 10 минут пауза, если улетела
-                await notify(f"🚀 <b>Ордер снят (Улетела)</b> · {o_pair} · пауза 10м")
+                paper.cancel_order(order["id"])
+                _fomo_cooldowns[order["symbol"]] = current_time + 1800
+                await notify(f"🚀 <b>Ордер снят (Улетела)</b> · {o_pair} · пауза 30м")
                 continue
-            if ideal_price > old_price:
-                order["price"] = old_price
-                price_icon = "⏸"
-            else:
+            
+            ideal_price = min(ideal_price, bid1)
+            # Снайпер двигает лимитку только вниз за ценой
+            if ideal_price < old_price and dev_pct >= 0.2:
                 order["price"] = ideal_price
+                action_type = "correct"
                 price_icon = "⬇️"
             sl_dist = 1.2 * a
 
         order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
         order["sl"] = min(order["price"] - sl_dist, order["price"] * (1 - MIN_SL_PCT / 100))
-        order["created"] = current_time
-        order["requotes"] = order.get("requotes", 0) + 1
-        paper.orders.append(order)
-        paper.save()
         
-        mode_txt = "🚀 Ракета" if is_mom else "🏹 Снайпер"
-        await notify(
-            f"🔁 <b>Ордер {price_icon}</b> · {o_pair} ({mode_txt})\n"
-            f"📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · попытка {order['requotes'] + 1}"
-        )
+        if action_type:
+            order["created"] = current_time  # Сброс таймера протухания при перестановке
+            paper.save()
+            if action_type == "hunt":
+                msg_title = f"🏃 <b>Охота {price_icon}</b>"
+                msg_desc = f"попытка {order['hunt_count']}/3"
+            else:
+                msg_title = f"📐 <b>Коррекция {price_icon}</b>"
+                msg_desc = f"сдвиг на {dev_pct:.2f}%"
+                
+            await notify(
+                f"{msg_title} · {o_pair} ({'Ракета' if is_mom else 'Снайпер'})\n"
+                f"📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · {msg_desc}"
+            )
+        else:
+            # Если цена визуально не изменилась (сдвиг < 0.2%), просто тихо обновляем TP/SL в памяти
+            paper.save()
 
 # 7. Сканирование и покупки / ротация
     candidates = await scan(regime, tickers, deriv_tickers, limit=20)
