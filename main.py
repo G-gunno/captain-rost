@@ -314,8 +314,24 @@ async def cmd_start(update, context):
 
 
 async def cmd_info(update, context):
-    """Паспорт бота — всё одним текстовым сообщением, без кнопок."""
+    """Паспорт бота — краткая сводка + подробный Whitepaper файлом."""
+    from bot.services.info import info_full_text, generate_whitepaper
+    import io
+
+    # 1. Отправляем короткую и красивую сводку текстом в чат
     await reply(update, info_full_text())
+
+    # 2. Генерируем "на лету" подробную техническую документацию (Whitepaper)
+    whitepaper_text = generate_whitepaper()
+    doc = io.BytesIO(whitepaper_text.encode('utf-8'))
+    doc.name = "CaptainRost_Whitepaper.txt"
+    
+    # 3. Отправляем файл пользователю
+    await update.message.reply_document(
+        document=doc,
+        caption="📄 <b>Подробная документация (Whitepaper)</b>\nПолное описание архитектуры, формул и логики бота.",
+        parse_mode="HTML"
+    )
 
 
 async def cmd_help(update, context):
