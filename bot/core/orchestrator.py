@@ -562,7 +562,7 @@ async def run_cycle():
         paper.orders.append(order)
         paper.save()
         
-        mode_txt = "Ракета" if is_mom else "Снайпер"
+        mode_txt = "🚀 Ракета" if is_mom else "🏹 Снайпер"
         await notify(
             f"🔁 <b>Ордер {price_icon}</b> · {o_pair} ({mode_txt})\n"
             f"📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · попытка {order['requotes'] + 1}"
