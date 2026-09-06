@@ -11,6 +11,9 @@ NEWS_FEEDS = [
     "https://cointelegraph.com/rss",
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://decrypt.co/feed",
+    "https://cryptoslate.com/feed/",
+    "https://bitcoinist.com/feed/",
+    "https://newsbtc.com/feed/"
 ]
 
 NEG_WORDS = [
