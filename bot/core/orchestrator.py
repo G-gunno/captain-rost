@@ -58,25 +58,24 @@ def corr_txt(d):
 
 def entry_offset(score, thr, regime, atr_pct, is_momentum=False):
     """Смещение входа: гибридная логика (ракета vs снайпер)."""
-    hunt = shadow.hunt()  # выученный откат (обычно отрицательный, от -0.4% до -1.0%)
+    hunt = shadow.hunt() 
     
     if is_momentum:
-        # Ракета: залетаем агрессивно по рынку или чуть выше
         return max(shadow.capture(), atr_pct / 100 * 0.1)
     
     surplus = score - thr
     if regime == "bear":
-        return hunt * 1.5  # Медвежка: берем только глубокие откаты
+        return hunt * 1.5  
     elif regime == "neutral":
-        return hunt * 1.2  # Боковик: ждем откат чуть глубже обычного
+        return hunt * 1.2  
         
     # Бычий рынок (Снайпер)
     if surplus >= 3.0:
-        return max(shadow.near(), -atr_pct / 100 * 0.3)
+        return max(shadow.near(), -atr_pct / 100 * 0.1)  # Сильный сигнал - берем почти по рынку
     if surplus >= 1.5:
-        return min(hunt, -atr_pct / 100 * 0.5)
+        return min(hunt * 0.5, -atr_pct / 100 * 0.3)  # Средний сигнал - берем половину отката
         
-    return hunt * 1.5  # Слабый сигнал — берем только на проливе
+    return hunt  # Слабый сигнал — берем стандартный откат (без умножения на 1.5)
 
 
 def set_notifier(cb):
@@ -680,7 +679,7 @@ async def run_cycle():
 
         sl_dist = (entry - sl) / entry * 100
         rr = (tp - entry) / (entry - sl) if entry > sl else 0
-        if tp <= entry or sl >= entry or rr < min_rr:
+        if tp <= entry or sl >= entry or round(rr, 2) < min_rr:
             logger.info(f"{sym}: пропущен — плохой Risk/Reward (R:R = {rr:.2f})")
             continue
 
