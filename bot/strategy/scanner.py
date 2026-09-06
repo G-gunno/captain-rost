@@ -10,6 +10,8 @@ from bot.strategy.shadow import shadow
 from bot.news.cmc import (get_coin_name, get_sectors_for_pool,
                           get_ranks_for_pool, tier_of, TIER_EMOJI, fetch_missing_names)
 from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sentiment
+# --- НОВЫЙ ИМПОРТ ---
+from bot.strategy.fundamental import get_macro_trend, is_sector_hot, is_danger_unlock
 
 SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
 FILTERED_BY_NEWS = []
@@ -103,6 +105,15 @@ async def get_regime():
                     logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые. Режим принудительно переведен в 'bull' (Альтсезон).")
                 else:
                     logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые. Режим остается 'neutral'.")
+
+    # 3. Ончейн Макро-тренд (DefiLlama Stablecoin Flows)
+    stable_trend = get_macro_trend()
+    if stable_trend == "bull" and regime == "neutral":
+        regime = "bull"
+        logger.info("Macro: Приток стейблкоинов! Режим принудительно переведен в 'bull'.")
+    elif stable_trend == "bear" and regime == "bull":
+        regime = "neutral" 
+        logger.info("Macro: Отток стейблкоинов! Бычий режим охлажден до 'neutral'.")
 
     return regime, {"btc": last, "ema50": e50, "ema200": e200}
 
@@ -345,10 +356,23 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
         sector = sectors_map.get(base, "Other")
         tier = tier_of(ranks_map.get(base))
 
+        # Опасность разлока DropsTab
+        if is_danger_unlock(sym):
+            logger.info(f"{sym}: пропущен — грядущий крупный разлок токенов (DropsTab) ⚠️")
+            FILTERED_BY_NEWS.append({"symbol": sym, "neg_count": "Unlock", "time": int(time.time())})
+            FILTERED_BY_NEWS[:] = FILTERED_BY_NEWS[-10:]
+            continue
+
         sb = learner.sector_bias(sector)
         if sb:
             score += sb
             reasons.append(f"сектор {sector}: {sb:+.2f}")
+            
+        # Бонус за приток ликвидности (DefiLlama)
+        if is_sector_hot(sector):
+            score += 0.5
+            reasons.append(f"TVL приток (DefiLlama): +0.5")
+
         tb = learner.tier_bias(tier)
         if tb:
             score += tb
