@@ -601,61 +601,7 @@ async def run_cycle():
         kind = cand.get("kind", "core")
         sector = cand.get("sector", "Other")
 
-        # --- Проверка лимитов сектора и внутрисекторная ротация ---
-        lim = other_lim if sector == "Other" else sec_lim
-        sector_count = sum(
-            1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector
-        ) + sum(1 for o in paper.orders if (o.get("sector") or "Other") == sector)
-
-        if sector_count >= lim:
-            sector_positions = [
-                (s, p) for s, p in paper.positions.items()
-                if (p.get("sector") or "Other") == sector
-            ]
-            rotated = False
-            if sector_positions:
-                weakest_sym, weakest_pos = min(sector_positions, key=lambda kv: kv[1].get("score", 0))
-                weakest_score = weakest_pos.get("score", 0)
-                t_weak = tickers.get(weakest_sym)
-                if t_weak:
-                    weak_pnl = (t_weak["last"] - weakest_pos["avg"]) / weakest_pos["avg"] * 100
-                    
-                    can_rotate = False
-                    if sector == "Other":
-                        can_rotate = cand["score"] >= weakest_score + 1.0 and not weakest_pos.get("tp1_done") and weak_pnl >= -2.0
-                    else:
-                        can_rotate = cand["score"] >= weakest_score + 1.5 and not weakest_pos.get("tp1_done") and -0.5 <= weak_pnl < 2.0
-
-                    if can_rotate:
-                        ex = paper._sell(weakest_sym, t_weak["last"], "РОТАЦИЯ СЕКТОРА 🔄", regime_now=regime)
-                        sector_count -= 1
-                        await notify(
-                            f"🔄 <b>Ротация сектора</b> {sector} · <b>{weakest_sym[:-4]}</b> → <b>{sym[:-4]}</b>\n"
-                            f"{pnl_emoji(weak_pnl)} {fmt_pct(weak_pnl)} · ⭐ {weakest_score:.1f} → {cand['score']:.1f}\n"
-                            f"💵 {usd(ex['pnl'])}{funding_line(ex.get('transferred', 0))}"
-                        )
-                        logger.info(f"{sym}: ротация сектора — продан {weakest_sym} "
-                                    f"(score {weakest_score:.1f}, pnl {weak_pnl:+.2f}%) "
-                                    f"для {sym} (score {cand['score']:.1f})")
-                        rotated = True
-            
-            if not rotated:
-                logger.info(f"{sym}: пропущен — сектор {sector} переполнен, слабаков для ротации нет")
-                continue
-
-        # --- Проверка лимитов сателлитов ---
-        if kind == "satellite":
-            sat_exposure = sum(
-                p["qty"] * tickers.get(s, {}).get("last", 0)
-                for s, p in paper.positions.items() if p.get("kind") == "satellite"
-            ) + sum(
-                o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite"
-            )
-            if sat_exposure >= equity * sat_limit / 100:
-                logger.info(f"{sym}: пропущен — лимит сателлитов исчерпан ({sat_limit:.0f}%)")
-                continue
-
-        # --- Расчет точек входа и стопов ---
+        # --- 1. Расчет точек входа, стопов и размера ---
         is_mom = cand.get("is_momentum", False)
         off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], is_mom)
         
@@ -710,48 +656,118 @@ async def run_cycle():
             logger.info(f"{sym}: пропущен — размер позиции < 5$")
             continue
 
-        # --- Проверка баланса и ОБЩАЯ РОТАЦИЯ ---
-        pending_amount = sum(o["qty"] * o["price"] for o in paper.orders)
-        if pending_amount + size > paper.usdt:
-            freed_space = False
-            
-            # 1. Пытаемся снять слабый ордер
-            if paper.orders:
-                worst_order = min(paper.orders, key=lambda o: o.get("score", 0))
-                worst_score = worst_order.get("score", 0)
-                if cand["score"] >= worst_score + 1.0:
-                    paper.cancel_order(worst_order["id"])
-                    pending_amount -= worst_order["qty"] * worst_order["price"]
-                    await notify(
-                        f"🔄 <b>Ротация ордера</b> · <b>{worst_order['symbol'][:-4]}</b> снят\n"
-                        f"Место для <b>{sym[:-4]}</b> · ⭐ {worst_score:.1f} → {cand['score']:.1f}"
-                    )
-                    logger.info(f"{sym}: ротация — снят ордер {worst_order['symbol']}")
-                    freed_space = True
-
-            # 2. Если всё еще нет денег, пытаемся продать слабую позицию
-            if (pending_amount + size > paper.usdt) and paper.positions:
-                worst_sym, worst_pos = min(paper.positions.items(), key=lambda kv: kv[1].get("score", 0))
-                worst_score = worst_pos.get("score", 0)
-                t_weak = tickers.get(worst_sym)
-                if t_weak:
-                    weak_pnl = (t_weak["last"] - worst_pos["avg"]) / worst_pos["avg"] * 100
-                    if cand["score"] >= worst_score + 1.5 and not worst_pos.get("tp1_done") and weak_pnl >= -2.0:
-                        ex = paper._sell(worst_sym, t_weak["last"], "ОБЩАЯ РОТАЦИЯ 🔄", regime_now=regime)
-                        await notify(
-                            f"🔄 <b>Общая ротация</b> · <b>{worst_sym[:-4]}</b> → <b>{sym[:-4]}</b>\n"
-                            f"{pnl_emoji(weak_pnl)} {fmt_pct(weak_pnl)} · ⭐ {worst_score:.1f} → {cand['score']:.1f}\n"
-                            f"💵 {usd(ex['pnl'])}{funding_line(ex.get('transferred', 0))}"
-                        )
-                        logger.info(f"{sym}: общая ротация — продан {worst_sym}")
-                        freed_space = True
-
-            # Если места так и не появилось — пропускаем этого кандидата и идем к следующему
-            if pending_amount + size > paper.usdt:
-                logger.info(f"{sym}: пропущен — нет свободных средств и слабаков для ротации")
+        # --- 2. Проверка лимитов сателлитов ---
+        if kind == "satellite":
+            sat_exposure = sum(
+                p["qty"] * tickers.get(s, {}).get("last", 0)
+                for s, p in paper.positions.items() if p.get("kind") == "satellite"
+            ) + sum(
+                o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite"
+            )
+            if sat_exposure >= equity * sat_limit / 100:
+                logger.info(f"{sym}: пропущен — лимит сателлитов исчерпан ({sat_limit:.0f}%)")
                 continue
 
-        # --- Финальное выставление ордера ---
+        # --- 3. АТОМАРНЫЙ ПЛАН РОТАЦИИ (Сектор + Баланс) ---
+        planned_sells = []
+        planned_cancels = []
+        
+        lim = other_lim if sector == "Other" else sec_lim
+        sector_count = sum(1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector) + \
+                       sum(1 for o in paper.orders if (o.get("sector") or "Other") == sector)
+
+        # Секторная ротация
+        if sector_count >= lim:
+            sector_positions = [(s, p) for s, p in paper.positions.items() if (p.get("sector") or "Other") == sector]
+            if sector_positions:
+                w_sym, w_pos = min(sector_positions, key=lambda kv: kv[1].get("score", 0))
+                t_w = tickers.get(w_sym)
+                if t_w:
+                    weak_pnl = (t_w["last"] - w_pos["avg"]) / w_pos["avg"] * 100
+                    can_rotate = False
+                    if sector == "Other":
+                        can_rotate = cand["score"] >= w_pos.get("score", 0) + 1.0 and not w_pos.get("tp1_done") and weak_pnl >= -2.0
+                    else:
+                        can_rotate = cand["score"] >= w_pos.get("score", 0) + 1.5 and not w_pos.get("tp1_done") and -0.5 <= weak_pnl < 2.0
+                        
+                    if can_rotate:
+                        planned_sells.append((w_sym, w_pos, t_w["last"], weak_pnl, "РОТАЦИЯ СЕКТОРА 🔄"))
+                    else:
+                        logger.info(f"{sym}: пропущен — сектор {sector} переполнен, слабак {w_sym} слишком силен")
+                        continue
+            else:
+                sector_orders = [o for o in paper.orders if (o.get("sector") or "Other") == sector]
+                if sector_orders:
+                    w_o = min(sector_orders, key=lambda o: o.get("score", 0))
+                    if cand["score"] >= w_o.get("score", 0) + 1.0:
+                        planned_cancels.append(w_o)
+                    else:
+                        logger.info(f"{sym}: пропущен — сектор {sector} переполнен ордерами, слабаков нет")
+                        continue
+                else:
+                    continue
+
+        # Общая ротация баланса
+        pending_amount = sum(o["qty"] * o["price"] for o in paper.orders)
+        proj_pending = pending_amount
+        proj_usdt = paper.usdt
+        
+        for w_sym, w_pos, last, pnl, reason in planned_sells:
+            proj_usdt += w_pos["qty"] * last
+        for w_o in planned_cancels:
+            proj_pending -= w_o["qty"] * w_o["price"]
+            
+        if proj_pending + size > proj_usdt:
+            weak_order = None
+            if paper.orders:
+                available_orders = [o for o in paper.orders if o not in planned_cancels]
+                if available_orders:
+                    w_o = min(available_orders, key=lambda o: o.get("score", 0))
+                    if cand["score"] >= w_o.get("score", 0) + 1.0:
+                        weak_order = w_o
+
+            weak_pos = None
+            if paper.positions:
+                planned_syms = [s[0] for s in planned_sells]
+                available_pos = [(s, p) for s, p in paper.positions.items() if s not in planned_syms]
+                if available_pos:
+                    w_sym, w_p = min(available_pos, key=lambda kv: kv[1].get("score", 0))
+                    t_w = tickers.get(w_sym)
+                    if t_w:
+                        pnl = (t_w["last"] - w_p["avg"]) / w_p["avg"] * 100
+                        if cand["score"] >= w_p.get("score", 0) + 1.5 and not w_p.get("tp1_done") and pnl >= -2.0:
+                            weak_pos = (w_sym, w_p, t_w["last"], pnl, "ОБЩАЯ РОТАЦИЯ 🔄")
+            
+            if weak_order and (proj_pending - weak_order["qty"] * weak_order["price"]) + size <= proj_usdt:
+                planned_cancels.append(weak_order)
+            elif weak_pos and proj_pending + size <= proj_usdt + weak_pos[1]["qty"] * weak_pos[2]:
+                planned_sells.append(weak_pos)
+            elif weak_order and weak_pos and (proj_pending - weak_order["qty"] * weak_order["price"]) + size <= proj_usdt + weak_pos[1]["qty"] * weak_pos[2]:
+                planned_cancels.append(weak_order)
+                planned_sells.append(weak_pos)
+            else:
+                logger.info(f"{sym}: пропущен — не хватает денег даже с планом ротации")
+                continue
+
+        # --- 4. ИСПОЛНЕНИЕ ПЛАНА ---
+        for w_o in planned_cancels:
+            paper.cancel_order(w_o["id"])
+            await notify(
+                f"🔄 <b>Ротация ордера</b> · <b>{w_o['symbol'][:-4]}</b> снят\n"
+                f"Место для <b>{sym[:-4]}</b> · ⭐ {w_o.get('score', 0):.1f} → {cand['score']:.1f}"
+            )
+            logger.info(f"{sym}: ротация — снят ордер {w_o['symbol']}")
+            
+        for w_sym, w_pos, last, pnl, reason in planned_sells:
+            ex = paper._sell(w_sym, last, reason, regime_now=regime)
+            await notify(
+                f"🔄 <b>{reason}</b> · <b>{w_sym[:-4]}</b> → <b>{sym[:-4]}</b>\n"
+                f"{pnl_emoji(pnl)} {fmt_pct(pnl)} · ⭐ {w_pos.get('score', 0):.1f} → {cand['score']:.1f}\n"
+                f"💵 {usd(ex['pnl'])}{funding_line(ex.get('transferred', 0))}"
+            )
+            logger.info(f"{sym}: {reason} — продан {w_sym}")
+
+        # --- 5. Финальное выставление ордера ---
         qty = size / entry
         order = paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl,
                                       score=cand["score"],
@@ -774,7 +790,6 @@ async def run_cycle():
             f"🎯 {fmt_price(tp)} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
             f"⭐ {cand['score']:.1f} · 🧠 {'; '.join(cand['reasons'][:3])}"
         )
-
     # --- СБРОС И ОТПРАВКА БУФЕРА УВЕДОМЛЕНИЙ ---
     if _notification_buffer:
         digest_text = "⚡️ <b>Цикл торговли · Дайджест</b>\n\n" + "\n\n".join(_notification_buffer)
