@@ -14,7 +14,7 @@ from bot.strategy.learner import learner
 from bot.strategy.shadow import shadow
 from bot.utils.format import fmt_price, fmt_pct, fmt_sym
 
-CYCLE_SECONDS = 300
+CYCLE_SECONDS = 60
 FEE_PCT = 0.10
 MIN_TP_PCT = 0.60
 MIN_SL_PCT = 0.35
