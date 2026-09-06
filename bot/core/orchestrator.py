@@ -29,6 +29,9 @@ _last_mode = None
 _last_regime = None
 _fomo_cooldowns = {}  # память для отмененных ордеров: {symbol: expire_timestamp}
 
+# Буфер для объединения уведомлений в один дайджест за цикл
+_notification_buffer = []
+
 
 def usd(x):
     return f"${x:,.2f}"
@@ -83,12 +86,16 @@ def set_notifier(cb):
     _notify_cb = cb
 
 
-async def notify(text):
-    if _notify_cb:
-        try:
-            await _notify_cb(text)
-        except Exception as e:
-            logger.error(f"notify error: {e}")
+async def notify(text, urgent=False):
+    """Если urgent=True — отправляет мгновенно. Иначе — складывает в буфер цикла."""
+    if urgent:
+        if _notify_cb:
+            try:
+                await _notify_cb(text)
+            except Exception as e:
+                logger.error(f"urgent notify error: {e}")
+    else:
+        _notification_buffer.append(text)
 
 
 # ==================== СВЕРКА СОСТОЯНИЯ ПРИ СТАРТЕ ====================
@@ -202,7 +209,7 @@ async def startup_reconciliation():
         logger.info(f"RECONCILE: {line}")
     logger.info(f"=== RECONCILE END ({len(actions)} действий) ===")
     if actions:
-        await notify("🧩 <b>Переоценка после старта</b>\n" + "\n".join(f"• {a}" for a in actions[:10]))
+        await notify("🧩 <b>Переоценка после старта</b>\n" + "\n".join(f"• {a}" for a in actions[:10]), urgent=True)
 
 
 async def maybe_reconcile():
@@ -309,9 +316,9 @@ async def run_cycle():
                 await notify(
                     f"🚨 <b>Экстренный выход</b> · {pair_html(ex['symbol'][:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · "
                     f"{pnl_emoji(ex['pnl_pct'])} {ex['pnl']:+.2f}% · {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
-                    f"{funding_line(ex.get('transferred', 0))}"
+                    f"{funding_line(ex.get('transferred', 0))}", urgent=True
                 )
-            await notify("🚨 <b>Риск-менеджмент</b>: резкий дамп рынка — всё в $.")
+            await notify("🚨 <b>Риск-менеджмент</b>: резкий дамп рынка — всё в $.", urgent=True)
         return
 
 # 4. УПРАВЛЕНИЕ ПОЗИЦИЯМИ
@@ -630,9 +637,9 @@ async def run_cycle():
         if kind == "satellite":
             sat_exposure = sum(
                 p["qty"] * tickers.get(s, {}).get("last", 0)
-                for s, p in paper.positions.items() if p.get("kind") == "satellite"
+                for s, p in paper.positions.items() if p.get("kind"] == "satellite"
             ) + sum(
-                o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite"
+                o["qty"] * o["price"] for o in paper.orders if o.get("kind"] == "satellite"
             )
             if sat_exposure >= equity * sat_limit / 100:
                 logger.info(f"{sym}: пропущен — лимит сателлитов исчерпан ({sat_limit:.0f}%)")
@@ -757,5 +764,15 @@ async def run_cycle():
             f"🎯 {fmt_price(tp)} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
             f"⭐ {cand['score']:.1f} · 🧠 {'; '.join(cand['reasons'][:3])}"
         )
+
+    # --- СБРОС И ОТПРАВКА БУФЕРА УВЕДОМЛЕНИЙ ---
+    if _notification_buffer:
+        digest_text = "⚡️ <b>Цикл торговли · Дайджест</b>\n\n" + "\n\n".join(_notification_buffer)
+        _notification_buffer.clear()
+        if _notify_cb:
+            try:
+                await _notify_cb(digest_text)
+            except Exception as e:
+                logger.error(f"digest notify error: {e}")
 
     logger.info("=== CYCLE END ===")
