@@ -633,13 +633,13 @@ async def run_cycle():
                 logger.info(f"{sym}: пропущен — сектор {sector} переполнен, слабаков для ротации нет")
                 continue
 
-        # --- Проверка лимита сателлитов ---
+        # --- Проверка лимитов сателлитов ---
         if kind == "satellite":
             sat_exposure = sum(
                 p["qty"] * tickers.get(s, {}).get("last", 0)
-                for s, p in paper.positions.items() if p.get("kind"] == "satellite"
+                for s, p in paper.positions.items() if p.get("kind") == "satellite"
             ) + sum(
-                o["qty"] * o["price"] for o in paper.orders if o.get("kind"] == "satellite"
+                o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite"
             )
             if sat_exposure >= equity * sat_limit / 100:
                 logger.info(f"{sym}: пропущен — лимит сателлитов исчерпан ({sat_limit:.0f}%)")
