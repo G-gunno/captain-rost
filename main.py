@@ -276,7 +276,12 @@ async def run_all(application):
     from bot.exchange.market_data import start_ws_ticker_stream
     asyncio.create_task(start_ws_ticker_stream())
     
-    logger.info("Цикл торговли, отчёты и WebSocket запущены (WEBHOOK MODE)")
+    # --- ДОБАВЛЕНА ЭТА СТРОКА ---
+    # Запускаем сборщик макро-данных (DefiLlama, DropsTab)
+    from bot.strategy.fundamental import update_fundamental_data
+    asyncio.create_task(update_fundamental_data())
+    
+    logger.info("Цикл торговли, отчёты и Макро-дата запущены (WEBHOOK MODE)")
 
     web_app = web.Application()
     web_app.router.add_get("/", health_handler)
