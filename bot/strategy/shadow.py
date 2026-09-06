@@ -283,23 +283,30 @@ class Shadow:
         out.append(f"   автотюн: {'🟢 вкл' if self.tuning['auto'] else '🔴 выкл'} · "
                    f"эпизодов: {len(self.episodes)}")
         shown = False
+        
+        # Эмодзи-маппинг для режимов рынка
+        reg_emoji = {"bull": "🟢", "neutral": "🟡", "bear": "🔴"}
+        
         for key in sorted(self.agg):
             a = self.agg[key]
             if a["n"] < 3:
                 continue
             reg, band = key.split("|")
             avg = a["sum24"] / a["n"]
-            out.append(f"   {reg} · {band}: {a['n']} набл. · ср. {avg:+.1f}% · "
-                       f"пампов {a['pumps24']} · взяли {a['traded']}")
+            em = reg_emoji.get(reg, "⚪")
+            
+            # Компактный формат: эмодзи-режим, бэнд скора, кол-во наблюдений, средний рост, и "взятые пампы / всего пампов"
+            out.append(f"   {em} {band}: {a['n']} набл. · ср. {avg:+.1f}% · "
+                       f"🎯 {a['traded']}/{a['pumps24']} пампов")
             shown = True
+            
         if not shown:
             out.append("   (накапливается)")
+            
         t = self.tuning
         w = t.get("signal_windows", {})
-        out.append(f"   тюнинг: порог {t['thr_nudge']:+.2f} · охота {t['hunt']*100:+.2f}% · "
-                   f"SL ×{t['sl_mult']:.2f}")
-        out.append(f"   окна: RSI ≤{w.get('rsi_hi', 90)} · chg ≤{w.get('chg_hi', 30)}% · "
-                   f"vol ≥{w.get('vol_lo', 1.3)}×")
+        out.append(f"   ⚙️ порог {t['thr_nudge']:+.2f} · откат {t['hunt']*100:+.2f}% · SL ×{t['sl_mult']:.2f}")
+        out.append(f"   📏 RSI ≤{w.get('rsi_hi', 90)} · chg ≤{w.get('chg_hi', 30)}% · vol ≥{w.get('vol_lo', 1.3)}×")
         return out
 
     def stats_text(self):
