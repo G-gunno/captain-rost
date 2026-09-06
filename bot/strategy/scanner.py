@@ -11,7 +11,7 @@ from bot.news.cmc import (get_coin_name, get_sectors_for_pool,
                           get_ranks_for_pool, tier_of, TIER_EMOJI, fetch_missing_names)
 from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sentiment
 # --- НОВЫЙ ИМПОРТ ---
-from bot.strategy.fundamental import get_macro_trend, is_sector_hot, is_danger_unlock, check_coinglass_liquidation_threat
+from bot.strategy.fundamental import get_macro_trend, is_sector_hot, get_fear_and_greed, check_coinglass_liquidation_threat
 
 SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
 FILTERED_BY_NEWS = []
@@ -360,11 +360,14 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
         sector = sectors_map.get(base, "Other")
         tier = tier_of(ranks_map.get(base))
 
-        # Опасность разлока DropsTab
-        if is_danger_unlock(sym):
-            logger.info(f"{sym}: пропущен — грядущий крупный разлок токенов (DropsTab) ⚠️")
-            FILTERED_BY_NEWS.append({"symbol": sym, "neg_count": "Unlock", "time": int(time.time())})
-            FILTERED_BY_NEWS[:] = FILTERED_BY_NEWS[-10:]
+        # Индекс страха и жадности (F&G)
+        fng = get_fear_and_greed()
+        if fng >= 80:  # Экстремальная жадность (покупать опасно, режем скор)
+            score -= 0.5
+            reasons.append(f"F&G перегрев ({fng}): -0.5")
+        elif fng <= 25: # Экстремальный страх (толпа паникует, закупаем)
+            score += 0.5
+            reasons.append(f"F&G страх ({fng}): +0.5")
             continue
 
         sb = learner.sector_bias(sector)
