@@ -709,39 +709,33 @@ async def run_cycle():
         planned_cancels = []
         
         lim = other_lim if sector == "Other" else sec_lim
-        sector_count = sum(1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector) + \
-                       sum(1 for o in paper.orders if (o.get("sector") or "Other") == sector)
+        # Считаем ТОЛЬКО активные позиции. Очередь ордеров больше не блокирует сектор!
+        sector_count = sum(1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector)
 
         # Секторная ротация
         if sector_count >= lim:
-            sector_positions = [(s, p) for s, p in paper.positions.items() if (p.get("sector") or "Other") == sector]
-            if sector_positions:
-                w_sym, w_pos = min(sector_positions, key=lambda kv: kv[1].get("score", 0))
-                t_w = tickers.get(w_sym)
-                if t_w:
-                    weak_pnl = (t_w["last"] - w_pos["avg"]) / w_pos["avg"] * 100
-                    can_rotate = False
-                    if sector == "Other":
-                        can_rotate = cand["score"] >= w_pos.get("score", 0) + 1.0 and not w_pos.get("tp1_done") and weak_pnl >= -2.0
-                    else:
-                        can_rotate = cand["score"] >= w_pos.get("score", 0) + 1.5 and not w_pos.get("tp1_done") and -0.5 <= weak_pnl < 2.0
-                        
-                    if can_rotate:
-                        planned_sells.append((w_sym, w_pos, t_w["last"], weak_pnl, "РОТАЦИЯ СЕКТОРА 🔄"))
-                    else:
-                        logger.info(f"{sym}: пропущен — сектор {sector} переполнен, слабак {w_sym} слишком силен")
-                        continue
+            if is_mom: # Ракета бьет по рынку, ей можно продавать слабые позиции
+                sector_positions = [(s, p) for s, p in paper.positions.items() if (p.get("sector") or "Other") == sector]
+                if sector_positions:
+                    w_sym, w_pos = min(sector_positions, key=lambda kv: kv[1].get("score", 0))
+                    t_w = tickers.get(w_sym)
+                    if t_w:
+                        weak_pnl = (t_w["last"] - w_pos["avg"]) / w_pos["avg"] * 100
+                        can_rotate = False
+                        if sector == "Other":
+                            can_rotate = cand["score"] >= w_pos.get("score", 0) + 1.0 and not w_pos.get("tp1_done") and weak_pnl >= -2.0
+                        else:
+                            can_rotate = cand["score"] >= w_pos.get("score", 0) + 1.5 and not w_pos.get("tp1_done") and -0.5 <= weak_pnl < 2.0
+                            
+                        if can_rotate:
+                            planned_sells.append((w_sym, w_pos, t_w["last"], weak_pnl, "РОТАЦИЯ СЕКТОРА 🔄"))
+                        else:
+                            logger.info(f"{sym}: пропущен — сектор {sector} переполнен, слабак {w_sym} слишком силен")
+                            continue
             else:
-                sector_orders = [o for o in paper.orders if (o.get("sector") or "Other") == sector]
-                if sector_orders:
-                    w_o = min(sector_orders, key=lambda o: o.get("score", 0))
-                    if cand["score"] >= w_o.get("score", 0) + 1.0:
-                        planned_cancels.append(w_o)
-                    else:
-                        logger.info(f"{sym}: пропущен — сектор {sector} переполнен ордерами, слабаков нет")
-                        continue
-                else:
-                    continue
+                # Снайпер НЕ МОЖЕТ продавать активные позиции ради лимитки!
+                logger.info(f"{sym}: пропущен — Снайпер не продает позиции (сектор {sector} полон)")
+                continue
 
         # Общая ротация баланса
         pending_amount = sum(o["qty"] * o["price"] for o in paper.orders)
@@ -750,10 +744,9 @@ async def run_cycle():
         
         for w_sym, w_pos, last, pnl, reason in planned_sells:
             proj_usdt += w_pos["qty"] * last
-        for w_o in planned_cancels:
-            proj_pending -= w_o["qty"] * w_o["price"]
             
         if proj_pending + size > proj_usdt:
+            # 1. Сначала пытаемся отменить слабые ордера (разрешено и Ракетам, и Снайперам)
             weak_order = None
             if paper.orders:
                 available_orders = [o for o in paper.orders if o not in planned_cancels]
@@ -761,27 +754,31 @@ async def run_cycle():
                     w_o = min(available_orders, key=lambda o: o.get("score", 0))
                     if cand["score"] >= w_o.get("score", 0) + 1.0:
                         weak_order = w_o
-
-            weak_pos = None
-            if paper.positions:
-                planned_syms = [s[0] for s in planned_sells]
-                available_pos = [(s, p) for s, p in paper.positions.items() if s not in planned_syms]
-                if available_pos:
-                    w_sym, w_p = min(available_pos, key=lambda kv: kv[1].get("score", 0))
-                    t_w = tickers.get(w_sym)
-                    if t_w:
-                        pnl = (t_w["last"] - w_p["avg"]) / w_p["avg"] * 100
-                        if cand["score"] >= w_p.get("score", 0) + 1.5 and not w_p.get("tp1_done") and pnl >= -2.0:
-                            weak_pos = (w_sym, w_p, t_w["last"], pnl, "ОБЩАЯ РОТАЦИЯ 🔄")
-            
+                        
             if weak_order and (proj_pending - weak_order["qty"] * weak_order["price"]) + size <= proj_usdt:
                 planned_cancels.append(weak_order)
-            elif weak_pos and proj_pending + size <= proj_usdt + weak_pos[1]["qty"] * weak_pos[2]:
-                planned_sells.append(weak_pos)
-            elif weak_order and weak_pos and (proj_pending - weak_order["qty"] * weak_order["price"]) + size <= proj_usdt + weak_pos[1]["qty"] * weak_pos[2]:
-                planned_cancels.append(weak_order)
-                planned_sells.append(weak_pos)
-            else:
+                proj_pending -= weak_order["qty"] * weak_order["price"]
+                
+            # 2. Если денег всё еще не хватает, и мы РАКЕТА - продаем живую позицию
+            if is_mom and (proj_pending + size > proj_usdt):
+                weak_pos = None
+                if paper.positions:
+                    planned_syms = [s[0] for s in planned_sells]
+                    available_pos = [(s, p) for s, p in paper.positions.items() if s not in planned_syms]
+                    if available_pos:
+                        w_sym, w_p = min(available_pos, key=lambda kv: kv[1].get("score", 0))
+                        t_w = tickers.get(w_sym)
+                        if t_w:
+                            pnl = (t_w["last"] - w_p["avg"]) / w_p["avg"] * 100
+                            if cand["score"] >= w_p.get("score", 0) + 1.5 and not w_p.get("tp1_done") and pnl >= -2.0:
+                                weak_pos = (w_sym, w_p, t_w["last"], pnl, "ОБЩАЯ РОТАЦИЯ 🔄")
+                
+                if weak_pos and proj_pending + size <= proj_usdt + weak_pos[1]["qty"] * weak_pos[2]:
+                    planned_sells.append(weak_pos)
+                    proj_usdt += weak_pos[1]["qty"] * weak_pos[2]
+            
+            # Финальная проверка
+            if proj_pending + size > proj_usdt:
                 logger.info(f"{sym}: пропущен — не хватает денег даже с планом ротации")
                 continue
 
@@ -815,6 +812,8 @@ async def run_cycle():
         order["regime"] = regime
         order["is_momentum"] = is_mom
         paper.save()
+        # Логируем ордер для визуализатора графиков
+        logger.info(f"ORDER PLACED {sym} @ {entry} (Market: {bid1}, Diff: {off * 100:+.2f}%) mode={entry_mode}")
         tp_pct = (tp - entry) / entry * 100
         sl_pct = (sl - entry) / entry * 100
         kind_tag = "🛰" if kind == "satellite" else "🏛"
