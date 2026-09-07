@@ -60,6 +60,12 @@ class TradeVisualizer:
                     # 5. Пропуск сканером (токсичные новости и т.д.)
                     elif "пропущен" in line and (self.symbol in line or f" {self.base_sym} " in line):
                         events.append({"time": dt, "type": "skip", "price": None})
+
+                    # 7. Выставление ордера
+                    elif "ORDER PLACED" in line and self.symbol in line:
+                        m = re.search(rf"ORDER PLACED {self.symbol} @ ([\d\.]+)", line)
+                        if m:
+                            events.append({"time": dt, "type": "order", "price": float(m.group(1))})
                         
         except FileNotFoundError:
             logger.error(f"Файл логов {self.log_path} не найден.")
@@ -229,6 +235,16 @@ class TradeVisualizer:
                 mode='markers',
                 marker=dict(symbol='circle-open', size=10, color='fuchsia', line=dict(width=2)),
                 name='Skip (Пропущен)'
+            ))
+
+        # 7. Ордера (Голубые черточки)
+        orders = df_events[df_events['type'] == 'order']
+        if not orders.empty:
+            fig.add_trace(go.Scatter(
+                x=orders['time'], y=orders['price'],
+                mode='markers',
+                marker=dict(symbol='line-ew', size=16, color='cyan', line=dict(width=3)),
+                name='Order Placed (Ордер)'
             ))
 
         # Настройка визуального оформления
