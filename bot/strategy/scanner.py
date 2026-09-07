@@ -453,11 +453,14 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
     except Exception as e:
         logger.error(f"shadow error: {e}")
 
+    public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
     parts_html, parts_plain = [], []
     for c in scored[:5]:
         k_tag = "🛰" if c.get("kind") == "satellite" else "🏛"
+        chart_url = f"{public_url}/chart?symbol={c['symbol']}"
+        
         parts_html.append(
-            f"{k_tag} <b>{c['symbol'][:-4]}</b> {TIER_EMOJI.get(c['tier'], '🐭')} · "
+            f"{k_tag} <a href='{chart_url}'><b>{c['symbol'][:-4]}</b></a> {TIER_EMOJI.get(c['tier'], '🐭')} · "
             f"<i>{c['sector']}</i> · {c['score']:.1f}/{thr:g} · ₿ {c['corr']:.2f}"
         )
         keys_short = "+".join(c["reason_keys"][:5])
