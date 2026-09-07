@@ -129,6 +129,12 @@ class TradeVisualizer:
 
     def _merge_prices(self, df_events: pd.DataFrame, df_klines: pd.DataFrame) -> pd.DataFrame:
         """Подставляет цену закрытия свечи для событий, где цена не была указана в логах."""
+        
+        # --- ИСПРАВЛЕНИЕ: Принудительно приводим ключи к одному типу времени (наносекунды) ---
+        df_events['time'] = pd.to_datetime(df_events['time']).astype('datetime64[ns]')
+        df_klines['datetime'] = pd.to_datetime(df_klines['datetime']).astype('datetime64[ns]')
+        # -----------------------------------------------------------------------------------
+
         # Используем merge_asof для поиска ближайшей свечи по времени
         merged = pd.merge_asof(
             df_events, 
