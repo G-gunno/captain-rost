@@ -6,7 +6,7 @@ from loguru import logger
 from bot.exchange.market_data import market_data
 from bot.exchange.paper_exchange import paper
 from bot.strategy.scanner import get_regime, scan, score_symbol, threshold, live_score
-from bot.strategy.sizing import buy_size, portfolio_limits
+from bot.strategy.sizing import buy_size, portfolio_limits, tier_limits
 from bot.strategy.indicators import atr, ema
 from bot.core.state import bot_state
 from bot.news.cmc import get_coin_name, TIER_EMOJI
@@ -614,9 +614,10 @@ async def run_cycle():
     sec_lim, other_lim = portfolio_limits(equity)
     sat_limit = learner.satellite_limit()
     sat_size = learner.satellite_size_pct()
+    base_min, _ = tier_limits(equity)
     logger.info(f"PORTFOLIO LIMITS: equity={equity:.0f} | "
                 f"лимит на сектор={sec_lim} | лимит Other={other_lim} | "
-                f"лимит сателлитов={sat_limit:.0f}% · размер сателлита={sat_size:.1f}%")
+                f"лимит сателлитов={sat_limit:.0f}% · Floor=${base_min:.0f}")
 
     # Очистка старых кулдаунов (чтобы не копились в памяти бесконечно)
     current_time = int(time.time())
@@ -682,14 +683,13 @@ async def run_cycle():
             logger.info(f"{sym}: пропущен — плохой Risk/Reward (R:R = {rr:.2f})")
             continue
 
-        entry_mode = "rocket" if is_mom else "sniper"
-        km = learner.kelly_multiplier(entry_mode)  # Индивидуальный келли
+        # Индивидуальный Келли убран, сайзинг теперь опирается на жесткие пороги (Floor/Ceiling) и скор
+        size = buy_size(equity, cand["score"], thr, cand["liquidity"], paper.usdt,
+                        kind=kind, is_momentum=is_mom, size_multiplier=cand.get("size_mult", 1.0))
         
-        size = buy_size(equity, cand["score"], cand["liquidity"], paper.usdt,
-                        sl_dist, kind=kind, km=km,
-                        sat_size_pct=sat_size, size_multiplier=cand.get("size_mult", 1.0))
-        if size < 5:
-            logger.info(f"{sym}: пропущен — размер позиции < 5$")
+        # Защита от пыли (если что-то пошло не так с доступным балансом)
+        if size < 10:
+            logger.info(f"{sym}: пропущен — размер позиции < 10$")
             continue
 
         # --- 2. Проверка лимитов сателлитов ---
