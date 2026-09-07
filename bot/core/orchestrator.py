@@ -683,6 +683,8 @@ async def run_cycle():
             logger.info(f"{sym}: пропущен — плохой Risk/Reward (R:R = {rr:.2f})")
             continue
 
+        entry_mode = "rocket" if is_mom else "sniper"
+        
         # Индивидуальный Келли убран, сайзинг теперь опирается на жесткие пороги (Floor/Ceiling) и скор
         size = buy_size(equity, cand["score"], thr, cand["liquidity"], paper.usdt,
                         kind=kind, is_momentum=is_mom, size_multiplier=cand.get("size_mult", 1.0))
