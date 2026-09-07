@@ -630,8 +630,13 @@ async def cmd_status(update, context):
                 tier_em = TIER_EMOJI.get(pos.get("tier") or "", "")
                 ind = "🔥" if pos.get("tp1_done") else pnl_emoji(pnl_pct)
                 tp1 = " · TP1" if pos.get("tp1_done") else ""
+                
+                # Формируем ссылку
+                public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
+                chart_url = f"{public_url}/chart?symbol={sym}"
+                
                 msg.append(
-                    f"{kind} <b>{sym[:-4]}</b>{' ' + tier_em if tier_em else ''} · "
+                    f"{kind} <a href='{chart_url}'><b>{sym[:-4]}</b></a>{' ' + tier_em if tier_em else ''} · "
                     f"<i>{sector}</i> · {ind} {fmt_pct(pnl_pct)}{tp1}"
                 )
                 msg.append(f"   💼 {usd(val)} · {w:.1f}%")
@@ -673,8 +678,12 @@ async def cmd_status(update, context):
                 else:
                     dist_str = ""
                 
+                # Формируем ссылку
+                public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
+                chart_url = f"{public_url}/chart?symbol={o['symbol']}"
+                
                 msg.append(
-                    f"{kind} {mode_emoji} <b>{o['symbol'][:-4]}</b>{' ' + tier_em if tier_em else ''} · "
+                    f"{kind} {mode_emoji} <a href='{chart_url}'><b>{o['symbol'][:-4]}</b></a>{' ' + tier_em if tier_em else ''} · "
                     f"<i>{sector}</i> · {w:.1f}%"
                 )
                 msg.append(f"   💼 {usd(val)} · 📥 {fmt_price(o['price'])}{dist_str}")
