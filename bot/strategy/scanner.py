@@ -389,7 +389,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
         name = await get_coin_name(base)
         neg, pos, mentions, _ = check_sentiment(news_items, [base, name])
 
-        is_toxic = neg > 0 and neg > pos and neg >= (mentions * 0.2)
+        is_toxic = neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33)
 
         if is_toxic:
             logger.info(f"{sym}: пропущен из-за негативного новостного фона ({neg} нег. из {mentions} упом.)")
