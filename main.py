@@ -30,9 +30,26 @@ WEBHOOK_PATH = "/telegram-webhook"
 
 
 # ==================== Хелперы ====================
+from functools import wraps
+
+def restricted(func):
+    """Декоратор для блокировки доступа чужим пользователям."""
+    @wraps(func)
+    async def wrapped(update, context, *args, **kwargs):
+        # Получаем ID того, кто пишет боту
+        user_chat_id = str(update.effective_chat.id)
+        # Получаем твой ID из настроек Render
+        admin_chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        
+        if user_chat_id != admin_chat_id:
+            logger.warning(f"🚨 Попытка взлома! Заблокирован доступ от чата: {user_chat_id}")
+            return  # Бот просто игнорирует чужака
+            
+        return await func(update, context, *args, **kwargs)
+    return wrapped
+
 def usd(x):
     return f"${x:,.2f}"
-
 
 def pnl_emoji(x):
     return "🟢" if x > 0.05 else ("🔴" if x < -0.05 else "🟡")
@@ -365,25 +382,6 @@ async def run_all(application):
 
 
 # ==================== Команды Telegram ====================
-from functools import wraps
-
-def restricted(func):
-    """Декоратор для блокировки доступа чужим пользователям."""
-    @wraps(func)
-    async def wrapped(update, context, *args, **kwargs):
-        # Получаем ID того, кто пишет боту
-        user_chat_id = str(update.effective_chat.id)
-        # Получаем твой ID из настроек Render
-        admin_chat_id = os.getenv("TELEGRAM_CHAT_ID")
-        
-        if user_chat_id != admin_chat_id:
-            logger.warning(f"🚨 Попытка взлома! Заблокирован доступ от чата: {user_chat_id}")
-            return  # Бот просто игнорирует чужака
-            
-        return await func(update, context, *args, **kwargs)
-    return wrapped
-
-
 @restricted
 async def cmd_start(update, context):
     bot_state.fresh_start()
