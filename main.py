@@ -64,6 +64,43 @@ async def webhook_handler(request):
     return web.Response(text="OK")
 
 
+async def chart_handler(request):
+    symbol = request.query.get("symbol")
+    if not symbol:
+        return web.Response(text="Укажите тикер, например ?symbol=LINKUSDT", status=400)
+        
+    symbol = symbol.upper()
+    if not symbol.endswith("USDT"):
+        symbol += "USDT"
+
+    def make_chart():
+        try:
+            from bot.utils.visualizer import TradeVisualizer
+            viz = TradeVisualizer(log_path="logs/bot.log", symbol=symbol)
+            # show=False не будет пытаться открыть браузер на сервере Render
+            fig = viz.build_chart(show=False) 
+            if fig is None:
+                return None
+            # Возвращаем готовую HTML-строку (используем CDN, чтобы страница летала)
+            return fig.to_html(include_plotlyjs="cdn", full_html=True)
+        except Exception as e:
+            logger.error(f"Visualizer error: {e}")
+            return str(e)
+
+    try:
+        # Запускаем парсинг в отдельном потоке, чтобы не тормозить цикл бота
+        html_or_error = await asyncio.to_thread(make_chart)
+        
+        if html_or_error is None:
+            return web.Response(text=f"Нет данных лога или свечей для {symbol}. Возможно, бот её еще не торговал.", status=404)
+        if not html_or_error.startswith("<"): # Значит вернулся текст ошибки
+             return web.Response(text=f"Ошибка генерации: {html_or_error}", status=500)
+             
+        return web.Response(text=html_or_error, content_type="text/html")
+    except Exception as e:
+        return web.Response(text=f"Внутренняя ошибка сервера: {e}", status=500)
+
+
 # ==================== Уведомления и циклы ====================
 async def send_chat(text):
     chat = os.getenv("TELEGRAM_CHAT_ID")
@@ -255,6 +292,7 @@ async def run_all(application):
         BotCommand("pause", "⏸ Пауза (с подтверждением)"),
         BotCommand("resume", "▶️ Возобновить (с подтверждением)"),
         BotCommand("status", "📊 Статус: балансы и позиции"),
+        BotCommand("chart", "📈 График монеты (сделки и отмены)"),
         BotCommand("learn", "🧠 Обучение: параметры, сектора, веса, память"),
         BotCommand("news", "📰 Статус новостной аналитики"),
         BotCommand("exitall", "🛑 Продать всё и остановить (с подтверждением)"),
@@ -276,7 +314,6 @@ async def run_all(application):
     from bot.exchange.market_data import start_ws_ticker_stream
     asyncio.create_task(start_ws_ticker_stream())
     
-    # --- ДОБАВЛЕНА ЭТА СТРОКА ---
     # Запускаем сборщик макро-данных (DefiLlama, DropsTab)
     from bot.strategy.fundamental import update_fundamental_data
     asyncio.create_task(update_fundamental_data())
@@ -285,6 +322,7 @@ async def run_all(application):
 
     web_app = web.Application()
     web_app.router.add_get("/", health_handler)
+    web_app.router.add_get("/chart", chart_handler)
     web_app.router.add_post(WEBHOOK_PATH, webhook_handler)
 
     runner = web.AppRunner(web_app)
@@ -530,6 +568,27 @@ async def cmd_log(update, context):
     with open(tmp, "rb") as f:
         await update.message.reply_document(document=f, filename=name)
 
+async def cmd_chart(update, context):
+    arg = (context.args or [None])[0]
+    if not arg:
+        await reply(update, "⚠️ Укажите тикер. Пример: <code>/chart LINK</code>")
+        return
+        
+    sym = arg.upper()
+    if not sym.endswith("USDT"):
+        sym += "USDT"
+        
+    # Формируем ссылку на наш же сервер
+    public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
+    chart_url = f"{public_url}/chart?symbol={sym}"
+    
+    await reply(update, 
+        f"📈 <b>График торгов {sym}</b>\n\n"
+        f"Скрипт распарсит логи и наложит их на свечи Bybit.\n\n"
+        f"🌐 <a href='{chart_url}'>Открыть интерактивный график</a>\n"
+        f"<i>(Генерация страницы займет 2-3 секунды)</i>"
+    )
+
 async def cmd_autotune(update, context):
     arg = (context.args or [None])[0]
     if arg in ("on", "вкл"):
@@ -700,6 +759,7 @@ def main():
     app = Application.builder().token(token).build()
     app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("chart", cmd_chart))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("status", cmd_status))
