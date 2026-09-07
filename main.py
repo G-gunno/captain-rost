@@ -44,9 +44,18 @@ def weight_emoji(v):
 
 async def reply(update, text, markup=None):
     try:
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+        await update.message.reply_text(
+            text, 
+            parse_mode="HTML", 
+            reply_markup=markup, 
+            disable_web_page_preview=True  # Запрещаем Telegram ддосить наш сервер
+        )
     except BadRequest:
-        await update.message.reply_text(text, reply_markup=markup)
+        await update.message.reply_text(
+            text, 
+            reply_markup=markup, 
+            disable_web_page_preview=True
+        )
 
 
 # ==================== HTTP handlers ====================
@@ -106,9 +115,18 @@ async def send_chat(text):
     chat = os.getenv("TELEGRAM_CHAT_ID")
     if chat and _app:
         try:
-            await _app.bot.send_message(chat_id=chat, text=text, parse_mode="HTML")
+            await _app.bot.send_message(
+                chat_id=chat, 
+                text=text, 
+                parse_mode="HTML", 
+                disable_web_page_preview=True  # Запрещаем Telegram ддосить наш сервер
+            )
         except BadRequest:
-            await _app.bot.send_message(chat_id=chat, text=text)
+            await _app.bot.send_message(
+                chat_id=chat, 
+                text=text, 
+                disable_web_page_preview=True
+            )
 
 
 async def cycle_loop():
