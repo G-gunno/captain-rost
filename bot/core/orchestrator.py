@@ -46,7 +46,6 @@ def pair_html(sym, sector, kind_tag="🏛", tier=None):
     em = TIER_EMOJI.get(tier, "") if tier else ""
     public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
     chart_url = f"{public_url}/chart?symbol={sym}USDT"
-    
     return f"{kind_tag} <a href='{chart_url}'><b>{sym}</b></a>{' ' + em if em else ''} · <i>{sector}</i>"
 
 
