@@ -368,7 +368,7 @@ async def run_cycle():
         name = await get_coin_name(base)
         neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
         
-        is_toxic = neg > 0 and neg > pos_news and neg >= (mentions * 0.2)
+        is_toxic = neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33)
         if is_toxic:
             _fomo_cooldowns[sym] = current_time + 7200  # пауза 2 часа
             if pnl_pct >= MIN_EARLY_EXIT_PCT:
@@ -508,7 +508,7 @@ async def run_cycle():
         name = await get_coin_name(base)
         neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
         
-        is_toxic = neg > 0 and neg > pos_news and neg >= (mentions * 0.2)
+        is_toxic = neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33)
         if is_toxic:
             paper.cancel_order(order["id"])
             _fomo_cooldowns[order["symbol"]] = current_time + 7200
