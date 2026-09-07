@@ -5,3 +5,5 @@ httpx
 pybit
 aiohttp
 websockets
+pandas
+plotly
