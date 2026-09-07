@@ -231,6 +231,7 @@ async def ask_confirmation(update, context, key):
     await reply(update, f"⚠️ <b>Подтвердите:</b> {_html.escape(question)}", markup=keyboard)
 
 
+@restricted
 async def confirm_handler(update, context):
     query = update.callback_query
     await query.answer()
@@ -364,11 +365,32 @@ async def run_all(application):
 
 
 # ==================== Команды Telegram ====================
+from functools import wraps
+
+def restricted(func):
+    """Декоратор для блокировки доступа чужим пользователям."""
+    @wraps(func)
+    async def wrapped(update, context, *args, **kwargs):
+        # Получаем ID того, кто пишет боту
+        user_chat_id = str(update.effective_chat.id)
+        # Получаем твой ID из настроек Render
+        admin_chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        
+        if user_chat_id != admin_chat_id:
+            logger.warning(f"🚨 Попытка взлома! Заблокирован доступ от чата: {user_chat_id}")
+            return  # Бот просто игнорирует чужака
+            
+        return await func(update, context, *args, **kwargs)
+    return wrapped
+
+
+@restricted
 async def cmd_start(update, context):
     bot_state.fresh_start()
     await reply(update, "🤖 <b>Капитан Рост</b> на связи! Торговля запущена, цикл начат заново.")
 
 
+@restricted
 async def cmd_info(update, context):
     """Паспорт бота — краткая сводка + подробный Whitepaper файлом."""
     from bot.services.info import info_full_text, generate_whitepaper
@@ -390,6 +412,7 @@ async def cmd_info(update, context):
     )
 
 
+@restricted
 async def cmd_help(update, context):
     await reply(update,
         "📖 <b>Мои команды</b>\n"
@@ -403,26 +426,32 @@ async def cmd_help(update, context):
     )
 
 
+@restricted
 async def cmd_pause(update, context):
     await ask_confirmation(update, context, "pause")
 
 
+@restricted
 async def cmd_resume(update, context):
     await ask_confirmation(update, context, "resume")
 
 
+@restricted
 async def cmd_exitall(update, context):
     await ask_confirmation(update, context, "exitall")
 
 
+@restricted
 async def cmd_resetlearn(update, context):
     await ask_confirmation(update, context, "resetlearn")
 
 
+@restricted
 async def cmd_resetstats(update, context):
     await ask_confirmation(update, context, "resetstats")
 
 
+@restricted
 async def cmd_learn(update, context):
     wr, n = learner.winrate()
     regime, _ = await get_regime()
@@ -540,6 +569,7 @@ async def cmd_learn(update, context):
     await reply(update, "\n".join(lines))
 
 
+@restricted
 async def cmd_news(update, context):
     from bot.news.cmc import get_stats as cmc_stats
     from bot.news.rss_news import get_stats as rss_stats
@@ -575,6 +605,7 @@ async def cmd_news(update, context):
     await reply(update, "\n".join(lines))
 
 
+@restricted
 async def cmd_log(update, context):
     src = Path("logs/bot.log")
     if not src.exists():
@@ -586,6 +617,7 @@ async def cmd_log(update, context):
     with open(tmp, "rb") as f:
         await update.message.reply_document(document=f, filename=name)
 
+@restricted
 async def cmd_chart(update, context):
     arg = (context.args or [None])[0]
     if not arg:
@@ -607,6 +639,7 @@ async def cmd_chart(update, context):
         f"<i>(Генерация страницы займет 2-3 секунды)</i>"
     )
 
+@restricted
 async def cmd_autotune(update, context):
     arg = (context.args or [None])[0]
     if arg in ("on", "вкл"):
@@ -619,6 +652,7 @@ async def cmd_autotune(update, context):
                 "\n💡 переключение: /autotune · или /autotune off · /autotune on")
 
 
+@restricted
 async def cmd_status(update, context):
     try:
         prices = await market_data.get_tickers()
