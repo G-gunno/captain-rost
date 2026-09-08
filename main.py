@@ -772,13 +772,36 @@ async def cmd_status(update, context):
             pf_mark = "🎯" if pf >= 1.3 else ("⚠️" if pf >= 1.0 else "❌")
         dd = metrics_24h["max_drawdown_pct"]
         dd_mark = "✅" if dd < 5 else ("⚠️" if dd < 15 else "🔴")
-        msg.append(f"📈 PF: <b>{pf_text}</b> {pf_mark} (цель ≥ 1.3) · 📉 DD: <b>{dd:.1f}%</b> {dd_mark} (лимит 15%)")
+        
+        # Скрываем часть с (цель >= 1.3), если сделок еще не было
+        if pf is None:
+            msg.append(f"📈 PF: <b>—</b> · 📉 DD: <b>{dd:.1f}%</b> {dd_mark} (лимит 15%)")
+        else:
+            msg.append(f"📈 PF: <b>{pf_text}</b> {pf_mark} (цель ≥ 1.3) · 📉 DD: <b>{dd:.1f}%</b> {dd_mark} (лимит 15%)")
 
         exp = metrics_24h["expectancy"]
+        if exp is None:
+            exp_txt, exp_mark = "—", "⚪"
+            exp_emoji = "⚪"
+        else:
+            exp_txt = f"{exp:+.2f}"
+            exp_mark = "🎯" if exp > 0 else "❌"
+            exp_emoji = pnl_emoji(exp)
+
         rf = metrics_24h["recovery_factor"]
-        exp_mark = "🎯" if exp > 0 else "❌"
-        rf_mark = "🎯" if rf > 2 else ("⚠️" if rf > 1 else "❌")
-        msg.append(f"💹 {pnl_emoji(exp)} <b>{exp:+.2f}</b> {exp_mark} (цель > 0) · 🔄 RF: <b>{rf:.1f}</b> {rf_mark} (цель ≥ 2)")
+        if rf is None:
+            rf_txt, rf_mark = "—", "⚪"
+        elif rf == float("inf"):
+            rf_txt, rf_mark = "∞", "🎯"
+        else:
+            rf_txt = f"{rf:.1f}"
+            rf_mark = "🎯" if rf >= 2 else ("⚠️" if rf >= 1 else "❌")
+
+        # Если сделок еще не было, выводим красивую компактную строку без целей
+        if exp is None:
+            msg.append(f"💹 <b>—</b> · 🔄 RF: <b>—</b>")
+        else:
+            msg.append(f"💹 {exp_emoji} <b>{exp_txt}</b> {exp_mark} (цель > 0) · 🔄 RF: <b>{rf_txt}</b> {rf_mark} (цель ≥ 2)")
 
         sat_exposure = sum(
             p["qty"] * prices.get(s, {}).get("last", 0)
