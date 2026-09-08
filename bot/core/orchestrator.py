@@ -395,6 +395,9 @@ async def run_cycle():
             ex = paper.sell_partial(sym, half, pos["tp"], "TP1 🎯")
             pos["tp1_done"] = True
             
+            # Сообщаем Теневому Журналу, что мы успешно поймали памп!
+            shadow.mark_success(sym)
+            
             # Честный безубыток с учетом комиссий за вход и выход (0.2%)
             breakeven_price = pos["avg"] * (1 + (FEE_PCT * 2) / 100)
             pos["sl"] = max(pos["sl"], breakeven_price)
@@ -446,6 +449,11 @@ async def run_cycle():
                 reason = "ИНВАЛИДАЦИЯ 🛑"
                 
             ex = paper._sell(sym, last, reason, regime_now=regime)
+            
+            # Если инвалидация произошла в профит - это тоже успех
+            if ex["pnl"] > 0:
+                shadow.mark_success(sym)
+                
             await notify(
                 f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · {reason.lower()}\n"
                 f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}"
@@ -489,6 +497,10 @@ async def run_cycle():
 
     # 5. Выходы остатка по TP/SL
     for ex in paper.check_exits(tickers, regime_now=regime):
+        # Сообщаем об успехе, если сделка закрылась в плюс
+        if ex["pnl"] > 0:
+            shadow.mark_success(ex["symbol"])
+            
         runner_txt = ""
         if ex.get("runner_bonus", 0) > 5:
             runner_txt = f"\n🏃 пробежка +{ex['runner_bonus']:.1f}% выше TP1"
