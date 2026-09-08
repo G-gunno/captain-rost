@@ -4,7 +4,6 @@ import time
 from pathlib import Path
 
 from loguru import logger
-
 from bot.core.remote_state import download_state, upload_state
 from bot.strategy.learner import learner
 
@@ -20,19 +19,14 @@ COOLDOWN = 24 * 3600
 
 
 def _band(score):
-    if score < 5:
-        return "0-5"
-    if score < 6:
-        return "5-6"
-    if score < 7:
-        return "6-7"
-    return "7+"
+    if score < 5: return "0-5"
+    if score < 6: return "5-6"
+    if score < 7: return "6-7"
+    if score < 8: return "7-8"
+    return "8+"
 
 
 class Shadow:
-    """Теневой журнал: наблюдает монеты (в т.ч. упущенные), копит агрегаты,
-    мягко тюнит порог/веса/охоту/SL. Хранит копейки данных."""
-
     def __init__(self):
         self.episodes = {}
         self.agg = {}
@@ -76,9 +70,7 @@ class Shadow:
             self._last_upload = time.time()
             upload_state(REMOTE_PATH, payload)
 
-    # ---------- наблюдение ----------
     def observe(self, scored, regime, thr):
-        from bot.exchange.paper_exchange import paper
         now = time.time()
         obs_thr = thr - OBS_GAP
         for c in scored:
@@ -94,15 +86,20 @@ class Shadow:
                 continue
             if len(self.episodes) >= MAX_EPISODES:
                 continue
-            traded = (sym in paper.positions or
-                      any(o["symbol"] == sym for o in paper.orders))
+                
             self.episodes[sym] = {
                 "ts": now, "price": c["last"], "max_score": c["score"],
                 "regime": regime, "sector": c.get("sector"), "tier": c.get("tier"),
-                "keys": c.get("reason_keys", []), "traded": bool(traded),
+                "keys": c.get("reason_keys", []), "success": False, # Успех только если реально заработали
                 "hi": c["last"], "lo": c["last"], "p4": None,
                 "signal_values": c.get("signal_values", {}),
             }
+
+    def mark_success(self, sym):
+        """Вызывается ядром, только если мы закрыли позицию в ПЛЮС (TP1 или трейлинг)."""
+        if sym in self.episodes:
+            self.episodes[sym]["success"] = True
+            self.save()
 
     def tick(self, tickers):
         now = time.time()
@@ -131,6 +128,7 @@ class Shadow:
         mae = (ep["lo"] - dec) / dec * 100
         mfe = (ep["hi"] - dec) / dec * 100
         key = f"{ep['regime']}|{_band(ep['max_score'])}"
+        
         a = self.agg.setdefault(key, {
             "n": 0, "sum4": 0.0, "sum24": 0.0, "pumps4": 0, "pumps24": 0,
             "traded": 0, "sum_mae": 0.0, "sum_mfe": 0.0, "sum_pull": 0.0,
@@ -150,13 +148,15 @@ class Shadow:
                 a.setdefault("signal_values_pump", {}).setdefault(k, []).append(v)
         for k in ep["keys"]:
             a["keys_all"][k] = a["keys_all"].get(k, 0) + 1
-        if ep["traded"]:
+            
+        # Засчитываем 'traded' только если мы реально извлекли прибыль из этого пампа
+        if ep.get("success"):
             a["traded"] += 1
+            
         a["sum_mae"] += mae
         a["sum_mfe"] += mfe
         a["sum_pull"] += mae   # pullback ≈ макс. просадка после сигнала
 
-    # ---------- автотюн (раз в час) ----------
     def autotune(self):
         if not self.tuning["auto"]:
             return
@@ -165,13 +165,16 @@ class Shadow:
             return
         self._last_tune = now
 
-        # Калибровка порога: если под порогом копятся пампы — мягко ослабляем.
+        # Калибровка порога
         nudge = 0.0
-        base = {"bull": 5.0, "neutral": 6.5, "bear": 8.0}
+        base = {"bull": 5.0, "neutral": 6.0, "bear": 7.0}
+        total_missed_pumps = 0
+        
         for reg, b in base.items():
-            a = self.agg.get(f"{reg}|{_band(b - 1.0)}")
+            a = self.agg.get(f"{reg}|{_band(b)}")
             if a and a["n"] >= 10:
-                missed = a["n"] - a["traded"]
+                missed = a["pumps24"] - a["traded"]
+                total_missed_pumps += missed
                 if missed >= 5:
                     pump_rate = a["pumps24"] / a["n"]
                     avg = a["sum24"] / a["n"]
@@ -179,10 +182,13 @@ class Shadow:
                         nudge -= 0.25
         self.tuning["thr_nudge"] = round(max(-0.5, min(0.5, nudge)), 2)
 
-        # Охота: глубина = ~60% типичного отката.
+        # Охота: если мы массово упускаем пампы, значит мы жадничаем с лимитками. Делаем входы ближе к рынку.
         pull = self._avg("sum_pull")
         if pull is not None:
-            self.tuning["hunt"] = round(max(-0.01, min(-0.002, pull / 100 * 0.6)), 4)
+            if total_missed_pumps > 10:
+                self.tuning["hunt"] = round(max(-0.01, min(-0.001, pull / 100 * 0.3)), 4) # Берем всего 30% от отката
+            else:
+                self.tuning["hunt"] = round(max(-0.01, min(-0.002, pull / 100 * 0.6)), 4)
 
         # SL: если победители терпят просадку — чуть расширяем.
         sm = self._avg("sum_mae")
@@ -213,47 +219,36 @@ class Shadow:
                     learner.weights[k] = round(max(0.3, learner.weights[k] - 0.05), 3)
         learner.save()
 
-
     def _calibrate_signal_windows(self):
-        """Калибровка окон сигналов (RSI, chg24h, volume) по распределению у пампов."""
         pump_values = {"rsi": [], "chg24h": [], "volume": []}
         for a in self.agg.values():
             sv = a.get("signal_values_pump", {})
             for k in pump_values:
                 pump_values[k].extend(sv.get(k, []))
-        
         if len(pump_values["rsi"]) < 50:
             return
         
         w = self.tuning["signal_windows"]
-        
         rsi_sorted = sorted(pump_values["rsi"])
         rsi_p90 = rsi_sorted[int(len(rsi_sorted) * 0.9)]
-        target_rsi = max(80, min(95, round(rsi_p90)))
-        w["rsi_hi"] = int(round(w["rsi_hi"] * 0.8 + target_rsi * 0.2))
+        w["rsi_hi"] = int(round(w["rsi_hi"] * 0.8 + max(80, min(95, round(rsi_p90))) * 0.2))
         
         chg_sorted = sorted(pump_values["chg24h"])
         chg_p90 = chg_sorted[int(len(chg_sorted) * 0.9)]
-        target_chg = max(20, min(50, round(chg_p90)))
-        w["chg_hi"] = int(round(w["chg_hi"] * 0.8 + target_chg * 0.2))
+        w["chg_hi"] = int(round(w["chg_hi"] * 0.8 + max(20, min(50, round(chg_p90))) * 0.2))
         
         vol_sorted = sorted(pump_values["volume"])
         vol_p10 = vol_sorted[int(len(vol_sorted) * 0.1)]
-        target_vol = max(1.0, min(3.0, round(vol_p10, 1)))
-        w["vol_lo"] = round(w["vol_lo"] * 0.8 + target_vol * 0.2, 1)
-        
-        logger.info(f"shadow windows: rsi≤{w['rsi_hi']} chg≤{w['chg_hi']} vol≥{w['vol_lo']}")
+        w["vol_lo"] = round(w["vol_lo"] * 0.8 + max(1.0, min(3.0, round(vol_p10, 1))) * 0.2, 1)
 
     def signal_windows(self):
         return self.tuning.get("signal_windows", {"rsi_hi": 90, "chg_hi": 30, "vol_lo": 1.3})
-    
 
     def _avg(self, field, min_n=10):
         tn = sum(a["n"] for a in self.agg.values())
         ts = sum(a[field] for a in self.agg.values())
         return ts / tn if tn >= min_n else None
 
-    # ---------- геттеры ----------
     def threshold_nudge(self):
         return self.tuning["thr_nudge"] if self.tuning["auto"] else 0.0
 
@@ -275,27 +270,21 @@ class Shadow:
     def set_auto(self, on):
         self.tuning["auto"] = bool(on)
         self.save()
-        return self.tuning["auto"]
 
-    # ---------- вывод ----------
     def learn_lines(self):
         out = ["👁 <b>Теневой журнал</b> · упущенные возможности (24ч)"]
         out.append(f"   автотюн: {'🟢 вкл' if self.tuning['auto'] else '🔴 выкл'} · "
                    f"эпизодов: {len(self.episodes)}")
         shown = False
-        
-        # Эмодзи-маппинг для режимов рынка
         reg_emoji = {"bull": "🟢", "neutral": "🟡", "bear": "🔴"}
         
         for key in sorted(self.agg):
             a = self.agg[key]
-            if a["n"] < 3:
-                continue
+            if a["n"] < 3: continue
             reg, band = key.split("|")
             avg = a["sum24"] / a["n"]
             em = reg_emoji.get(reg, "⚪")
-            
-            # Компактный формат: эмодзи-режим, бэнд скора, кол-во наблюдений, средний рост, и "взятые пампы / всего пампов"
+            # Теперь a['traded'] — это реально успешные тейки!
             out.append(f"   {em} {band}: {a['n']} набл. · ср. {avg:+.1f}% · "
                        f"🎯 {a['traded']}/{a['pumps24']} пампов")
             shown = True
@@ -311,6 +300,5 @@ class Shadow:
 
     def stats_text(self):
         return "\n".join(self.learn_lines())
-
 
 shadow = Shadow()
