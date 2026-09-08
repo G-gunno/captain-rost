@@ -11,8 +11,6 @@ from bot.core.remote_state import download_state, upload_state
 
 CMC_BASE = "https://pro-api.coinmarketcap.com"
 
-_cache = {"info": {}}
-
 # ===== БАЗОВЫЙ СЛОВАРЬ СЕКТОРОВ (только оверрид; остальное учится само) =====
 SECTORS = {
     "BTC": "L1", "ETH": "L1", "SOL": "L1", "BNB": "L1", "AVAX": "L1",
@@ -121,6 +119,7 @@ async def get_sectors_for_pool(bases):
             need.append(b)
     if not need:
         return result
+        
     await asyncio.sleep(1.0)
     try:
         key = os.getenv("CMC_API_KEY", "").strip()
@@ -130,6 +129,7 @@ async def get_sectors_for_pool(bases):
                             params={"symbol": ",".join(need[:100])},
                             headers=headers)
             data = r.json().get("data", {})
+            
         learned = 0
         for b in need:
             arr = data.get(b)
@@ -138,13 +138,18 @@ async def get_sectors_for_pool(bases):
                 sector = _tags_to_sector(arr[0].get("tags")) or "Other"
             elif isinstance(arr, dict):
                 sector = _tags_to_sector(arr.get("tags")) or "Other"
+                
             result[b] = sector
-            if sector != "Other":
+            
+            # --- ИСПРАВЛЕНИЕ УТЕЧКИ ЛИМИТОВ ---
+            # Кэшируем даже 'Other', чтобы бот больше НИКОГДА не спрашивал CMC об этой монете!
+            if b not in _sector_cache:
                 _sector_cache[b] = sector
                 learned += 1
+                
         if learned:
             _save_sectors()
-            logger.info(f"sectors: авто-выучено {learned} новых монет (кэш: {len(_sector_cache)})")
+            logger.info(f"sectors: кэш обновлен, выучено {learned} новых записей (всего: {len(_sector_cache)})")
     except Exception as e:
         logger.error(f"sectors fetch error: {e}")
         for b in need:
@@ -202,6 +207,117 @@ async def get_ranks_for_pool(bases):
     return {b: fetched.get(b, _ranks["data"].get(b)) for b in bases}
 
 
+async def _get(path, params):
+    key = os.getenv("CMC_API_KEY", "").strip()
+    if not key:
+        return None
+    headers = {"X-CMC_PRO_API_KEY": key}
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(CMC_BASE + path, params=params, headers=headers)
+        data = r.json()
+        if data.get("status", {}).get("error_code"):
+            logger.error(f"CMC error: {data['status']}")
+            return None
+        return data
+    except Exception as e:
+        logger.error(f"CMC request error: {e}")
+        return None
+
+
+# ===== БЕТОННЫЙ КЭШ ИМЕН МОНЕТ (чтобы не жрать лимиты при рестартах) =====
+NAMES_FILE = Path(os.getenv("STORAGE_DIR", "storage")) / "names.json"
+NAMES_REMOTE = "names.json"
+_names_cache = {}
+_last_names_upload = 0.0
+
+def _load_names():
+    global _names_cache
+    try:
+        if NAMES_FILE.exists():
+            _names_cache = json.loads(NAMES_FILE.read_text())
+            logger.info(f"names: кэш загружен ({len(_names_cache)} имен)")
+    except Exception as e:
+        logger.error(f"names load error: {e}")
+        
+    if not _names_cache:
+        data = download_state(NAMES_REMOTE)
+        if isinstance(data, dict) and data:
+            _names_cache = data
+            logger.info(f"names: кэш восстановлен из GitHub ({len(_names_cache)} имен)")
+
+def _save_names():
+    global _last_names_upload
+    try:
+        NAMES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        NAMES_FILE.write_text(json.dumps(_names_cache, ensure_ascii=False))
+    except Exception as e:
+        logger.error(f"names save error: {e}")
+        
+    if time.time() - _last_names_upload > 60:
+        _last_names_upload = time.time()
+        upload_state(NAMES_REMOTE, _names_cache)
+
+_load_names()
+
+
+async def fetch_missing_names(symbols):
+    """Массовая загрузка имен монет (пачками по 100). Работает в связке с GitHub."""
+    need = [s for s in symbols if s not in _names_cache]
+    if not need:
+        return
+    
+    key = os.getenv("CMC_API_KEY", "").strip()
+    headers = {"X-CMC_PRO_API_KEY": key} if key else {}
+    
+    learned = 0
+    async with httpx.AsyncClient(timeout=10) as c:
+        for i in range(0, len(need), 100):
+            chunk = need[i:i+100]
+            try:
+                r = await c.get(f"{CMC_BASE}/v1/cryptocurrency/info", params={"symbol": ",".join(chunk)}, headers=headers)
+                data = r.json()
+                if data and "data" in data:
+                    for s in chunk:
+                        arr = data["data"].get(s) or data["data"].get(s.upper())
+                        name = ""
+                        if isinstance(arr, list) and arr:
+                            name = arr[0].get("name", "")
+                        elif isinstance(arr, dict):
+                            name = arr.get("name", "")
+                        
+                        # Кэшируем даже пустые имена, чтобы больше не спрашивать про них
+                        _names_cache[s] = name
+                        learned += 1
+            except Exception as e:
+                logger.error(f"CMC fetch_missing_names error: {e}")
+            await asyncio.sleep(1.0) # Защита от лимитов (макс 30 зап/мин)
+            
+    if learned:
+        _save_names()
+        logger.info(f"names: выучено {learned} новых имен монет (всего в базе: {len(_names_cache)})")
+
+
+async def get_coin_name(symbol: str) -> str:
+    """Возвращает имя из вечного кэша. Одиночные запросы к API теперь огромная редкость."""
+    if symbol in _names_cache:
+        return _names_cache[symbol]
+        
+    # Запасной план: если монеты вдруг нет в кэше, запрашиваем 1 раз и сохраняем навсегда
+    data = await _get("/v1/cryptocurrency/info", {"symbol": symbol})
+    name = ""
+    if data and "data" in data:
+        arr = data["data"].get(symbol) or data["data"].get(symbol.upper())
+        if isinstance(arr, list) and arr:
+            name = arr[0].get("name", "")
+        elif isinstance(arr, dict):
+            name = arr.get("name", "")
+            
+    _names_cache[symbol] = name
+    _save_names()
+    return name
+
+
 # ===== ПАМЯТЬ ПО МОНЕТАМ (для /learn) =====
 def memory_stats():
     """Сводка памяти: база + выученные монеты, раскладка по секторам и тирам."""
@@ -226,75 +342,11 @@ def memory_stats():
         "tiers": tier_counts,
     }
 
-
-async def _get(path, params):
-    key = os.getenv("CMC_API_KEY", "").strip()
-    if not key:
-        return None
-    headers = {"X-CMC_PRO_API_KEY": key}
-    try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.get(CMC_BASE + path, params=params, headers=headers)
-        data = r.json()
-        if data.get("status", {}).get("error_code"):
-            logger.error(f"CMC error: {data['status']}")
-            return None
-        return data
-    except Exception as e:
-        logger.error(f"CMC request error: {e}")
-        return None
-
-
-async def fetch_missing_names(symbols):
-    """Массовая загрузка имен монет (чтобы не убивать лимиты API)."""
-    need = [s for s in symbols if s not in _cache.get("info", {}) or time.time() - _cache["info"][s].get("ts", 0) > 86400]
-    if not need:
-        return
-    
-    key = os.getenv("CMC_API_KEY", "").strip()
-    headers = {"X-CMC_PRO_API_KEY": key} if key else {}
-    
-    async with httpx.AsyncClient(timeout=10) as c:
-        for i in range(0, len(need), 100):
-            chunk = need[i:i+100]
-            try:
-                r = await c.get(f"{CMC_BASE}/v1/cryptocurrency/info", params={"symbol": ",".join(chunk)}, headers=headers)
-                data = r.json()
-                if data and "data" in data:
-                    for s in chunk:
-                        arr = data["data"].get(s) or data["data"].get(s.upper())
-                        name = ""
-                        if isinstance(arr, list) and arr:
-                            name = arr[0].get("name", "")
-                        elif isinstance(arr, dict):
-                            name = arr.get("name", "")
-                        _cache.setdefault("info", {})[s] = {"name": name, "ts": time.time()}
-            except Exception as e:
-                logger.error(f"CMC fetch_missing_names error: {e}")
-            await asyncio.sleep(1.0) # Защита от лимитов
-
-async def get_coin_name(symbol: str) -> str:
-    """Возвращает имя из кэша (или делает резервный одиночный запрос)."""
-    info = _cache.get("info", {}).get(symbol)
-    if info and time.time() - info["ts"] < 86400:
-        return info["name"]
-        
-    data = await _get("/v1/cryptocurrency/info", {"symbol": symbol})
-    name = ""
-    if data and "data" in data:
-        arr = data["data"].get(symbol) or data["data"].get(symbol.upper())
-        if isinstance(arr, list) and arr:
-            name = arr[0].get("name", "")
-        elif isinstance(arr, dict):
-            name = arr.get("name", "")
-    _cache.setdefault("info", {})[symbol] = {"name": name, "ts": time.time()}
-    return name
-
 def get_stats():
     key = os.getenv("CMC_API_KEY", "").strip()
     return {
         "api_key_set": bool(key),
-        "cache_count": len(_cache.get("info", {})),
+        "cache_count": len(_names_cache),
         "sectors_learned": len(_sector_cache),
         "ranks_cached": len(_ranks["data"]),
     }
