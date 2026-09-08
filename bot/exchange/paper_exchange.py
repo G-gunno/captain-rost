@@ -177,7 +177,7 @@ class PaperExchange:
                 results.append(self._sell(sym, pos["sl"], "SL 🛡", regime_now=regime_now))
         return results
 
-def sell_partial(self, sym, qty_part, price, reason):
+    def sell_partial(self, sym, qty_part, price, reason):
         pos = self.positions.get(sym)
         if not pos:
             return None
