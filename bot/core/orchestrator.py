@@ -171,15 +171,15 @@ async def startup_reconciliation():
         a = atr(candles)
         
         # 1. Сигнал полностью умер
-        if score < thr - 2:
+        if score <= thr - 1.5:
             paper.cancel_order(order["id"])
-            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · снят 🪫 · ⭐ {score:.1f} &lt; {thr - 2:g}")
+            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · снят 🪫 · ⭐ {score:.1f} (умер)")
             continue
             
-        # 2. Сигнал ослаб (ниже порога входа)
-        if score < thr:
+        # 2. Сигнал ослаб (ниже порога входа с учетом буфера -0.5)
+        if score < thr - 0.5:
             paper.cancel_order(order["id"])
-            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · снят 🪫 · ⭐ {score:.1f} &lt; {thr:g}")
+            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · снят 🪫 · ⭐ {score:.1f} (ослаб)")
             continue
             
         # 3. Сигнал актуален -> Перевыставляем
@@ -418,7 +418,7 @@ async def run_cycle():
             )
             continue
 
-        # 4б. ИНВАЛИДАЦИЯ + серая зона + regime-инвалидация
+# 4б. ИНВАЛИДАЦИЯ + серая зона + regime-инвалидация
         signal_weak = trend_broken or score_pos <= thr - 2
 
         pos_corr = pos.get("corr", 0.5)
@@ -431,24 +431,26 @@ async def run_cycle():
             elif regime == "neutral" and score_pos < thr:
                 regime_danger = True
 
-        if signal_weak or (regime_danger and pnl_pct <= -0.5):
+        # Если сигнал сломан или режим рынка сменился не в нашу пользу — выходим СРАЗУ,
+        # независимо от текущей прибыли или убытка (ликвидируем мертвый груз).
+        if signal_weak or regime_danger:
             _fomo_cooldowns[sym] = current_time + 7200  # пауза 2 часа на слом тренда
-            if pnl_pct >= MIN_EARLY_EXIT_PCT:
-                ex = paper._sell(sym, last, "СИГНАЛ ИСЯК 📉", regime_now=regime)
-                await notify(
-                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · сигнал ослаб 📉\n"
-                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}"
-                    f"{funding_line(ex.get('transferred', 0))}"
-                )
-                continue
-            if pnl_pct <= -0.5:
-                ex = paper._sell(sym, last, "ИНВАЛИДАЦИЯ 🛑", regime_now=regime)
-                await notify(
-                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · резка убытка 🛑\n"
-                    f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}"
-                    f"{funding_line(ex.get('transferred', 0))}"
-                )
-                continue
+            
+            # Определяем причину для красивого отображения в логах
+            if regime_danger and not signal_weak:
+                reason = "СМЕНА РЕЖИМА ⚠️"
+            elif pnl_pct > 0:
+                reason = "СИГНАЛ ИСЯК (в плюс) 📉"
+            else:
+                reason = "ИНВАЛИДАЦИЯ 🛑"
+                
+            ex = paper._sell(sym, last, reason, regime_now=regime)
+            await notify(
+                f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · {reason.lower()}\n"
+                f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}"
+                f"{funding_line(ex.get('transferred', 0))}"
+            )
+            continue
 
         # 4в. РАННЕР
         new_sl = None
@@ -521,16 +523,17 @@ async def run_cycle():
         a = atr(candles)
         if a <= 0:
             continue
-        if score_now < thr - 2:
+        if score_now <= thr - 1.5:
             paper.cancel_order(order["id"])
             _fomo_cooldowns[order["symbol"]] = current_time + 7200
             await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал умер (пауза 2ч)")
             continue
 
-        if score_now < thr:
+        if score_now < thr - 0.5:
             paper.cancel_order(order["id"])
-            _fomo_cooldowns[order["symbol"]] = current_time + 3600
-            await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал ослаб (пауза 1ч)")
+            _fomo_cooldowns[order["symbol"]] = current_time + 1800  # Снизили кулдаун до 30 минут
+            await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал ослаб (пауза 30м)")
+            continue
             continue
 
         # Проверка на протухание ордера (Тайм-аут 2 часа = 7200 сек)
