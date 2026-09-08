@@ -177,7 +177,7 @@ class PaperExchange:
                 results.append(self._sell(sym, pos["sl"], "SL 🛡", regime_now=regime_now))
         return results
 
-    def sell_partial(self, sym, qty_part, price, reason):
+def sell_partial(self, sym, qty_part, price, reason):
         pos = self.positions.get(sym)
         if not pos:
             return None
@@ -196,10 +196,10 @@ class PaperExchange:
 
         self.usdt += proceeds - fee_sell
         transferred = 0.0
-        if pnl > 0:
-            transferred = round(pnl * 0.30, 4)  # Отчисляем 30% в копилку, 70% идет на реинвест
-            self.usdt -= transferred
-            self.funding += transferred
+        
+        # ИСПРАВЛЕНИЕ: Мы БОЛЬШЕ НЕ отчисляем % в копилку на этапе TP1.
+        # Вся математика копилки перенесена на момент полного закрытия позиции.
+
         pos["qty"] -= qty_part
         self.realized.append({
             "symbol": sym, "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 2),
@@ -241,7 +241,6 @@ class PaperExchange:
         else:
             exit_type = "EARLY"
 
-        # Смена режима рынка: убыток не вина сигнала → мягкий штраф + тип SL_REGIME
         soft = False
         regime_changed = (
             regime_now is not None
@@ -261,21 +260,24 @@ class PaperExchange:
         sector = self._resolve_sector(sym, pos.get("sector"))
         tier = pos.get("tier")
         kind = pos.get("kind", "core")
-        entry_mode = "rocket" if pos.get("is_momentum") else "sniper" # <--- ДОБАВИТЬ ЭТУ СТРОКУ
+        entry_mode = "rocket" if pos.get("is_momentum") else "sniper"
         try:
             learner.record(pos.get("reason_keys", []), total_pnl > 0,
                            total_pnl_pct, sector=sector, tier=tier,
                            exit_type=exit_type, runner_bonus=runner_bonus,
-                           kind=kind, soft=soft, entry_mode=entry_mode) # <--- ПЕРЕДАТЬ entry_mode
+                           kind=kind, soft=soft, entry_mode=entry_mode)
         except Exception as e:
             logger.error(f"learner record error: {e}")
 
         self.usdt += proceeds - fee_sell
         transferred = 0.0
-        if pnl_final > 0:
-            transferred = round(pnl_final * 0.30, 4)  # Отчисляем 30% в копилку, 70% идет на реинвест
+        
+        # ИСПРАВЛЕНИЕ: Отчисляем 30% в копилку ТОЛЬКО если ОБЩИЙ итог сделки (TP1 + Финал) > 0
+        if total_pnl > 0:
+            transferred = round(total_pnl * 0.30, 4)
             self.usdt -= transferred
             self.funding += transferred
+            
         self.realized.append({
             "symbol": sym, "pnl": round(total_pnl, 4), "pnl_pct": round(total_pnl_pct, 2),
             "reason": reason, "time": int(time.time()), "exit_type": exit_type,
@@ -304,10 +306,16 @@ class PaperExchange:
         return results
 
     def reset_stats(self):
-        self.realized = []
-        self.trades = []
+        # ИСПРАВЛЕНИЕ: Жесткий сброс баланса и очистка "застрявших" ордеров/позиций
+        self.realized.clear()
+        self.trades.clear()
+        self.market_history.clear()
+        self.positions.clear()
+        self.orders.clear()
+        self.usdt = self.start_usdt  # Возвращаем ровно к $1000.0
+        self.funding = 0.0           # Обнуляем копилку
         self.save()
-        logger.info("paper: торговая статистика сброшена")
+        logger.info("paper: торговая статистика, позиции и балансы сброшены")
 
     def equity(self, prices):
         eq = self.usdt + self.funding
