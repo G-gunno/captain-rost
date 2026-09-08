@@ -261,23 +261,24 @@ async def run_cycle():
         logger.error("Нет тикеров — цикл пропущен")
         return
 
-    metrics = paper.get_metrics(tickers)
+    # Получаем метрики ТОЛЬКО за последние 24 часа для управления режимом риска
+    metrics_24h = paper.get_metrics(tickers, hours=24)
     new_thr_adj = learner.update_threshold(
-        metrics["profit_factor"], metrics["max_drawdown_pct"], metrics["total_trades"]
+        metrics_24h["profit_factor"], metrics_24h["max_drawdown_pct"], metrics_24h["total_trades"]
     )
     mode, _ = learner.risk_mode(
-        metrics["profit_factor"], metrics["max_drawdown_pct"], metrics["total_trades"]
+        metrics_24h["profit_factor"], metrics_24h["max_drawdown_pct"], metrics_24h["total_trades"]
     )
     
     if _last_mode is not None and mode != _last_mode:
         m_em = {"NORMAL": "🟢", "CAUTIOUS": "🟡", "STRICT": "🔴", "AGGRESSIVE": "🚀"}
         old_e, new_e = m_em.get(_last_mode, '⚪'), m_em.get(mode, '⚪')
-        await notify(f"🎚 <b>Смена режима риска</b>\n{old_e} {_last_mode} ➡️ {new_e} <b>{mode}</b>")
+        await notify(f"🎚 <b>Смена режима риска (по стате за 24ч)</b>\n{old_e} {_last_mode} ➡️ {new_e} <b>{mode}</b>")
     _last_mode = mode
 
-    pf = metrics["profit_factor"]
+    pf = metrics_24h["profit_factor"]
     pf_txt = "∞" if pf == float("inf") else (f"{pf:.2f}" if pf is not None else "—")
-    logger.info(f"METRICS: PF={pf_txt} | DD={metrics['max_drawdown_pct']:.1f}% | "
+    logger.info(f"METRICS (24h): PF={pf_txt} | DD={metrics_24h['max_drawdown_pct']:.1f}% | "
                 f"mode={mode} | thr_adj={new_thr_adj:+.1f}")
 
     news_items = await fetch_news_cache()
