@@ -315,7 +315,7 @@ class PaperExchange:
             eq += pos["qty"] * prices.get(sym, {}).get("last", 0)
         return eq
 
-def get_metrics(self, prices=None, hours=None):
+    def get_metrics(self, prices=None, hours=None):
         if prices is None:
             prices = {}
         
