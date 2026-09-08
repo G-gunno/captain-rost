@@ -197,9 +197,6 @@ class PaperExchange:
         self.usdt += proceeds - fee_sell
         transferred = 0.0
         
-        # Мы БОЛЬШЕ НЕ отчисляем % в копилку на этапе TP1.
-        # Вся математика копилки перенесена на момент полного закрытия позиции.
-
         pos["qty"] -= qty_part
         self.realized.append({
             "symbol": sym, "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 2),
@@ -359,7 +356,10 @@ class PaperExchange:
                 if dd > max_dd:
                     max_dd = dd
 
+        # --- ИСПРАВЛЕНИЕ ЗДЕСЬ: Поднимаем total_pnl наверх! ---
+        total_pnl = sum(r["pnl"] for r in finals)
         total_trades = len(finals)
+
         if total_trades > 0:
             avg_win = sum_win / len(wins) if wins else 0
             avg_loss = sum_loss / len(losses) if losses else 0
