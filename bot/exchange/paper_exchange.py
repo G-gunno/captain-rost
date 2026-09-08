@@ -148,7 +148,7 @@ class PaperExchange:
                     pos["sector"] = self._resolve_sector(order["symbol"], order.get("sector"))
                     pos["tier"] = order.get("tier")
                     pos["regime_entry"] = order.get("regime")
-                    pos["is_momentum"] = order.get("is_momentum", False) # <--- ДОБАВИТЬ ЭТУ СТРОКУ
+                    pos["is_momentum"] = order.get("is_momentum", False)
                     pos["max_price"] = order["price"]
                     pos["entry_time"] = int(time.time())
                     self.trades.append({
@@ -197,7 +197,7 @@ class PaperExchange:
         self.usdt += proceeds - fee_sell
         transferred = 0.0
         
-        # ИСПРАВЛЕНИЕ: Мы БОЛЬШЕ НЕ отчисляем % в копилку на этапе TP1.
+        # Мы БОЛЬШЕ НЕ отчисляем % в копилку на этапе TP1.
         # Вся математика копилки перенесена на момент полного закрытия позиции.
 
         pos["qty"] -= qty_part
@@ -272,7 +272,7 @@ class PaperExchange:
         self.usdt += proceeds - fee_sell
         transferred = 0.0
         
-        # ИСПРАВЛЕНИЕ: Отчисляем 30% в копилку ТОЛЬКО если ОБЩИЙ итог сделки (TP1 + Финал) > 0
+        # Отчисляем 30% в копилку ТОЛЬКО если ОБЩИЙ итог сделки (TP1 + Финал) > 0
         if total_pnl > 0:
             transferred = round(total_pnl * 0.30, 4)
             self.usdt -= transferred
@@ -306,7 +306,7 @@ class PaperExchange:
         return results
 
     def reset_stats(self):
-        # ИСПРАВЛЕНИЕ: Жесткий сброс баланса и очистка "застрявших" ордеров/позиций
+        # Жесткий сброс баланса и очистка "застрявших" ордеров/позиций
         self.realized.clear()
         self.trades.clear()
         self.market_history.clear()
@@ -367,7 +367,6 @@ class PaperExchange:
             lossrate = 1 - winrate
             expectancy = (winrate * avg_win) - (lossrate * avg_loss)
             
-            # Если заработали без просадок - Фактор восстановления равен бесконечности
             if max_dd > 0:
                 recovery_factor = total_pnl / max_dd
             else:
