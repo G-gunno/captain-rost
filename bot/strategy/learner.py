@@ -196,7 +196,7 @@ class Learner:
         last = self.results[-20:]
         return (sum(last) / len(last), len(last)) if last else (0.0, 0)
 
-def risk_mode(self, profit_factor, max_dd_pct, total_trades=0):
+    def risk_mode(self, profit_factor, max_dd_pct, total_trades=0):
         adj = 0.0
         # Для 24-часового окна достаточно 3 сделок, чтобы оценить опасность
         enough = total_trades >= 3  
