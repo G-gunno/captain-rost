@@ -60,6 +60,7 @@ def tier_of(rank):
 SECTOR_FILE = Path(os.getenv("STORAGE_DIR", "storage")) / "sectors.json"
 SECTOR_REMOTE = "sectors.json"
 _sector_cache = {}
+_missing_sectors_cooldown = {}  # Карантин для неизвестных монет (в ОЗУ)
 _last_upload = 0.0
 
 
@@ -68,15 +69,21 @@ def _load_sectors():
     try:
         if SECTOR_FILE.exists():
             _sector_cache = json.loads(SECTOR_FILE.read_text())
-            logger.info(f"sectors: кэш загружен ({len(_sector_cache)} монет)")
     except Exception as e:
         logger.error(f"sectors load error: {e}")
+        
     # Если локального файла нет (свежий деплой) — восстанавливаем из GitHub
     if not _sector_cache:
         data = download_state(SECTOR_REMOTE)
         if isinstance(data, dict) and data:
             _sector_cache = data
-            logger.info(f"sectors: кэш восстановлен из GitHub ({len(_sector_cache)} монет)")
+            
+    # Очищаем кэш от старых "Other", чтобы дать им второй шанс обновиться
+    cleaned = {k: v for k, v in _sector_cache.items() if v != "Other"}
+    if len(cleaned) < len(_sector_cache):
+        _sector_cache = cleaned
+        
+    logger.info(f"sectors: кэш загружен ({len(_sector_cache)} валидных монет)")
 
 
 def _save_sectors():
@@ -110,13 +117,19 @@ def _tags_to_sector(tags):
 async def get_sectors_for_pool(bases):
     result = {}
     need = []
+    now = time.time()
+    
     for b in bases:
         if b in SECTORS:
             result[b] = SECTORS[b]
         elif b in _sector_cache:
             result[b] = _sector_cache[b]
+        elif b in _missing_sectors_cooldown and now - _missing_sectors_cooldown[b] < 86400:
+            # Монета в карантине (спрашивали меньше 24 часов назад)
+            result[b] = "Other"
         else:
             need.append(b)
+            
     if not need:
         return result
         
@@ -141,11 +154,13 @@ async def get_sectors_for_pool(bases):
                 
             result[b] = sector
             
-            # --- ИСПРАВЛЕНИЕ УТЕЧКИ ЛИМИТОВ ---
-            # Кэшируем даже 'Other', чтобы бот больше НИКОГДА не спрашивал CMC об этой монете!
-            if b not in _sector_cache:
+            if sector != "Other":
+                # Ура, сектор найден! Сохраняем навсегда в базу
                 _sector_cache[b] = sector
                 learned += 1
+            else:
+                # Сектора на CMC еще нет. Отправляем в карантин на 24 часа (в ОЗУ)
+                _missing_sectors_cooldown[b] = now
                 
         if learned:
             _save_sectors()
