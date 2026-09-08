@@ -196,9 +196,10 @@ class Learner:
         last = self.results[-20:]
         return (sum(last) / len(last), len(last)) if last else (0.0, 0)
 
-    def risk_mode(self, profit_factor, max_dd_pct, total_trades=0):
+def risk_mode(self, profit_factor, max_dd_pct, total_trades=0):
         adj = 0.0
-        enough = total_trades >= 5
+        # Для 24-часового окна достаточно 3 сделок, чтобы оценить опасность
+        enough = total_trades >= 3  
         if enough and profit_factor is not None:
             if profit_factor < 0.5:
                 adj += 1.5
@@ -221,7 +222,8 @@ class Learner:
     def update_threshold(self, profit_factor, max_dd_pct, total_trades=0):
         _, dyn_adj = self.risk_mode(profit_factor, max_dd_pct, total_trades)
         wr_adj = 0.0
-        if total_trades >= 10:
+        # Глобальный винрейт меняем, если за сутки было хотя бы 5 сделок
+        if total_trades >= 5:  
             last = self.results[-20:]
             if last:
                 wr = sum(last) / len(last)
