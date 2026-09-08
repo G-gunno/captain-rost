@@ -651,16 +651,22 @@ async def cmd_autotune(update, context):
 
 
 @restricted
+@restricted
 async def cmd_status(update, context):
     try:
         prices = await market_data.get_tickers()
         eq = paper.equity(prices)
         free_pct = paper.usdt / eq * 100 if eq else 0
+        
+        # Получаем два набора метрик: глобальный и за 24 часа
+        metrics_all = paper.get_metrics(prices)
+        metrics_24h = paper.get_metrics(prices, hours=24)
 
         msg = ["📊 <b>Капитан Рост</b> · <i>тренировка</i> 🎓", ""]
         msg.append(f"💰 Свободно: <b>{usd(paper.usdt)}</b> ({free_pct:.0f}%)")
         msg.append(f"🏦 Накопления: <b>{usd(paper.funding)}</b>")
         msg.append(f"📈 Капитал: <b>{usd(eq)}</b>")
+        msg.append(f"💵 PnL (за всё время): {pnl_emoji(metrics_all['total_pnl'])} <b>{usd(metrics_all['total_pnl'])}</b>")
         msg.append("")
 
         if paper.positions:
@@ -681,7 +687,6 @@ async def cmd_status(update, context):
                 ind = "🔥" if pos.get("tp1_done") else pnl_emoji(pnl_pct)
                 tp1 = " · TP1" if pos.get("tp1_done") else ""
                 
-                # Формируем ссылку
                 public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
                 chart_url = f"{public_url}/chart?symbol={sym}"
                 
@@ -694,10 +699,9 @@ async def cmd_status(update, context):
                 tp_pct = (pos["tp"] - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
                 sl_pct = (pos["sl"] - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
                 
-                # Визуализация SL
                 if sl_pct >= 0.5:
                     sl_str = f"📈 <b>{fmt_price(pos['sl'])} ({fmt_pct(sl_pct)})</b>"
-                elif sl_pct >= 0.15: # Учитываем комиссию ~0.2%
+                elif sl_pct >= 0.15: 
                     sl_str = f"🔒 <b>{fmt_price(pos['sl'])} ({fmt_pct(sl_pct)})</b>"
                 else:
                     sl_str = f"🛡 {fmt_price(pos['sl'])} ({fmt_pct(sl_pct)})"
@@ -716,11 +720,8 @@ async def cmd_status(update, context):
                 kind = "🛰" if o.get("kind") == "satellite" else "🏛"
                 sector = o.get("sector") or sector_of(o["symbol"][:-4])
                 tier_em = TIER_EMOJI.get(o.get("tier") or "", "")
-                
-                # Добавляем иконку режима (Ракета или Снайпер)
                 mode_emoji = "🚀" if o.get("is_momentum") else "🏹"
                 
-                # Считаем дистанцию ордера от текущей рыночной цены
                 last_price = prices.get(o["symbol"], {}).get("last", 0)
                 if last_price > 0:
                     dist_pct = (o["price"] - last_price) / last_price * 100
@@ -728,7 +729,6 @@ async def cmd_status(update, context):
                 else:
                     dist_str = ""
                 
-                # Формируем ссылку
                 public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
                 chart_url = f"{public_url}/chart?symbol={o['symbol']}"
                 
@@ -744,20 +744,19 @@ async def cmd_status(update, context):
             msg.append("📋 <b>Ордера</b>: нет")
         msg.append("")
 
-        metrics = paper.get_metrics(prices)
         mode, _ = learner.risk_mode(
-            metrics["profit_factor"], metrics["max_drawdown_pct"], metrics["total_trades"]
+            metrics_24h["profit_factor"], metrics_24h["max_drawdown_pct"], metrics_24h["total_trades"]
         )
         mode_emoji = {"NORMAL": "🟢", "CAUTIOUS": "🟡", "STRICT": "🔴", "AGGRESSIVE": "🚀"}.get(mode, "⚪")
 
-        msg.append(f"📊 <b>Метрики</b> · {mode_emoji} {mode}")
+        msg.append(f"📊 <b>Метрики (24ч)</b> · {mode_emoji} {mode}")
         msg.append(
-            f"🧾 {metrics['total_trades']} позиций "
-            f"(✅ {metrics['win_count']} / ❌ {metrics['loss_count']}) · "
-            f"🎯 частичных TP1: {metrics['partial_count']}"
+            f"🧾 {metrics_24h['total_trades']} позиций "
+            f"(✅ {metrics_24h['win_count']} / ❌ {metrics_24h['loss_count']}) · "
+            f"🎯 частичных TP1: {metrics_24h['partial_count']}"
         )
 
-        pf = metrics["profit_factor"]
+        pf = metrics_24h["profit_factor"]
         if pf is None:
             pf_text, pf_mark = "—", ""
         elif pf == float("inf"):
@@ -765,12 +764,12 @@ async def cmd_status(update, context):
         else:
             pf_text = f"{pf:.2f}"
             pf_mark = "🎯" if pf >= 1.3 else ("⚠️" if pf >= 1.0 else "❌")
-        dd = metrics["max_drawdown_pct"]
+        dd = metrics_24h["max_drawdown_pct"]
         dd_mark = "✅" if dd < 5 else ("⚠️" if dd < 15 else "🔴")
         msg.append(f"📈 PF: <b>{pf_text}</b> {pf_mark} (цель ≥ 1.3) · 📉 DD: <b>{dd:.1f}%</b> {dd_mark} (лимит 15%)")
 
-        exp = metrics["expectancy"]
-        rf = metrics["recovery_factor"]
+        exp = metrics_24h["expectancy"]
+        rf = metrics_24h["recovery_factor"]
         exp_mark = "🎯" if exp > 0 else "❌"
         rf_mark = "🎯" if rf > 2 else ("⚠️" if rf > 1 else "❌")
         msg.append(f"💹 {pnl_emoji(exp)} <b>{exp:+.2f}</b> {exp_mark} (цель > 0) · 🔄 RF: <b>{rf:.1f}</b> {rf_mark} (цель ≥ 2)")
@@ -782,8 +781,8 @@ async def cmd_status(update, context):
             o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite"
         )
         sat_pct = sat_exposure / eq * 100 if eq else 0
-        msg.append(f"🛰 Сателлиты: <b>{sat_pct:.1f}%</b> / {learner.satellite_limit():.0f}% · размер {learner.satellite_size_pct():.1f}%")
-        msg.append(f"💵 Суммарный PnL: {pnl_emoji(metrics['total_pnl'])} <b>{usd(metrics['total_pnl'])}</b>")
+        msg.append(f"🛰 Сателлиты: <b>{sat_pct:.1f}%</b> / {learner.satellite_limit():.0f}%")
+        msg.append(f"⏱ PnL за 24 часа: {pnl_emoji(metrics_24h['total_pnl'])} <b>{usd(metrics_24h['total_pnl'])}</b>")
         msg.append("")
 
         regime, _ = await get_regime()
@@ -803,7 +802,6 @@ async def cmd_status(update, context):
     except Exception as e:
         logger.exception("Ошибка в /status")
         await reply(update, f"⚠️ Ошибка: {e}")
-
 
 def main():
     os.makedirs("logs", exist_ok=True)
