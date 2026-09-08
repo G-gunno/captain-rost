@@ -651,7 +651,6 @@ async def cmd_autotune(update, context):
 
 
 @restricted
-@restricted
 async def cmd_status(update, context):
     try:
         prices = await market_data.get_tickers()
