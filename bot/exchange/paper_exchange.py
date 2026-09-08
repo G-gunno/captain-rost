@@ -315,11 +315,20 @@ class PaperExchange:
             eq += pos["qty"] * prices.get(sym, {}).get("last", 0)
         return eq
 
-    def get_metrics(self, prices=None):
+def get_metrics(self, prices=None, hours=None):
         if prices is None:
             prices = {}
+        
         finals = [r for r in self.realized if not r.get("partial")]
-        partial_count = len(self.realized) - len(finals)
+        
+        # Если передан параметр hours, отсекаем старые сделки (скользящее окно)
+        if hours is not None:
+            cutoff = int(time.time()) - int(hours * 3600)
+            finals = [r for r in finals if r.get("time", 0) >= cutoff]
+            partials = [r for r in self.realized if r.get("partial") and r.get("time", 0) >= cutoff]
+            partial_count = len(partials)
+        else:
+            partial_count = len(self.realized) - len(finals)
 
         wins = [r for r in finals if r["pnl"] > 0]
         losses = [r for r in finals if r["pnl"] <= 0]
