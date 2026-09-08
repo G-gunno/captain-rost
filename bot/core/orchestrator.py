@@ -833,7 +833,7 @@ async def run_cycle():
         )
     # --- СБРОС И ОТПРАВКА БУФЕРА УВЕДОМЛЕНИЙ ---
     if _notification_buffer:
-        digest_text = "⚡️ <b>Цикл торговли · Дайджест</b>\n\n" + "\n\n".join(_notification_buffer)
+        digest_text = "\n\n".join(_notification_buffer)
         _notification_buffer.clear()
         if _notify_cb:
             try:
