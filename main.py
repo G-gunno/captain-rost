@@ -224,9 +224,10 @@ async def action_resetstats(context):
     paper.reset_stats()
     learner.reset_stats()
     return (
-        "📊 <b>Статистика сброшена</b>\n"
+        "📊 <b>Статистика и балансы сброшены</b>\n"
         "PF / DD / Expectancy — с нуля, веса-знания сохранены.\n"
-        "Режим вернулся к базовому."
+        "💰 Баланс: <b>$1,000.00</b>\n"
+        "📦 Все ордера и позиции очищены."
     )
 
 
