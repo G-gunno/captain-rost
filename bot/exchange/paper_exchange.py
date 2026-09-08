@@ -366,11 +366,16 @@ class PaperExchange:
             winrate = len(wins) / total_trades
             lossrate = 1 - winrate
             expectancy = (winrate * avg_win) - (lossrate * avg_loss)
+            
+            # Если заработали без просадок - Фактор восстановления равен бесконечности
+            if max_dd > 0:
+                recovery_factor = total_pnl / max_dd
+            else:
+                recovery_factor = float("inf") if total_pnl > 0 else 0.0
         else:
-            expectancy = 0
-
-        total_pnl = sum(r["pnl"] for r in finals)
-        recovery_factor = total_pnl / max_dd if max_dd > 0 else 0
+            # Нет сделок — нет и метрик (возвращаем None вместо 0)
+            expectancy = None
+            recovery_factor = None
 
         wr, n = learner.winrate()
         return {
