@@ -6,7 +6,7 @@ import httpx
 import plotly.graph_objects as go
 from loguru import logger
 
-# Если сервер работает в другой зоне, поменяй на нужную, чтобы логи совпали со свечами
+# Зона для отображения графиков
 LOG_TIMEZONE = "Europe/Moscow" 
 
 
@@ -34,8 +34,12 @@ class TradeVisualizer:
                     if not ts_match:
                         continue
                         
-                    # Парсим время как наивное (предполагаем, что оно в LOG_TIMEZONE)
-                    dt = datetime.strptime(ts_match.group(1), "%Y-%m-%d %H:%M:%S")
+                    # 1. Читаем время из лога (сервер Render пишет логи в UTC)
+                    dt_utc = datetime.strptime(ts_match.group(1), "%Y-%m-%d %H:%M:%S")
+                    
+                    # 2. ИСПРАВЛЕНИЕ: Конвертируем UTC-время в наш LOG_TIMEZONE (Москва)
+                    # Это синхронизирует время логов со временем японских свечей!
+                    dt = pd.Timestamp(dt_utc).tz_localize("UTC").tz_convert(LOG_TIMEZONE).tz_localize(None)
                     
                     # 1. Покупки
                     if "PAPER FILL BUY" in line and self.symbol in line:
@@ -136,10 +140,9 @@ class TradeVisualizer:
     def _merge_prices(self, df_events: pd.DataFrame, df_klines: pd.DataFrame) -> pd.DataFrame:
         """Подставляет цену закрытия свечи для событий, где цена не была указана в логах."""
         
-        # --- ИСПРАВЛЕНИЕ: Принудительно приводим ключи к одному типу времени (наносекунды) ---
+        # Принудительно приводим ключи к одному типу времени (наносекунды)
         df_events['time'] = pd.to_datetime(df_events['time']).astype('datetime64[ns]')
         df_klines['datetime'] = pd.to_datetime(df_klines['datetime']).astype('datetime64[ns]')
-        # -----------------------------------------------------------------------------------
 
         # Используем merge_asof для поиска ближайшей свечи по времени
         merged = pd.merge_asof(
@@ -149,7 +152,7 @@ class TradeVisualizer:
             right_on='datetime', 
             direction='nearest'
         )
-        # Заменяем пустые цены на цену закрытия ближайшей свечи
+        # Заменяем пустые цены (отмены/продажи) на цену закрытия ближайшей свечи
         merged['price'] = merged['price'].fillna(merged['close'])
         return merged
 
