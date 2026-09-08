@@ -27,6 +27,9 @@ def _band(score):
 
 
 class Shadow:
+    """Теневой журнал: наблюдает монеты (в т.ч. упущенные), копит агрегаты,
+    мягко тюнит порог/веса/охоту/SL. Хранит копейки данных."""
+
     def __init__(self):
         self.episodes = {}
         self.agg = {}
@@ -71,6 +74,7 @@ class Shadow:
             upload_state(REMOTE_PATH, payload)
 
     def observe(self, scored, regime, thr):
+        from bot.exchange.paper_exchange import paper
         now = time.time()
         obs_thr = thr - OBS_GAP
         for c in scored:
@@ -86,12 +90,18 @@ class Shadow:
                 continue
             if len(self.episodes) >= MAX_EPISODES:
                 continue
-                
+            
+            # ИСПРАВЛЕНИЕ: success=True только если был реальный заработок
+            traded = (sym in paper.positions or
+                      any(o["symbol"] == sym for o in paper.orders))
+            
             self.episodes[sym] = {
                 "ts": now, "price": c["last"], "max_score": c["score"],
                 "regime": regime, "sector": c.get("sector"), "tier": c.get("tier"),
-                "keys": c.get("reason_keys", []), "success": False, # Успех только если реально заработали
+                "keys": c.get("reason_keys", []), "traded": bool(traded),
+                "success": False, 
                 "hi": c["last"], "lo": c["last"], "p4": None,
+                "lo_before_pump": c["last"], "pumped": False,  # ИСПРАВЛЕНИЕ: трекинг чистого отката
                 "signal_values": c.get("signal_values", {}),
             }
 
@@ -110,6 +120,13 @@ class Shadow:
             last = t["last"]
             ep["hi"] = max(ep["hi"], last)
             ep["lo"] = min(ep["lo"], last)
+            
+            # ИСПРАВЛЕНИЕ 1: Фиксируем лой ТОЛЬКО до момента пампа (+3%)
+            if not ep.get("pumped"):
+                ep["lo_before_pump"] = min(ep.get("lo_before_pump", last), last)
+                if last >= ep["price"] * (1 + PUMP_PCT / 100):
+                    ep["pumped"] = True
+            
             age = now - ep["ts"]
             if ep["p4"] is None and age >= H4:
                 ep["p4"] = last
@@ -123,39 +140,48 @@ class Shadow:
         self.cooldown[sym] = time.time() + COOLDOWN
         if dec <= 0:
             return
+            
         move24 = (last - dec) / dec * 100
         move4 = ((ep["p4"] or last) - dec) / dec * 100
         mae = (ep["lo"] - dec) / dec * 100
         mfe = (ep["hi"] - dec) / dec * 100
+        pullback = (ep.get("lo_before_pump", ep["lo"]) - dec) / dec * 100
+        
         key = f"{ep['regime']}|{_band(ep['max_score'])}"
         
         a = self.agg.setdefault(key, {
             "n": 0, "sum4": 0.0, "sum24": 0.0, "pumps4": 0, "pumps24": 0,
             "traded": 0, "sum_mae": 0.0, "sum_mfe": 0.0, "sum_pull": 0.0,
+            "sum_pull_pump": 0.0, "sum_mae_pump": 0.0, # Метрики только для победителей
             "keys_pump": {}, "keys_all": {},
         })
         a["n"] += 1
         a["sum4"] += move4
         a["sum24"] += move24
+        a["sum_mae"] += mae
+        a["sum_mfe"] += mfe
+        a["sum_pull"] += mae   
+        
         if move4 >= PUMP_PCT:
             a["pumps4"] += 1
+            
         if move24 >= PUMP_PCT:
             a["pumps24"] += 1
+            # ИСПРАВЛЕНИЕ 2: Изолированная статистика для успешных пампов
+            a["sum_pull_pump"] = a.get("sum_pull_pump", 0.0) + pullback
+            a["sum_mae_pump"] = a.get("sum_mae_pump", 0.0) + mae
+            
             for k in ep["keys"]:
                 a["keys_pump"][k] = a["keys_pump"].get(k, 0) + 1
             sv = ep.get("signal_values", {})
             for k, v in sv.items():
                 a.setdefault("signal_values_pump", {}).setdefault(k, []).append(v)
+                
         for k in ep["keys"]:
             a["keys_all"][k] = a["keys_all"].get(k, 0) + 1
             
-        # Засчитываем 'traded' только если мы реально извлекли прибыль из этого пампа
         if ep.get("success"):
             a["traded"] += 1
-            
-        a["sum_mae"] += mae
-        a["sum_mfe"] += mfe
-        a["sum_pull"] += mae   # pullback ≈ макс. просадка после сигнала
 
     def autotune(self):
         if not self.tuning["auto"]:
@@ -165,35 +191,50 @@ class Shadow:
             return
         self._last_tune = now
 
-        # Калибровка порога
+        # ИСПРАВЛЕНИЕ 3: Двусторонняя калибровка порога
         nudge = 0.0
         base = {"bull": 5.0, "neutral": 6.0, "bear": 7.0}
         total_missed_pumps = 0
+        total_pumps = 0
+        sum_pull_pump = 0.0
+        sum_mae_pump = 0.0
         
         for reg, b in base.items():
             a = self.agg.get(f"{reg}|{_band(b)}")
             if a and a["n"] >= 10:
+                pump_rate = a["pumps24"] / a["n"]
                 missed = a["pumps24"] - a["traded"]
-                total_missed_pumps += missed
-                if missed >= 5:
-                    pump_rate = a["pumps24"] / a["n"]
-                    avg = a["sum24"] / a["n"]
-                    if pump_rate >= 0.3 and avg >= 2.0:
-                        nudge -= 0.25
+                
+                # Если упускаем много крутых пампов -> Смягчаем порог
+                if missed >= 5 and pump_rate >= 0.3:
+                    nudge -= 0.25
+                # Если на рынке много фейкаутов (мы входим, но монеты не пампят) -> Ужесточаем порог
+                elif pump_rate < 0.15 and a["traded"] >= 2:
+                    nudge += 0.25
+
         self.tuning["thr_nudge"] = round(max(-0.5, min(0.5, nudge)), 2)
 
-        # Охота: если мы массово упускаем пампы, значит мы жадничаем с лимитками. Делаем входы ближе к рынку.
-        pull = self._avg("sum_pull")
-        if pull is not None:
-            if total_missed_pumps > 10:
-                self.tuning["hunt"] = round(max(-0.01, min(-0.001, pull / 100 * 0.3)), 4) # Берем всего 30% от отката
-            else:
-                self.tuning["hunt"] = round(max(-0.01, min(-0.002, pull / 100 * 0.6)), 4)
+        # Считаем агрегаты ТОЛЬКО по успешным пампам
+        for a in self.agg.values():
+            pumps = a.get("pumps24", 0)
+            total_pumps += pumps
+            total_missed_pumps += (pumps - a.get("traded", 0))
+            sum_pull_pump += a.get("sum_pull_pump", 0.0)
+            sum_mae_pump += a.get("sum_mae_pump", 0.0)
 
-        # SL: если победители терпят просадку — чуть расширяем.
-        sm = self._avg("sum_mae")
-        if sm is not None:
-            self.tuning["sl_mult"] = round(max(0.8, min(1.5, 1.0 + abs(sm) / 100 * 0.3)), 2)
+        # Охота (Hunt) и Стоп-Лосс (SL) на базе реальных победителей
+        if total_pumps >= 5:
+            avg_pull = sum_pull_pump / total_pumps
+            avg_mae = sum_mae_pump / total_pumps
+
+            # Если мы массово упускаем пампы, значит мы жадничаем с лимитками (берем 30% от отката)
+            if total_missed_pumps > 10:
+                self.tuning["hunt"] = round(max(-0.01, min(-0.001, avg_pull / 100 * 0.3)), 4)
+            else:
+                self.tuning["hunt"] = round(max(-0.01, min(-0.002, avg_pull / 100 * 0.6)), 4)
+
+            # Расширяем SL только если реальные победители терпели сильную просадку
+            self.tuning["sl_mult"] = round(max(0.8, min(1.5, 1.0 + abs(avg_mae) / 100 * 0.3)), 2)
 
         self._apply_weight_lift()
         self._calibrate_signal_windows()
@@ -203,9 +244,9 @@ class Shadow:
     def _apply_weight_lift(self):
         kp, ka = {}, {}
         for a in self.agg.values():
-            for k, v in a["keys_pump"].items():
+            for k, v in a.get("keys_pump", {}).items():
                 kp[k] = kp.get(k, 0) + v
-            for k, v in a["keys_all"].items():
+            for k, v in a.get("keys_all", {}).items():
                 ka[k] = ka.get(k, 0) + v
         total_pump = sum(kp.values()) or 1
         total_all = sum(ka.values()) or 1
@@ -246,7 +287,7 @@ class Shadow:
 
     def _avg(self, field, min_n=10):
         tn = sum(a["n"] for a in self.agg.values())
-        ts = sum(a[field] for a in self.agg.values())
+        ts = sum(a.get(field, 0.0) for a in self.agg.values())
         return ts / tn if tn >= min_n else None
 
     def threshold_nudge(self):
@@ -284,9 +325,8 @@ class Shadow:
             reg, band = key.split("|")
             avg = a["sum24"] / a["n"]
             em = reg_emoji.get(reg, "⚪")
-            # Теперь a['traded'] — это реально успешные тейки!
             out.append(f"   {em} {band}: {a['n']} набл. · ср. {avg:+.1f}% · "
-                       f"🎯 {a['traded']}/{a['pumps24']} пампов")
+                       f"🎯 {a.get('traded', 0)}/{a['pumps24']} пампов")
             shown = True
             
         if not shown:
