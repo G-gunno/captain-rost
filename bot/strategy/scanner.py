@@ -100,8 +100,8 @@ async def get_regime():
                 green_alts = sum(1 for s in tradable if tickers[s]["change_pct"] > 3.0)
                 breadth_pct = (green_alts / len(tradable)) * 100
                 
-                # Если больше 25% ликвидных альтов уверенно растут - это альтсезон (локальный)
-                if breadth_pct >= 25.0:
+                # Изменяем порог альтсезона с 25.0 на 40.0
+                if breadth_pct >= 40.0:
                     regime = "bull"
                     logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые. Режим принудительно переведен в 'bull' (Альтсезон).")
                 else:
@@ -387,9 +387,10 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             reasons.append(f"тир {TIER_EMOJI[tier]}: {tb:+.2f}")
 
         name = await get_coin_name(base)
-        neg, pos, mentions, _ = check_sentiment(news_items, [base, name])
+        neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
 
-        is_toxic = neg > 0 and neg >= (pos * 2) and neg >= (mentions * 0.33)
+        # --- ИСПРАВЛЕНИЕ: Блокируем только если негатива >= 2 (исключаем случайные слова) ---
+        is_toxic = neg >= 2 and neg >= (pos_news * 2) and neg >= (mentions * 0.33)
 
         if is_toxic:
             logger.info(f"{sym}: пропущен из-за негативного новостного фона ({neg} нег. из {mentions} упом.)")
