@@ -36,15 +36,11 @@ def restricted(func):
     """Декоратор для блокировки доступа чужим пользователям."""
     @wraps(func)
     async def wrapped(update, context, *args, **kwargs):
-        # Получаем ID того, кто пишет боту
         user_chat_id = str(update.effective_chat.id)
-        # Получаем твой ID из настроек Render
         admin_chat_id = os.getenv("TELEGRAM_CHAT_ID")
-        
         if user_chat_id != admin_chat_id:
             logger.warning(f"🚨 Попытка взлома! Заблокирован доступ от чата: {user_chat_id}")
-            return  # Бот просто игнорирует чужака
-            
+            return
         return await func(update, context, *args, **kwargs)
     return wrapped
 
@@ -54,24 +50,32 @@ def usd(x):
 def pnl_emoji(x):
     return "🟢" if x > 0.05 else ("🔴" if x < -0.05 else "🟡")
 
-
 def weight_emoji(v):
     return "🔥" if v >= 1.1 else ("🟢" if v >= 0.9 else ("🟡" if v >= 0.7 else "🔻"))
+
+# --- НОВЫЙ ЕДИНЫЙ СТАНДАРТ ОФОРМЛЕНИЯ МОНЕТ ---
+def format_coin(sym, data_obj):
+    kind = "🛰" if data_obj.get("kind") == "satellite" else "🏛"
+    mode = "🚀" if data_obj.get("is_momentum") else "🏹"
+    tier = data_obj.get("tier")
+    em = TIER_EMOJI.get(tier, "") if tier else ""
+    sector = data_obj.get("sector") or "Other"
+    
+    base_sym = sym[:-4] if sym.endswith("USDT") else sym
+    public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
+    chart_url = f"{public_url}/chart?symbol={sym}"
+    
+    return f"{mode} {kind} <a href='{chart_url}'><b>{base_sym}</b></a>{' ' + em if em else ''} · <i>{sector}</i>"
 
 
 async def reply(update, text, markup=None):
     try:
         await update.message.reply_text(
-            text, 
-            parse_mode="HTML", 
-            reply_markup=markup, 
-            disable_web_page_preview=True  # Запрещаем Telegram ддосить наш сервер
+            text, parse_mode="HTML", reply_markup=markup, disable_web_page_preview=True
         )
     except BadRequest:
         await update.message.reply_text(
-            text, 
-            reply_markup=markup, 
-            disable_web_page_preview=True
+            text, reply_markup=markup, disable_web_page_preview=True
         )
 
 
@@ -103,25 +107,20 @@ async def chart_handler(request):
         try:
             from bot.utils.visualizer import TradeVisualizer
             viz = TradeVisualizer(log_path="logs/bot.log", symbol=symbol)
-            # show=False не будет пытаться открыть браузер на сервере Render
             fig = viz.build_chart(show=False) 
             if fig is None:
                 return None
-            # Возвращаем готовую HTML-строку (используем CDN, чтобы страница летала)
             return fig.to_html(include_plotlyjs="cdn", full_html=True)
         except Exception as e:
             logger.error(f"Visualizer error: {e}")
             return str(e)
 
     try:
-        # Запускаем парсинг в отдельном потоке, чтобы не тормозить цикл бота
         html_or_error = await asyncio.to_thread(make_chart)
-        
         if html_or_error is None:
             return web.Response(text=f"Нет данных лога или свечей для {symbol}. Возможно, бот её еще не торговал.", status=404)
-        if not html_or_error.startswith("<"): # Значит вернулся текст ошибки
+        if not html_or_error.startswith("<"):
              return web.Response(text=f"Ошибка генерации: {html_or_error}", status=500)
-             
         return web.Response(text=html_or_error, content_type="text/html")
     except Exception as e:
         return web.Response(text=f"Внутренняя ошибка сервера: {e}", status=500)
@@ -133,16 +132,11 @@ async def send_chat(text):
     if chat and _app:
         try:
             await _app.bot.send_message(
-                chat_id=chat, 
-                text=text, 
-                parse_mode="HTML", 
-                disable_web_page_preview=True  # Запрещаем Telegram ддосить наш сервер
+                chat_id=chat, text=text, parse_mode="HTML", disable_web_page_preview=True
             )
         except BadRequest:
             await _app.bot.send_message(
-                chat_id=chat, 
-                text=text, 
-                disable_web_page_preview=True
+                chat_id=chat, text=text, disable_web_page_preview=True
             )
 
 
@@ -217,7 +211,7 @@ async def action_exitall(context):
 
 async def action_resetlearn(context):
     learner.reset()
-    shadow.reset()  # <--- Добавили сброс теневого журнала
+    shadow.reset()
     return (
         "🧠♻️ <b>Опыт ИИ сброшен</b>\n"
         "• Веса индикаторов возвращены к 1.0\n"
@@ -262,8 +256,7 @@ async def confirm_handler(update, context):
 
     if data == "cancel":
         try:
-            await query.edit_message_text("❌ Отменено.",
-                                          reply_markup=InlineKeyboardMarkup([]))
+            await query.edit_message_text("❌ Отменено.", reply_markup=InlineKeyboardMarkup([]))
         except BadRequest:
             pass
         return
@@ -277,37 +270,24 @@ async def confirm_handler(update, context):
         try:
             result = await fn(context)
             try:
-                await query.edit_message_text(
-                    f"✅ <b>Подтверждено</b>\n\n{result}",
-                    reply_markup=InlineKeyboardMarkup([]),
-                )
+                await query.edit_message_text(f"✅ <b>Подтверждено</b>\n\n{result}", reply_markup=InlineKeyboardMarkup([]))
             except BadRequest:
-                await query.edit_message_text(
-                    f"✅ Подтверждено\n\n{result}",
-                    reply_markup=InlineKeyboardMarkup([]),
-                )
+                await query.edit_message_text(f"✅ Подтверждено\n\n{result}", reply_markup=InlineKeyboardMarkup([]))
         except BadRequest as e:
             if "Message is not modified" in str(e):
                 return
             try:
-                await query.edit_message_text(f"⚠️ Ошибка: {e}",
-                                              reply_markup=InlineKeyboardMarkup([]))
+                await query.edit_message_text(f"⚠️ Ошибка: {e}", reply_markup=InlineKeyboardMarkup([]))
             except BadRequest:
                 pass
         except Exception as e:
             logger.exception(f"confirm action error: {e}")
-            try:
-                await query.edit_message_text(f"⚠️ Ошибка: {e}",
-                                              reply_markup=InlineKeyboardMarkup([]))
-            except BadRequest:
-                pass
 
 
 # ==================== Главный запуск ====================
 async def run_all(application):
     global _app
     _app = application
-
     await application.initialize()
     await application.start()
 
@@ -322,13 +302,11 @@ async def run_all(application):
     webhook_url = f"{public_url}{WEBHOOK_PATH}"
 
     await application.bot.set_webhook(
-        url=webhook_url,
-        drop_pending_updates=True,
+        url=webhook_url, drop_pending_updates=True,
         allowed_updates=["message", "edited_message", "callback_query"],
     )
     logger.info(f"✅ Webhook установлен: {webhook_url}")
 
-    # Меню в порядке пользователя
     await application.bot.set_my_commands([
         BotCommand("start", "🚀 Запустить торговлю"),
         BotCommand("pause", "⏸ Пауза (с подтверждением)"),
@@ -347,16 +325,13 @@ async def run_all(application):
     ])
 
     await asyncio.to_thread(ensure_branch)
-
     set_notifier(send_chat)
     asyncio.create_task(cycle_loop())
     asyncio.create_task(report_loop())
     
-    # Запускаем фоновый стример цен в реальном времени
     from bot.exchange.market_data import start_ws_ticker_stream
     asyncio.create_task(start_ws_ticker_stream())
     
-    # Запускаем сборщик макро-данных (DefiLlama, DropsTab)
     from bot.strategy.fundamental import update_fundamental_data
     asyncio.create_task(update_fundamental_data())
     
@@ -396,19 +371,14 @@ async def cmd_start(update, context):
 
 @restricted
 async def cmd_info(update, context):
-    """Паспорт бота — краткая сводка + подробный Whitepaper файлом."""
     from bot.services.info import info_full_text, generate_whitepaper
     import io
-
-    # 1. Отправляем короткую и красивую сводку текстом в чат
     await reply(update, info_full_text())
 
-    # 2. Генерируем "на лету" подробную техническую документацию (Whitepaper)
     whitepaper_text = generate_whitepaper()
     doc = io.BytesIO(whitepaper_text.encode('utf-8'))
     doc.name = "CaptainRost_Whitepaper.txt"
     
-    # 3. Отправляем файл пользователю
     await update.message.reply_document(
         document=doc,
         caption="📄 <b>Подробная документация (Whitepaper)</b>\nПолное описание архитектуры, формул и логики бота.",
@@ -429,30 +399,20 @@ async def cmd_help(update, context):
         "/log — файл лога"
     )
 
+@restricted
+async def cmd_pause(update, context): await ask_confirmation(update, context, "pause")
 
 @restricted
-async def cmd_pause(update, context):
-    await ask_confirmation(update, context, "pause")
-
+async def cmd_resume(update, context): await ask_confirmation(update, context, "resume")
 
 @restricted
-async def cmd_resume(update, context):
-    await ask_confirmation(update, context, "resume")
-
+async def cmd_exitall(update, context): await ask_confirmation(update, context, "exitall")
 
 @restricted
-async def cmd_exitall(update, context):
-    await ask_confirmation(update, context, "exitall")
-
+async def cmd_resetlearn(update, context): await ask_confirmation(update, context, "resetlearn")
 
 @restricted
-async def cmd_resetlearn(update, context):
-    await ask_confirmation(update, context, "resetlearn")
-
-
-@restricted
-async def cmd_resetstats(update, context):
-    await ask_confirmation(update, context, "resetstats")
+async def cmd_resetstats(update, context): await ask_confirmation(update, context, "resetstats")
 
 
 @restricted
@@ -629,25 +589,21 @@ async def cmd_log(update, context):
 
 @restricted
 async def cmd_chart(update, context):
-    import time  # Локальный импорт для работы со временем
+    import time
     arg = (context.args or [None])[0]
     public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
 
-    # Если тикер не указан — выводим список за 24 часа
     if not arg:
         now_ts = int(time.time())
         cutoff = now_ts - 86400
         symbols = set()
 
-        # 1. Собираем из активных позиций
         for sym in paper.positions.keys():
             symbols.add(sym)
             
-        # 2. Собираем из выставленных ордеров
         for o in paper.orders:
             symbols.add(o["symbol"])
 
-        # 3. Собираем из истории сделок за последние 24 часа
         for t in paper.trades:
             if t.get("time", 0) >= cutoff:
                 symbols.add(t["symbol"])
@@ -669,7 +625,6 @@ async def cmd_chart(update, context):
         )
         return
         
-    # Если тикер указан явно — выдаем как раньше
     sym = arg.upper()
     if not sym.endswith("USDT"):
         sym += "USDT"
@@ -695,6 +650,7 @@ async def cmd_autotune(update, context):
     await reply(update, shadow.stats_text() +
                 "\n💡 переключение: /autotune · или /autotune off · /autotune on")
 
+
 @restricted
 async def cmd_status(update, context):
     try:
@@ -702,7 +658,6 @@ async def cmd_status(update, context):
         eq = paper.equity(prices)
         free_pct = paper.usdt / eq * 100 if eq else 0
         
-        # Получаем два набора метрик: глобальный и за 24 часа
         metrics_all = paper.get_metrics(prices)
         metrics_24h = paper.get_metrics(prices, hours=24)
 
@@ -726,21 +681,11 @@ async def cmd_status(update, context):
                 w = val / eq * 100 if eq else 0
                 pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
                 
-                kind = "🛰" if pos.get("kind") == "satellite" else "🏛"
-                mode_emoji = "🚀" if pos.get("is_momentum") else "🏹"
-                sector = pos.get("sector") or sector_of(sym[:-4])
-                tier_em = TIER_EMOJI.get(pos.get("tier") or "", "")
                 ind = "🔥" if pos.get("tp1_done") else pnl_emoji(pnl_pct)
                 tp1 = " · TP1" if pos.get("tp1_done") else ""
                 
-                public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
-                chart_url = f"{public_url}/chart?symbol={sym}"
-                
-                # НОВОЕ ИДЕАЛЬНОЕ ФОРМАТИРОВАНИЕ
-                msg.append(
-                    f"{mode_emoji} {kind} <a href='{chart_url}'><b>{sym[:-4]}</b></a>{' ' + tier_em if tier_em else ''} · "
-                    f"<i>{sector}</i> · {ind} {fmt_pct(pnl_pct)}{tp1}"
-                )
+                # ИСПОЛЬЗУЕМ НОВЫЙ ФОРМАТИРОВЩИК
+                msg.append(f"{format_coin(sym, pos)} · {ind} {fmt_pct(pnl_pct)}{tp1}")
                 msg.append(f"   💼 {usd(val)} · {w:.1f}%")
                 msg.append(f"   📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)}")
                 tp_pct = (pos["tp"] - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
@@ -765,11 +710,6 @@ async def cmd_status(update, context):
                 val = o["qty"] * o["price"]
                 w = val / eq * 100 if eq else 0
                 
-                kind = "🛰" if o.get("kind") == "satellite" else "🏛"
-                mode_emoji = "🚀" if o.get("is_momentum") else "🏹"
-                sector = o.get("sector") or sector_of(o["symbol"][:-4])
-                tier_em = TIER_EMOJI.get(o.get("tier") or "", "")
-                
                 last_price = prices.get(o["symbol"], {}).get("last", 0)
                 if last_price > 0:
                     dist_pct = (o["price"] - last_price) / last_price * 100
@@ -777,14 +717,8 @@ async def cmd_status(update, context):
                 else:
                     dist_str = ""
                 
-                public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
-                chart_url = f"{public_url}/chart?symbol={o['symbol']}"
-                
-                # НОВОЕ ИДЕАЛЬНОЕ ФОРМАТИРОВАНИЕ
-                msg.append(
-                    f"{mode_emoji} {kind} <a href='{chart_url}'><b>{o['symbol'][:-4]}</b></a>{' ' + tier_em if tier_em else ''} · "
-                    f"<i>{sector}</i> · {w:.1f}%"
-                )
+                # ИСПОЛЬЗУЕМ НОВЫЙ ФОРМАТИРОВЩИК
+                msg.append(f"{format_coin(o['symbol'], o)} · {w:.1f}%")
                 msg.append(f"   💼 {usd(val)} · 📥 {fmt_price(o['price'])}{dist_str}")
                 tp_pct = (o["tp"] - o["price"]) / o["price"] * 100 if o["price"] else 0
                 sl_pct = (o["sl"] - o["price"]) / o["price"] * 100 if o["price"] else 0
@@ -816,7 +750,6 @@ async def cmd_status(update, context):
         dd = metrics_24h["max_drawdown_pct"]
         dd_mark = "✅" if dd < 5 else ("⚠️" if dd < 15 else "🔴")
         
-        # Скрываем часть с (цель >= 1.3), если сделок еще не было
         if pf is None:
             msg.append(f"📈 PF: <b>—</b> · 📉 DD: <b>{dd:.1f}%</b> {dd_mark} (лимит 15%)")
         else:
@@ -840,7 +773,6 @@ async def cmd_status(update, context):
             rf_txt = f"{rf:.1f}"
             rf_mark = "🎯" if rf >= 2 else ("⚠️" if rf >= 1 else "❌")
 
-        # Если сделок еще не было, выводим красивую компактную строку без целей
         if exp is None:
             msg.append(f"💹 <b>—</b> · 🔄 RF: <b>—</b>")
         else:
@@ -878,7 +810,7 @@ async def cmd_status(update, context):
     except Exception as e:
         logger.exception("Ошибка в /status")
         await reply(update, f"⚠️ Ошибка: {e}")
-        
+
 def main():
     os.makedirs("logs", exist_ok=True)
     logger.add("logs/bot.log", rotation="5 MB", retention="7 days", enqueue=True, level="INFO")
@@ -909,7 +841,6 @@ def main():
 
     logger.info("Бот собран, запускаем webhook-сервер...")
     asyncio.run(run_all(app))
-
 
 if __name__ == '__main__':
     main()
