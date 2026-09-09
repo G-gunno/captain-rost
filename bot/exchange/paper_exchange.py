@@ -26,6 +26,7 @@ class PaperExchange:
         self.trades = []
         self.realized = []
         self.market_history = []
+        self.chart_events = []  # <--- НОВОЕ ХРАНИЛИЩЕ ГРАФИКОВ
         self._last_upload = 0.0
         self._load()
         self._migrate_sectors()
@@ -47,35 +48,10 @@ class PaperExchange:
             self.trades = data.get("trades", [])
             self.realized = data.get("realized", [])
             self.market_history = data.get("market_history", [])
-            # --- НОВОЕ: Загружаем события для графиков ---
-            self.chart_events = data.get("chart_events", [])
+            self.chart_events = data.get("chart_events", [])  # <--- ЗАГРУЖАЕМ ГРАФИКИ
             logger.info(f"Paper state загружен: USDT={self.usdt:.2f}, позиций={len(self.positions)}")
         else:
-            self.chart_events = [] # Инициализация пустого списка, если файла нет
-
-    def _migrate_sectors(self):
-        try:
-            from bot.news.cmc import sector_of
-        except ImportError:
-            return
-        migrated = 0
-        for sym, pos in self.positions.items():
-            base = sym[:-4] if sym.endswith("USDT") else sym
-            new_sector = sector_of(base)
-            if new_sector and new_sector != pos.get("sector"):
-                pos["sector"] = new_sector
-                migrated += 1
-        for order in self.orders:
-            base = order["symbol"][:-4] if order["symbol"].endswith("USDT") else order["symbol"]
-            new_sector = sector_of(base)
-            if new_sector and new_sector != order.get("sector"):
-                order["sector"] = new_sector
-                migrated += 1
-        if migrated:
-            logger.info(f"Миграция секторов: переопределено {migrated} позиций/ордеров")
-            self.save()
-        else:
-            logger.info("Миграция секторов: все секторы актуальны")
+            self.chart_events = []
 
     def save(self):
         payload = {
@@ -86,8 +62,7 @@ class PaperExchange:
             "trades": self.trades,
             "realized": self.realized,
             "market_history": self.market_history,
-            # --- НОВОЕ: Сохраняем последние 3000 событий, чтобы файл не раздувался ---
-            "chart_events": self.chart_events[-3000:] if hasattr(self, 'chart_events') else []
+            "chart_events": self.chart_events[-3000:] if hasattr(self, 'chart_events') else [] # Храним последние 3000 событий
         }
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -97,15 +72,15 @@ class PaperExchange:
         if time.time() - self._last_upload > 60:
             self._last_upload = time.time()
             upload_state(REMOTE_PATH, payload)
-
-    # --- НОВЫЙ МЕТОД ЗАПИСИ СОБЫТИЙ ---
+            
+    # --- НОВАЯ ФУНКЦИЯ ЗАПИСИ СОБЫТИЙ ДЛЯ ГРАФИКОВ ---
     def log_event(self, symbol, ev_type, price, text="", rsi_val=None, mode=None):
         if not hasattr(self, 'chart_events'):
             self.chart_events = []
         self.chart_events.append({
             "ts": int(time.time()),
             "sym": symbol,
-            "type": ev_type,  # buy, sell, order_placed, order_moved, cancel, skip, tp_sl_up
+            "type": ev_type,  
             "price": price,
             "text": text,
             "rsi": round(rsi_val, 1) if rsi_val else None,
@@ -291,7 +266,6 @@ class PaperExchange:
         self.usdt += proceeds - fee_sell
         transferred = 0.0
 
-        # Отчисляем 30% в копилку ТОЛЬКО если ОБЩИЙ итог сделки (TP1 + Финал) > 0
         if total_pnl > 0:
             transferred = round(total_pnl * 0.30, 4)
             self.usdt -= transferred
@@ -327,14 +301,14 @@ class PaperExchange:
         return results
 
     def reset_stats(self):
-        # Жесткий сброс баланса и очистка "застрявших" ордеров/позиций
         self.realized.clear()
         self.trades.clear()
         self.market_history.clear()
         self.positions.clear()
         self.orders.clear()
-        self.usdt = self.start_usdt  # Возвращаем ровно к $1000.0
-        self.funding = 0.0           # Обнуляем копилку
+        self.chart_events.clear()  # Очищаем графики тоже
+        self.usdt = self.start_usdt 
+        self.funding = 0.0           
         self.save()
         logger.info("paper: торговая статистика, позиции и балансы сброшены")
 
@@ -350,7 +324,6 @@ class PaperExchange:
 
         finals = [r for r in self.realized if not r.get("partial")]
 
-        # Если передан параметр hours, отсекаем старые сделки (скользящее окно)
         if hours is not None:
             cutoff = int(time.time()) - int(hours * 3600)
             finals = [r for r in finals if r.get("time", 0) >= cutoff]
@@ -411,6 +384,5 @@ class PaperExchange:
             "expectancy": expectancy,
             "recovery_factor": recovery_factor,
         }
-
 
 paper = PaperExchange()
