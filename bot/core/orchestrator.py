@@ -828,5 +828,3 @@ async def run_cycle():
                 logger.error(f"digest notify error: {e}")
 
     logger.info("=== CYCLE END ===")
-
---- КОНЕЦ ФАЙЛА: ./bot/core/orchestrator.py ---
