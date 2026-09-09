@@ -408,9 +408,11 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             FILTERED_BY_NEWS.append({"symbol": sym, "neg_count": f"{neg}/{mentions}", "time": int(time.time())})
             FILTERED_BY_NEWS[:] = FILTERED_BY_NEWS[-10:]
             continue
-        if pos > neg:
+            
+        # --- ИСПРАВЛЕНИЕ: меняем pos на pos_news ---
+        if pos_news > neg:
             score += learner.weight("news_pos")
-            reasons.append(f"позитивный новостной фон ({pos})")
+            reasons.append(f"позитивный новостной фон ({pos_news})")
             keys.append("news_pos")
         elif mentions >= 2:
             score += learner.weight("hype")
