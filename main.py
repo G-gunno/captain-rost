@@ -821,10 +821,15 @@ async def cmd_status(update, context):
 
         regime, _ = await get_regime()
         regime_emoji = {"bull": "🟢", "neutral": "🟡", "bear": "🔴"}.get(regime, "⚪")
-        regime_text = {"bull": "бычий", "neutral": "нейтральный", "bear": "медвежий"}.get(regime, regime)
+        regime_text = {"bull": "BULL", "neutral": "NEUTRAL", "bear": "BEAR"}.get(regime, regime)
+
+        # --- НОВОЕ: Вытаскиваем и показываем Индекс страха и жадности ---
+        from bot.strategy.fundamental import get_fear_and_greed
+        fng = get_fear_and_greed()
+        fng_emoji = "🤑" if fng >= 60 else ("😱" if fng <= 40 else "😴")
 
         btc = prices.get("BTCUSDT", {}).get("last", 0)
-        msg.append(f"₿ <b>${fmt_price(btc)}</b> · {regime_emoji} {regime_text} · 🎯 порог {threshold(regime):g}")
+        msg.append(f"₿ <b>${fmt_price(btc)}</b> · {regime_emoji} {regime_text} · 🧭 F&G: {fng} {fng_emoji} · 🎯 порог {threshold(regime):g}")
         if SCAN_SUMMARY.get("text"):
             msg.append(f"🔎 {SCAN_SUMMARY['text']}")
         wr, n = learner.winrate()
