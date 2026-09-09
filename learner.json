@@ -1,1 +1,1 @@
-{"weights": {"ema50": 0.307, "ema21": 1.021, "impulse": 1.258, "rsi": 0.307, "volume": 1.691, "chg24h": 0.671, "news_pos": 1.7, "hype": 1.697, "indep": 0.3}, "results": [], "threshold_adj": 0.0, "sector_stats": {}, "tier_stats": {}, "exit_stats": {}, "kind_stats": {}, "entry_stats": {}}
+{"weights": {"ema50": 1.0, "ema21": 1.0, "impulse": 1.0, "rsi": 1.0, "volume": 1.0, "chg24h": 1.0, "news_pos": 1.0, "hype": 1.0, "indep": 1.0}, "results": [], "threshold_adj": 0.0, "sector_stats": {}, "tier_stats": {}, "exit_stats": {}, "kind_stats": {}, "entry_stats": {}}
