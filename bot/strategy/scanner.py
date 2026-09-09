@@ -11,7 +11,6 @@ from bot.strategy.shadow import shadow
 from bot.news.cmc import (get_coin_name, get_sectors_for_pool,
                           get_ranks_for_pool, tier_of, TIER_EMOJI, fetch_missing_names)
 from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sentiment
-# --- НОВЫЙ ИМПОРТ ---
 from bot.strategy.fundamental import get_macro_trend, is_sector_hot, get_fear_and_greed, check_coinglass_liquidation_threat
 
 SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
@@ -40,18 +39,15 @@ def is_tradable(symbol):
 
 
 def raw_max_score(regime):
-    """Теоретический максимум «сырого» скора при ТЕКУЩИХ весах (без режимного бонуса)."""
-    m = sum(learner.weight(k) for k in
-            ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
+    m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
     m += learner.weight("indep")
     m += max(learner.weight("news_pos"), learner.weight("hype"))
-    m += 1.0   # потолок секторного бонуса
-    m += 0.5   # потолок тир-бонуса
+    m += 1.0   
+    m += 0.5   
     return m
 
 
 def threshold(regime):
-    """Порог на независимой 10-балльной шкале; строгость рынка — только здесь."""
     base = {"bull": 5.0, "neutral": 6.0, "bear": 7.0}.get(regime, 6.0)
     thr = base + learner.threshold_adj + shadow.threshold_nudge()
     return round(max(min(thr, SCORE_MAX - 0.5), SCORE_MAX * 0.5), 2)
@@ -76,7 +72,6 @@ def _corr(a, b):
 
 
 async def get_regime():
-    # 1. Получаем макро-тренд по BTC (СГЛАЖИВАЕМ через EMA21 вместо текущей цены)
     candles = await market_data.get_kline("BTCUSDT", "60", 250)
     if len(candles) < 60:
         return "neutral", {}
@@ -84,7 +79,6 @@ async def get_regime():
     e21, e50, e200 = ema(closes, 21)[-1], ema(closes, 50)[-1], ema(closes, 200)[-1]
     last = closes[-1]
     
-    # Режим считается по пересечению средних (EMA21 и EMA50), а не по дерганой текущей цене!
     if e21 > e50 > e200:
         regime = "bull"
     elif e21 < e50 < e200:
@@ -92,13 +86,11 @@ async def get_regime():
     else:
         regime = "neutral"
 
-    # 2. Оцениваем "температуру альтов" (Market Breadth), если биток спит
     if regime == "neutral":
         tickers = await market_data.get_tickers()
         if tickers:
             tradable = [s for s, t in tickers.items() if is_tradable(s) and t["quote_volume"] >= 500_000]
             if tradable:
-                # Считаем процент альтов, которые выросли более чем на 3% за 24 часа
                 green_alts = sum(1 for s in tradable if tickers[s]["change_pct"] > 3.0)
                 breadth_pct = (green_alts / len(tradable)) * 100
                 
@@ -106,7 +98,6 @@ async def get_regime():
                     regime = "bull"
                     logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые. Режим принудительно переведен в 'bull' (Альтсезон).")
 
-    # 3. Ончейн Макро-тренд (DefiLlama) и Fear & Greed
     stable_trend = get_macro_trend()
     fng = get_fear_and_greed()
     
@@ -117,11 +108,10 @@ async def get_regime():
         regime = "neutral" 
         logger.info("Macro: Отток стейблкоинов! Бычий режим охлажден до 'neutral'.")
 
-    # Влияние Индекса Страха и Жадности (сглаживатель)
     if fng < 40 and regime == "bull":
-        regime = "neutral"  # Сильный страх отменяет бычий режим
+        regime = "neutral" 
     elif fng > 75 and regime == "bear":
-        regime = "neutral"  # Сильная эйфория отменяет медвежий
+        regime = "neutral" 
 
     return regime, {"btc": last, "ema50": e50, "ema200": e200}
 
@@ -178,6 +168,8 @@ async def fetch_new_listings():
             continue
         out.append((sym, (now_ms - launch) / 3600000))
     return out
+
+
 def score_symbol(candles, t, regime):
     closes = [c["close"] for c in candles]
     last = closes[-1]
@@ -196,14 +188,14 @@ def score_symbol(candles, t, regime):
     if 40 <= r <= w["rsi_hi"]: 
         score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
     elif r > w["rsi_hi"]: 
-        score -= 1.5; reasons.append(f"перегрев RSI {r:.0f}") # Штраф за покупку на хаях
+        score -= 1.5; reasons.append(f"перегрев RSI {r:.0f}") 
 
     if vol_ratio > w["vol_lo"]: score += learner.weight("volume"); reasons.append(f"объём x{vol_ratio:.1f}"); keys.append("volume")
     
     if 0 < t["change_pct"] < w["chg_hi"]: 
         score += learner.weight("chg24h"); reasons.append(f"24ч +{t['change_pct']:.1f}%"); keys.append("chg24h")
     elif t["change_pct"] >= w["chg_hi"]: 
-        score -= 1.0; reasons.append(f"памп +{t['change_pct']:.1f}% (уже поздно)") # Штраф за улетевший поезд
+        score -= 1.0; reasons.append(f"памп +{t['change_pct']:.1f}% (уже поздно)") 
     if t["quote_volume"] < 500_000: score -= 1
 
     signal_values = {"rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio}
@@ -211,7 +203,6 @@ def score_symbol(candles, t, regime):
 
 
 def normalize(raw, regime):
-    """Сырой скор → 10-балльная шкала (как в scan)."""
     rm = raw_max_score(regime)
     if rm <= 0:
         return 0.0
@@ -219,8 +210,6 @@ def normalize(raw, regime):
 
 
 async def live_score(sym, t, regime, news_items=None, deriv_t=None):
-    """Оценка ТОЙ ЖЕ линейкой, что и scan: свечи 120, indep, сектор/тир,
-    новости/хайп, нормализация."""
     candles = await market_data.get_kline(sym, "15", 120)
     if len(candles) < 60:
         return None, candles
@@ -246,15 +235,14 @@ async def live_score(sym, t, regime, news_items=None, deriv_t=None):
 
     if news_items is not None:
         name = await get_coin_name(base)
-        neg, pos, mentions, _ = check_sentiment(news_items, [base, name])
-        if pos > neg:
+        neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
+        if pos_news > neg:
             raw += learner.weight("news_pos")
         elif mentions >= 2:
             raw += learner.weight("hype")
 
     score10 = normalize(raw, regime)
     
-    # Применяем бонус к живому скору (только для ракет)
     _, _, keys_live, sv_live = score_symbol(candles, t, regime)
     is_mom_live = ("impulse" in keys_live and sv_live.get("rsi", 0) >= 60 and (sv_live.get("volume", 0) >= 1.5 or sv_live.get("chg24h", 0) >= 6.0))
     entry_mode_live = "rocket" if is_mom_live else "sniper"
@@ -263,19 +251,16 @@ async def live_score(sym, t, regime, news_items=None, deriv_t=None):
     if mode_score_bonus != 0.0:
         score10 += mode_score_bonus
         
-    # --- Влияние Фьючерсного рынка ---
     if deriv_t:
         funding = deriv_t.get("funding", 0)
-        # Если лонгисты жестко переплачивают, Ракета рискует нарваться на дамп
         if funding > 0.05 and entry_mode_live == "rocket":
             score10 -= 0.5
-        # Отрицательный фандинг — шортисты в ловушке, топливо для роста
         elif funding < -0.01:
             score10 += 0.5
-        # --- Защита от сквизов (Coinglass) ---
-        is_sqz = await check_coinglass_liquidation_threat(sym)
-        if is_sqz:
-            score10 -= 1.5  # Жестко штрафуем монету, если толпа набилась в лонги
+            
+    is_sqz = await check_coinglass_liquidation_threat(sym)
+    if is_sqz:
+        score10 -= 1.5 
             
     score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)    
     return score10, candles
@@ -328,8 +313,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             logger.info(f"NEW LISTING: {sym} ({age_h:.1f}h old)")
     by_listings = by_listings[:10]
 
-    pool = list(dict.fromkeys(by_vol + by_chg + by_momentum + by_volatility +
-                              [s for s, _ in by_listings]))
+    pool = list(dict.fromkeys(by_vol + by_chg + by_momentum + by_volatility + [s for s, _ in by_listings]))
     pool_bases = list({s[:-4] for s in pool})
 
     sectors_map = await get_sectors_for_pool(pool_bases)
@@ -368,12 +352,11 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
         sector = sectors_map.get(base, "Other")
         tier = tier_of(ranks_map.get(base))
 
-        # Индекс страха и жадности (F&G)
         fng = get_fear_and_greed()
-        if fng >= 80:  # Экстремальная жадность (покупать опасно, режем скор)
+        if fng >= 80:  
             score -= 0.5
             reasons.append(f"F&G перегрев ({fng}): -0.5")
-        elif fng <= 25: # Экстремальный страх (толпа паникует, закупаем)
+        elif fng <= 25: 
             score += 0.5
             reasons.append(f"F&G страх ({fng}): +0.5")
             continue
@@ -383,7 +366,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             score += sb
             reasons.append(f"сектор {sector}: {sb:+.2f}")
             
-        # Бонус за приток ликвидности (DefiLlama)
         if is_sector_hot(sector):
             score += 0.5
             reasons.append(f"TVL приток (DefiLlama): +0.5")
@@ -396,20 +378,15 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
         name = await get_coin_name(base)
         neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
 
-        # --- ИСПРАВЛЕНИЕ: Блокируем только если негатива >= 2 (исключаем случайные слова) ---
         is_toxic = neg >= 2 and neg >= (pos_news * 2) and neg >= (mentions * 0.33)
 
         if is_toxic:
             logger.info(f"{sym}: пропущен из-за негативного новостного фона ({neg} нег. из {mentions} упом.)")
-            
-            # Очищаем старые дубликаты этой же монеты перед добавлением
             FILTERED_BY_NEWS[:] = [item for item in FILTERED_BY_NEWS if item["symbol"] != sym]
-            
             FILTERED_BY_NEWS.append({"symbol": sym, "neg_count": f"{neg}/{mentions}", "time": int(time.time())})
             FILTERED_BY_NEWS[:] = FILTERED_BY_NEWS[-10:]
             continue
             
-        # --- ИСПРАВЛЕНИЕ: меняем pos на pos_news ---
         if pos_news > neg:
             score += learner.weight("news_pos")
             reasons.append(f"позитивный новостной фон ({pos_news})")
@@ -430,7 +407,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             score10 += mode_score_bonus
             reasons.append(f"стат. входов (🚀): {mode_score_bonus:+.1f}")
 
-        # --- Влияние Фьючерсного рынка ---
         deriv_t = deriv_tickers.get(sym)
         if deriv_t:
             funding = deriv_t.get("funding", 0)
@@ -441,7 +417,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 score10 += 0.5
                 reasons.append(f"шорт-сквиз потенциал Фьюч ({+0.5})")
 
-        # Защита от сквизов (Coinglass)
         is_sqz = await check_coinglass_liquidation_threat(sym)
         if is_sqz:
             score10 -= 1.5
