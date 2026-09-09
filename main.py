@@ -695,7 +695,6 @@ async def cmd_autotune(update, context):
     await reply(update, shadow.stats_text() +
                 "\n💡 переключение: /autotune · или /autotune off · /autotune on")
 
-
 @restricted
 async def cmd_status(update, context):
     try:
@@ -726,7 +725,9 @@ async def cmd_status(update, context):
                 val = pos["qty"] * last
                 w = val / eq * 100 if eq else 0
                 pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
+                
                 kind = "🛰" if pos.get("kind") == "satellite" else "🏛"
+                mode_emoji = "🚀" if pos.get("is_momentum") else "🏹"
                 sector = pos.get("sector") or sector_of(sym[:-4])
                 tier_em = TIER_EMOJI.get(pos.get("tier") or "", "")
                 ind = "🔥" if pos.get("tp1_done") else pnl_emoji(pnl_pct)
@@ -735,8 +736,9 @@ async def cmd_status(update, context):
                 public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
                 chart_url = f"{public_url}/chart?symbol={sym}"
                 
+                # НОВОЕ ИДЕАЛЬНОЕ ФОРМАТИРОВАНИЕ
                 msg.append(
-                    f"{kind} <a href='{chart_url}'><b>{sym[:-4]}</b></a>{' ' + tier_em if tier_em else ''} · "
+                    f"{mode_emoji} {kind} <a href='{chart_url}'><b>{sym[:-4]}</b></a>{' ' + tier_em if tier_em else ''} · "
                     f"<i>{sector}</i> · {ind} {fmt_pct(pnl_pct)}{tp1}"
                 )
                 msg.append(f"   💼 {usd(val)} · {w:.1f}%")
@@ -762,10 +764,11 @@ async def cmd_status(update, context):
             for o in paper.orders:
                 val = o["qty"] * o["price"]
                 w = val / eq * 100 if eq else 0
+                
                 kind = "🛰" if o.get("kind") == "satellite" else "🏛"
+                mode_emoji = "🚀" if o.get("is_momentum") else "🏹"
                 sector = o.get("sector") or sector_of(o["symbol"][:-4])
                 tier_em = TIER_EMOJI.get(o.get("tier") or "", "")
-                mode_emoji = "🚀" if o.get("is_momentum") else "🏹"
                 
                 last_price = prices.get(o["symbol"], {}).get("last", 0)
                 if last_price > 0:
@@ -777,8 +780,9 @@ async def cmd_status(update, context):
                 public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
                 chart_url = f"{public_url}/chart?symbol={o['symbol']}"
                 
+                # НОВОЕ ИДЕАЛЬНОЕ ФОРМАТИРОВАНИЕ
                 msg.append(
-                    f"{kind} {mode_emoji} <a href='{chart_url}'><b>{o['symbol'][:-4]}</b></a>{' ' + tier_em if tier_em else ''} · "
+                    f"{mode_emoji} {kind} <a href='{chart_url}'><b>{o['symbol'][:-4]}</b></a>{' ' + tier_em if tier_em else ''} · "
                     f"<i>{sector}</i> · {w:.1f}%"
                 )
                 msg.append(f"   💼 {usd(val)} · 📥 {fmt_price(o['price'])}{dist_str}")
@@ -857,7 +861,6 @@ async def cmd_status(update, context):
         regime_emoji = {"bull": "🟢", "neutral": "🟡", "bear": "🔴"}.get(regime, "⚪")
         regime_text = {"bull": "BULL", "neutral": "NEUTRAL", "bear": "BEAR"}.get(regime, regime)
 
-        # --- НОВОЕ: Вытаскиваем и показываем Индекс страха и жадности ---
         from bot.strategy.fundamental import get_fear_and_greed
         fng = get_fear_and_greed()
         fng_emoji = "🤑" if fng >= 60 else ("😱" if fng <= 40 else "😴")
@@ -875,7 +878,7 @@ async def cmd_status(update, context):
     except Exception as e:
         logger.exception("Ошибка в /status")
         await reply(update, f"⚠️ Ошибка: {e}")
-
+        
 def main():
     os.makedirs("logs", exist_ok=True)
     logger.add("logs/bot.log", rotation="5 MB", retention="7 days", enqueue=True, level="INFO")
