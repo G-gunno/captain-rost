@@ -67,21 +67,27 @@ def entry_offset(score, thr, regime, atr_pct, is_momentum=False):
     hunt = shadow.hunt() 
     
     if is_momentum:
+        # Ракета бьет почти по рынку (покупает пробой)
         return max(shadow.capture(), atr_pct / 100 * 0.1)
+    
+    # --- ИСПРАВЛЕНИЕ: Жесткая привязка отката к волатильности (ATR) ---
+    # Снайпер ВСЕГДА ждет откат. Минимальный откат = 50% от текущего ATR свечи.
+    # Если свеча гигантская, бот будет ждать глубокой коррекции, а не покупать на хаях.
+    base_pullback = -atr_pct / 100 * 0.5 
     
     surplus = score - thr
     if regime == "bear":
-        return hunt * 1.5  
+        return min(hunt * 1.5, base_pullback * 1.5)  
     elif regime == "neutral":
-        return hunt * 1.2  
+        return min(hunt * 1.2, base_pullback * 1.2)  
         
-    # Бычий рынок (Снайпер)
+    # Бычий рынок
     if surplus >= 3.0:
-        return max(shadow.near(), -atr_pct / 100 * 0.1)  # Сильный сигнал - берем почти по рынку
+        return min(shadow.near(), base_pullback * 0.5)  # Супер-сильный сигнал: откат обязателен, но поменьше
     if surplus >= 1.5:
-        return min(hunt * 0.5, -atr_pct / 100 * 0.3)  # Средний сигнал - берем половину отката
+        return min(hunt * 0.5, base_pullback * 0.8)
         
-    return hunt  # Слабый сигнал — берем стандартный откат (без умножения на 1.5)
+    return min(hunt, base_pullback)
 
 
 def set_notifier(cb):
