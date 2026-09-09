@@ -9,8 +9,8 @@ from bot.core.remote_state import download_state, upload_state
 STATE_FILE = Path("storage/learner.json")
 REMOTE_PATH = "learner.json"
 
-# --- ИСПРАВЛЕНИЕ: ДОБАВЛЕН КЛЮЧ mtf_dip ---
-KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "news_pos", "hype", "indep", "mtf_dip"]
+# --- ИСПРАВЛЕНИЕ: ДОБАВЛЕН КЛЮЧ reversal ---
+KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "news_pos", "hype", "indep", "mtf_dip", "reversal"]
 
 SAT_LIMIT_BASE = 20.0
 SAT_LIMIT_MAX = 30.0
