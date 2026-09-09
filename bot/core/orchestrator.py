@@ -456,14 +456,6 @@ async def run_cycle():
                 
             ex = paper._sell(sym, last, reason, regime_now=regime)
             
-            # --- НОВОЕ: Если сигнал сломался, но мы закрыли в плюс ---
-            if ex["pnl"] > 0:
-                shadow.mark_success(sym)
-                
-            await notify(
-                f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · {reason.lower()}\n"
-            )
-                
             # Если инвалидация произошла в профит - это тоже успех
             if ex["pnl"] > 0:
                 shadow.mark_success(sym)
