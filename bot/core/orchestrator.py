@@ -348,7 +348,7 @@ async def run_cycle():
             await notify("🚨 <b>Риск-менеджмент</b>: резкий дамп рынка — всё в $.", urgent=True)
         return
 
-# 4. УПРАВЛЕНИЕ ПОЗИЦИЯМИ
+    # 4. УПРАВЛЕНИЕ ПОЗИЦИЯМИ
     current_time = int(time.time())
     for sym, pos in list(paper.positions.items()):
         t = tickers.get(sym)
@@ -365,6 +365,11 @@ async def run_cycle():
         pos["max_price"] = max(pos.get("max_price", 0.0), last)
         pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
         e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
+        
+        # Вычисляем текущий RSI для экстренных выходов
+        from bot.strategy.indicators import rsi
+        rsi_val = rsi(closes)
+        
         thr = threshold(regime)
         trend_broken = last < e50 and e21 < e50
 
@@ -393,6 +398,18 @@ async def run_cycle():
                 )
                 continue
 
+        # --- НОВОЕ: ВЫХОД НА ПИКАХ ПАМПА (Твои зеленые круги) ---
+        if rsi_val >= 85 and pnl_pct > 1.5:
+            ex = paper._sell(sym, last, "ПАМП (RSI>85) 🚀", regime_now=regime)
+            paper.log_event(sym, "sell", last, "Фиксация на пике 🚀", rsi_val=rsi_val)
+            shadow.mark_success(sym)
+            await notify(
+                f"🚀 <b>СУПЕР-ПАМП</b> · {pair_html(sym[:-4], ex)}\n"
+                f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
+                f"{funding_line(ex.get('transferred', 0))}", urgent=True
+            )
+            continue
+        
         # 4а. ЧАСТИЧНЫЙ TP
         if not pos.get("tp1_done") and last >= pos["tp"]:
             half = pos["qty"] / 2
