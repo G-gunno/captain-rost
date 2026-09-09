@@ -1,1 +1,1 @@
-{"usdt": 1000.0, "funding": 0.0, "positions": {}, "orders": [], "trades": [], "realized": [], "market_history": [{"ts": 1788926354, "regime": "bear", "mode": "STRICT"}, {"ts": 1788926462, "regime": "bear", "mode": "NORMAL"}]}
+{"usdt": 1000.0, "funding": 0.0, "positions": {}, "orders": [], "trades": [], "realized": [], "market_history": [{"ts": 1788926354, "regime": "bear", "mode": "STRICT"}, {"ts": 1788926462, "regime": "bear", "mode": "NORMAL"}, {"ts": 1788926567, "regime": "bear", "mode": "NORMAL"}]}
