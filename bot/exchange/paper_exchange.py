@@ -26,7 +26,7 @@ class PaperExchange:
         self.trades = []
         self.realized = []
         self.market_history = []
-        self.chart_events = []  # <--- НОВОЕ ХРАНИЛИЩЕ ГРАФИКОВ
+        self.chart_events = [] 
         self._last_upload = 0.0
         self._load()
         self._migrate_sectors()
@@ -48,10 +48,34 @@ class PaperExchange:
             self.trades = data.get("trades", [])
             self.realized = data.get("realized", [])
             self.market_history = data.get("market_history", [])
-            self.chart_events = data.get("chart_events", [])  # <--- ЗАГРУЖАЕМ ГРАФИКИ
+            self.chart_events = data.get("chart_events", [])  
             logger.info(f"Paper state загружен: USDT={self.usdt:.2f}, позиций={len(self.positions)}")
         else:
             self.chart_events = []
+
+    def _migrate_sectors(self):
+        try:
+            from bot.news.cmc import sector_of
+        except ImportError:
+            return
+        migrated = 0
+        for sym, pos in self.positions.items():
+            base = sym[:-4] if sym.endswith("USDT") else sym
+            new_sector = sector_of(base)
+            if new_sector and new_sector != pos.get("sector"):
+                pos["sector"] = new_sector
+                migrated += 1
+        for order in self.orders:
+            base = order["symbol"][:-4] if order["symbol"].endswith("USDT") else order["symbol"]
+            new_sector = sector_of(base)
+            if new_sector and new_sector != order.get("sector"):
+                order["sector"] = new_sector
+                migrated += 1
+        if migrated:
+            logger.info(f"Миграция секторов: переопределено {migrated} позиций/ордеров")
+            self.save()
+        else:
+            logger.info("Миграция секторов: все секторы актуальны")
 
     def save(self):
         payload = {
@@ -62,7 +86,7 @@ class PaperExchange:
             "trades": self.trades,
             "realized": self.realized,
             "market_history": self.market_history,
-            "chart_events": self.chart_events[-3000:] if hasattr(self, 'chart_events') else [] # Храним последние 3000 событий
+            "chart_events": self.chart_events[-3000:] if hasattr(self, 'chart_events') else []
         }
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -73,7 +97,6 @@ class PaperExchange:
             self._last_upload = time.time()
             upload_state(REMOTE_PATH, payload)
             
-    # --- НОВАЯ ФУНКЦИЯ ЗАПИСИ СОБЫТИЙ ДЛЯ ГРАФИКОВ ---
     def log_event(self, symbol, ev_type, price, text="", rsi_val=None, mode=None):
         if not hasattr(self, 'chart_events'):
             self.chart_events = []
@@ -306,7 +329,7 @@ class PaperExchange:
         self.market_history.clear()
         self.positions.clear()
         self.orders.clear()
-        self.chart_events.clear()  # Очищаем графики тоже
+        self.chart_events.clear()  
         self.usdt = self.start_usdt 
         self.funding = 0.0           
         self.save()
