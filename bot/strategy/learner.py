@@ -9,7 +9,8 @@ from bot.core.remote_state import download_state, upload_state
 STATE_FILE = Path("storage/learner.json")
 REMOTE_PATH = "learner.json"
 
-KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "news_pos", "hype", "indep"]
+# --- ИСПРАВЛЕНИЕ: ДОБАВЛЕН КЛЮЧ mtf_dip ---
+KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "news_pos", "hype", "indep", "mtf_dip"]
 
 SAT_LIMIT_BASE = 20.0
 SAT_LIMIT_MAX = 30.0
@@ -79,7 +80,6 @@ class Learner:
 
     def record(self, keys, win, pnl_pct=0.0, sector=None, tier=None,
                exit_type=None, runner_bonus=0.0, kind=None, soft=False, entry_mode=None):
-        """Одна запись на позицию. soft=True → половинный штраф при убытке."""
         self.results.append(1 if win else 0)
         self.results = self.results[-200:]
         if sector:
@@ -119,10 +119,7 @@ class Learner:
             if k in self.weights:
                 self.weights[k] = round(min(1.7, max(0.3, self.weights[k] + delta)), 3)
 
-        # ЭКВАЛАЙЗЕР: сумма весов постоянна (= числу сигналов), поэтому веса —
-        # это «относительная важность». Наказанный сигнал проседает, остальные
-        # пропорционально приподнимаются; «все в пол» самовосстанавливается.
-        target = float(len(self.weights))          # 9.0
+        target = float(len(self.weights))          
         cur = sum(self.weights.values())
         if cur > 0:
             k = target / cur
@@ -198,7 +195,6 @@ class Learner:
 
     def risk_mode(self, profit_factor, max_dd_pct, total_trades=0):
         adj = 0.0
-        # Для 24-часового окна достаточно 3 сделок, чтобы оценить опасность
         enough = total_trades >= 3  
         if enough and profit_factor is not None:
             if profit_factor < 0.5:
@@ -222,7 +218,6 @@ class Learner:
     def update_threshold(self, profit_factor, max_dd_pct, total_trades=0):
         _, dyn_adj = self.risk_mode(profit_factor, max_dd_pct, total_trades)
         wr_adj = 0.0
-        # Глобальный винрейт меняем, если за сутки было хотя бы 5 сделок
         if total_trades >= 5:  
             last = self.results[-20:]
             if last:
@@ -240,14 +235,12 @@ class Learner:
         return f"wr {wr:.0%} ({n}) · топ: {txt} · строгость {self.threshold_adj:+.1f}"
 
     def entry_mode_bias(self, mode):
-        """Возвращает (бонус_к_скору, множитель_сайза). Тюним ТОЛЬКО Ракеты! Снайпер всегда (0.0, 1.0)."""
         if mode != "rocket":
-            return 0.0, 1.0  # Снайпер — это база, его не трогаем
+            return 0.0, 1.0 
             
         rock_hist = self.entry_stats.get("rocket") or []
         snip_hist = self.entry_stats.get("sniper") or []
         
-        # Если мало статистики, торгуем базу
         if len(rock_hist) < 3 or len(snip_hist) < 3:
             return 0.0, 1.0
             
@@ -256,14 +249,13 @@ class Learner:
         diff = r_avg - s_avg
         
         if diff >= 0.5:
-            return 0.3, 1.3   # Пробои отлично работают -> даем ракетам буст
+            return 0.3, 1.3   
         elif diff <= -0.5:
-            return -0.3, 0.7  # Пробои ложные (пилилово) -> режем ракетам сайз и скор
+            return -0.3, 0.7  
         
         return 0.0, 1.0
 
     def kelly_multiplier(self, mode):
-        """Индивидуальный Half-Kelly для конкретной стратегии входа."""
         hist = self.entry_stats.get(mode) or []
         if len(hist) < 10:
             return None
