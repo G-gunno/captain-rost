@@ -341,4 +341,19 @@ class Shadow:
     def stats_text(self):
         return "\n".join(self.learn_lines())
 
+    # --- НОВЫЙ МЕТОД (добавь в самый низ класса Shadow, перед shadow = Shadow()) ---
+    def reset(self):
+        self.episodes = {}
+        self.agg = {}
+        self.cooldown = {}
+        self.tuning = {
+            "auto": True,
+            "thr_nudge": 0.0,
+            "hunt": -0.004, "near": -0.0015, "capture": +0.002,
+            "sl_mult": 1.0, "tp_mult": 1.0,
+            "signal_windows": {"rsi_hi": 90, "chg_hi": 30, "vol_lo": 1.3},
+        }
+        self.save()
+        logger.info("shadow: журнал автотюна полностью сброшен")
+
 shadow = Shadow()
