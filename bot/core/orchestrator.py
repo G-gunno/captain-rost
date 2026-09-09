@@ -174,7 +174,7 @@ async def startup_reconciliation():
 
         if score < thr - 0.5:
             paper.cancel_order(order["id"])
-            actions.append(f"{pair_html(sym[:-4], order)} · снят 🪫 · ⭐ {score:.1f} (ослаб)")
+            actions.append(f"{pair_html(sym[:-4], order)} · снят 🪫 · ⭐ {score:.1f}")
             continue
 
         if a > 0:
