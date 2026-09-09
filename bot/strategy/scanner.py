@@ -39,7 +39,7 @@ def is_tradable(symbol):
 
 
 def raw_max_score(regime):
-    m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "mtf_dip"))
+    m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "mtf_dip", "reversal"))
     m += learner.weight("indep")
     m += max(learner.weight("news_pos"), learner.weight("hype"))
     m += 1.0   
@@ -170,7 +170,6 @@ async def fetch_new_listings():
     return out
 
 
-# --- ИСПРАВЛЕНИЕ: МУЛЬТИ-ТАЙМФРЕЙМ АНАЛИЗ ---
 def score_symbol(candles_15m, candles_1h, t, regime):
     closes = [c["close"] for c in candles_15m]
     last = closes[-1]
@@ -196,10 +195,22 @@ def score_symbol(candles_15m, candles_1h, t, regime):
 
     if vol_ratio > w["vol_lo"]: score += learner.weight("volume"); reasons.append(f"объём x{vol_ratio:.1f}"); keys.append("volume")
     
-    if 0 < t["change_pct"] < w["chg_hi"]: 
-        score += learner.weight("chg24h"); reasons.append(f"24ч +{t['change_pct']:.1f}%"); keys.append("chg24h")
-    elif t["change_pct"] >= w["chg_hi"]: 
-        score -= 1.0; reasons.append(f"памп +{t['change_pct']:.1f}% (уже поздно)") 
+    # 🧲 ЛОВЕЦ ДНА (Reversal) - перекрывает штрафы за падающий тренд
+    if t["change_pct"] <= -7.0 and r <= 35 and vol_ratio >= 2.5:
+        score += learner.weight("reversal") * 2.0
+        reasons.append(f"ОТКУП ДНА (vol x{vol_ratio:.1f})")
+        keys.append("reversal")
+    elif t["change_pct"] <= -15.0 and vol_ratio >= 3.0:
+        score += learner.weight("reversal") * 2.0
+        reasons.append(f"ПАНИКА ВЫКУПЛЕНА (vol x{vol_ratio:.1f})")
+        keys.append("reversal")
+    else:
+        # Стандартная оценка тренда
+        if 0 < t["change_pct"] < w["chg_hi"]: 
+            score += learner.weight("chg24h"); reasons.append(f"24ч +{t['change_pct']:.1f}%"); keys.append("chg24h")
+        elif t["change_pct"] >= w["chg_hi"]: 
+            score -= 1.0; reasons.append(f"памп +{t['change_pct']:.1f}% (уже поздно)") 
+            
     if t["quote_volume"] < 500_000: score -= 1
 
     # === MTF АНАЛИЗ (Мульти-таймфрейм 1H + 15m) ===
@@ -207,20 +218,18 @@ def score_symbol(candles_15m, candles_1h, t, regime):
         closes_1h = [c["close"] for c in candles_1h]
         last_1h = closes_1h[-1]
         e50_1h = ema(closes_1h, 50)[-1]
-        # Используем EMA200 для глобального тренда, если свечей хватает
         e_trend_1h = ema(closes_1h, 200)[-1] if len(closes_1h) >= 200 else e50_1h
         r_1h = rsi(closes_1h)
         
         global_uptrend = last_1h > e_trend_1h
-        local_dip = r_1h < 45  # На старшем ТФ монета отдыхает (скидка)
-        micro_turn = e12 > e26 # На младшем ТФ начинается импульс (выкуп)
+        local_dip = r_1h < 45 
+        micro_turn = e12 > e26 
         
         if global_uptrend and local_dip and micro_turn:
-            score += learner.weight("mtf_dip") * 1.5 # Сильный бонус за поимку идеального отката
+            score += learner.weight("mtf_dip") * 1.5
             reasons.append("MTF: выкуп отката по тренду")
             keys.append("mtf_dip")
         elif not global_uptrend and r_1h > 65:
-            # Медвежья ловушка: глобально падаем, но локально перегреты
             score -= 1.0
             reasons.append("MTF: ловушка (даунтренд)")
 
@@ -273,8 +282,16 @@ async def live_score(sym, t, regime, news_items=None, deriv_t=None):
     score10 = normalize(raw, regime)
     
     _, _, keys_live, sv_live = score_symbol(candles_15m, candles_1h, t, regime)
-    is_mom_live = ("impulse" in keys_live and sv_live.get("rsi", 0) >= 60 and (sv_live.get("volume", 0) >= 1.5 or sv_live.get("chg24h", 0) >= 6.0))
-    entry_mode_live = "rocket" if is_mom_live else "sniper"
+    is_reversal = "reversal" in keys_live
+    is_momentum = ("impulse" in keys_live and sv_live.get("rsi", 0) >= 60 and (sv_live.get("volume", 0) >= 1.5 or sv_live.get("chg24h", 0) >= 6.0))
+    
+    if is_reversal:
+        entry_mode_live = "reversal"
+    elif is_momentum:
+        entry_mode_live = "rocket"
+    else:
+        entry_mode_live = "sniper"
+        
     mode_score_bonus, _ = learner.entry_mode_bias(entry_mode_live)
     
     if mode_score_bonus != 0.0:
@@ -323,6 +340,10 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 by_volatility.append((sym, atr_pct))
     by_volatility = [s for s, _ in sorted(by_volatility, key=lambda x: x[1], reverse=True)][:10]
 
+    # --- ИСПРАВЛЕНИЕ: ДОБАВЛЕН ПУЛ ПАДАЮЩИХ МОНЕТ (Для Dip Catcher) ---
+    by_dip = sorted([s for s in tradable if tickers[s]["change_pct"] <= -7.0],
+                    key=lambda s: tickers[s]["change_pct"])[:15]
+
     sources = await fetch_new_listings()
     try:
         rss = await fetch_listings_cache()
@@ -342,7 +363,8 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             logger.info(f"NEW LISTING: {sym} ({age_h:.1f}h old)")
     by_listings = by_listings[:10]
 
-    pool = list(dict.fromkeys(by_vol + by_chg + by_momentum + by_volatility + [s for s, _ in by_listings]))
+    # Подмешиваем падающие монеты в общий котел сканирования
+    pool = list(dict.fromkeys(by_vol + by_chg + by_momentum + by_volatility + by_dip + [s for s, _ in by_listings]))
     pool_bases = list({s[:-4] for s in pool})
 
     sectors_map = await get_sectors_for_pool(pool_bases)
@@ -357,7 +379,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
     scored = []
     for sym in pool:
-        # Загружаем ДВА таймфрейма для MTF анализа
         candles_15m = await market_data.get_kline(sym, "15", 120)
         candles_1h = await market_data.get_kline(sym, "60", 250)
         
@@ -432,9 +453,16 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
         score10 = (score / raw_max * SCORE_MAX) if raw_max > 0 else 0.0
 
+        is_reversal = "reversal" in keys
         is_momentum = ("impulse" in keys and signal_values.get("rsi", 0) >= 60 and (signal_values.get("volume", 0) >= 1.5 or signal_values.get("chg24h", 0) >= 6.0))
 
-        entry_mode = "rocket" if is_momentum else "sniper"
+        if is_reversal:
+            entry_mode = "reversal"
+        elif is_momentum:
+            entry_mode = "rocket"
+        else:
+            entry_mode = "sniper"
+            
         mode_score_bonus, mode_size_mult = learner.entry_mode_bias(entry_mode)
 
         if mode_score_bonus != 0.0:
@@ -444,7 +472,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
         deriv_t = deriv_tickers.get(sym)
         if deriv_t:
             funding = deriv_t.get("funding", 0)
-            if funding > 0.05 and is_momentum:
+            if funding > 0.05 and entry_mode == "rocket":
                 score10 -= 0.5
                 reasons.append(f"перегрев лонгов Фьюч ({-0.5})")
             elif funding < -0.01:
@@ -465,6 +493,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                        "kind": kind, "sector": sector, "tier": tier,
                        "signal_values": signal_values,
                        "is_momentum": is_momentum,
+                       "entry_mode": entry_mode,
                        "size_mult": mode_size_mult})
 
     scored.sort(key=lambda c: c["score"], reverse=True)
