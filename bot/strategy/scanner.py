@@ -76,16 +76,18 @@ def _corr(a, b):
 
 
 async def get_regime():
-    # 1. Получаем макро-тренд по BTC
+    # 1. Получаем макро-тренд по BTC (СГЛАЖИВАЕМ через EMA21 вместо текущей цены)
     candles = await market_data.get_kline("BTCUSDT", "60", 250)
     if len(candles) < 60:
         return "neutral", {}
     closes = [c["close"] for c in candles]
-    e50, e200, last = ema(closes, 50)[-1], ema(closes, 200)[-1], closes[-1]
+    e21, e50, e200 = ema(closes, 21)[-1], ema(closes, 50)[-1], ema(closes, 200)[-1]
+    last = closes[-1]
     
-    if last > e50 > e200:
+    # Режим считается по пересечению средних (EMA21 и EMA50), а не по дерганой текущей цене!
+    if e21 > e50 > e200:
         regime = "bull"
-    elif last < e50 < e200:
+    elif e21 < e50 < e200:
         regime = "bear"
     else:
         regime = "neutral"
@@ -100,21 +102,26 @@ async def get_regime():
                 green_alts = sum(1 for s in tradable if tickers[s]["change_pct"] > 3.0)
                 breadth_pct = (green_alts / len(tradable)) * 100
                 
-                # Изменяем порог альтсезона с 25.0 на 40.0
                 if breadth_pct >= 40.0:
                     regime = "bull"
                     logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые. Режим принудительно переведен в 'bull' (Альтсезон).")
-                else:
-                    logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые. Режим остается 'neutral'.")
 
-    # 3. Ончейн Макро-тренд (DefiLlama Stablecoin Flows)
+    # 3. Ончейн Макро-тренд (DefiLlama) и Fear & Greed
     stable_trend = get_macro_trend()
+    fng = get_fear_and_greed()
+    
     if stable_trend == "bull" and regime == "neutral":
         regime = "bull"
         logger.info("Macro: Приток стейблкоинов! Режим принудительно переведен в 'bull'.")
     elif stable_trend == "bear" and regime == "bull":
         regime = "neutral" 
         logger.info("Macro: Отток стейблкоинов! Бычий режим охлажден до 'neutral'.")
+
+    # Влияние Индекса Страха и Жадности (сглаживатель)
+    if fng < 40 and regime == "bull":
+        regime = "neutral"  # Сильный страх отменяет бычий режим
+    elif fng > 75 and regime == "bear":
+        regime = "neutral"  # Сильная эйфория отменяет медвежий
 
     return regime, {"btc": last, "ema50": e50, "ema200": e200}
 
