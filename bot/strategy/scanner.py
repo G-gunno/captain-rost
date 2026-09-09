@@ -39,7 +39,7 @@ def is_tradable(symbol):
 
 
 def raw_max_score(regime):
-    m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
+    m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "mtf_dip"))
     m += learner.weight("indep")
     m += max(learner.weight("news_pos"), learner.weight("hype"))
     m += 1.0   
@@ -170,21 +170,25 @@ async def fetch_new_listings():
     return out
 
 
-def score_symbol(candles, t, regime):
-    closes = [c["close"] for c in candles]
+# --- ИСПРАВЛЕНИЕ: МУЛЬТИ-ТАЙМФРЕЙМ АНАЛИЗ ---
+def score_symbol(candles_15m, candles_1h, t, regime):
+    closes = [c["close"] for c in candles_15m]
     last = closes[-1]
     e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
     e12, e26 = ema(closes, 12)[-1], ema(closes, 26)[-1]
     r = rsi(closes)
-    vols = [c["volume"] for c in candles]
+    
+    vols = [c["volume"] for c in candles_15m]
     base_vol = sum(vols[-21:-1]) / 20 if len(vols) > 21 else (sum(vols) / max(1, len(vols)))
     vol_ratio = vols[-1] / base_vol if base_vol else 1.0
 
     w = shadow.signal_windows()
     score, reasons, keys = 0.0, [], []
+    
     if last > e50: score += learner.weight("ema50"); reasons.append("цена выше EMA50"); keys.append("ema50")
     if e21 > e50: score += learner.weight("ema21"); reasons.append("EMA21>EMA50"); keys.append("ema21")
     if e12 > e26: score += learner.weight("impulse"); reasons.append("импульс роста"); keys.append("impulse")
+    
     if 40 <= r <= w["rsi_hi"]: 
         score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
     elif r > w["rsi_hi"]: 
@@ -198,6 +202,28 @@ def score_symbol(candles, t, regime):
         score -= 1.0; reasons.append(f"памп +{t['change_pct']:.1f}% (уже поздно)") 
     if t["quote_volume"] < 500_000: score -= 1
 
+    # === MTF АНАЛИЗ (Мульти-таймфрейм 1H + 15m) ===
+    if candles_1h and len(candles_1h) >= 50:
+        closes_1h = [c["close"] for c in candles_1h]
+        last_1h = closes_1h[-1]
+        e50_1h = ema(closes_1h, 50)[-1]
+        # Используем EMA200 для глобального тренда, если свечей хватает
+        e_trend_1h = ema(closes_1h, 200)[-1] if len(closes_1h) >= 200 else e50_1h
+        r_1h = rsi(closes_1h)
+        
+        global_uptrend = last_1h > e_trend_1h
+        local_dip = r_1h < 45  # На старшем ТФ монета отдыхает (скидка)
+        micro_turn = e12 > e26 # На младшем ТФ начинается импульс (выкуп)
+        
+        if global_uptrend and local_dip and micro_turn:
+            score += learner.weight("mtf_dip") * 1.5 # Сильный бонус за поимку идеального отката
+            reasons.append("MTF: выкуп отката по тренду")
+            keys.append("mtf_dip")
+        elif not global_uptrend and r_1h > 65:
+            # Медвежья ловушка: глобально падаем, но локально перегреты
+            score -= 1.0
+            reasons.append("MTF: ловушка (даунтренд)")
+
     signal_values = {"rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio}
     return score, reasons, keys, signal_values
 
@@ -210,14 +236,17 @@ def normalize(raw, regime):
 
 
 async def live_score(sym, t, regime, news_items=None, deriv_t=None):
-    candles = await market_data.get_kline(sym, "15", 120)
-    if len(candles) < 60:
-        return None, candles
-    raw, _, _, _ = score_symbol(candles, t, regime)
+    candles_15m = await market_data.get_kline(sym, "15", 120)
+    candles_1h = await market_data.get_kline(sym, "60", 250)
+    
+    if len(candles_15m) < 60 or len(candles_1h) < 60:
+        return None, candles_15m
+        
+    raw, _, _, _ = score_symbol(candles_15m, candles_1h, t, regime)
 
     btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
     btc_ret = _returns([c["close"] for c in btc_candles])
-    corr = _corr(_returns([c["close"] for c in candles]), btc_ret)
+    corr = _corr(_returns([c["close"] for c in candles_15m]), btc_ret)
     if corr > 0.85 and regime == "neutral":
         raw -= 1
     elif corr < 0.45:
@@ -243,7 +272,7 @@ async def live_score(sym, t, regime, news_items=None, deriv_t=None):
 
     score10 = normalize(raw, regime)
     
-    _, _, keys_live, sv_live = score_symbol(candles, t, regime)
+    _, _, keys_live, sv_live = score_symbol(candles_15m, candles_1h, t, regime)
     is_mom_live = ("impulse" in keys_live and sv_live.get("rsi", 0) >= 60 and (sv_live.get("volume", 0) >= 1.5 or sv_live.get("chg24h", 0) >= 6.0))
     entry_mode_live = "rocket" if is_mom_live else "sniper"
     mode_score_bonus, _ = learner.entry_mode_bias(entry_mode_live)
@@ -263,7 +292,7 @@ async def live_score(sym, t, regime, news_items=None, deriv_t=None):
         score10 -= 1.5 
             
     score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)    
-    return score10, candles
+    return score10, candles_15m
 
 
 async def scan(regime, tickers, deriv_tickers, limit=20):
@@ -328,17 +357,22 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
     scored = []
     for sym in pool:
-        candles = await market_data.get_kline(sym, "15", 120)
-        if len(candles) < 60:
+        # Загружаем ДВА таймфрейма для MTF анализа
+        candles_15m = await market_data.get_kline(sym, "15", 120)
+        candles_1h = await market_data.get_kline(sym, "60", 250)
+        
+        if len(candles_15m) < 60 or len(candles_1h) < 60:
             continue
-        a = atr(candles)
+            
+        a = atr(candles_15m)
         last_price = tickers[sym]["last"]
         atr_pct = (a / last_price) * 100 if last_price else 0
         if a <= 0 or atr_pct < 0.25:
             continue
-        score, reasons, keys, signal_values = score_symbol(candles, tickers[sym], regime)
+            
+        score, reasons, keys, signal_values = score_symbol(candles_15m, candles_1h, tickers[sym], regime)
 
-        corr = _corr(_returns([c["close"] for c in candles]), btc_ret)
+        corr = _corr(_returns([c["close"] for c in candles_15m]), btc_ret)
         if corr > 0.85 and regime == "neutral":
             score -= 1
             reasons.append(f"зеркало BTC (corr {corr:.2f})")
