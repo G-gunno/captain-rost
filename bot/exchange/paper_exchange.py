@@ -47,7 +47,11 @@ class PaperExchange:
             self.trades = data.get("trades", [])
             self.realized = data.get("realized", [])
             self.market_history = data.get("market_history", [])
+            # --- НОВОЕ: Загружаем события для графиков ---
+            self.chart_events = data.get("chart_events", [])
             logger.info(f"Paper state загружен: USDT={self.usdt:.2f}, позиций={len(self.positions)}")
+        else:
+            self.chart_events = [] # Инициализация пустого списка, если файла нет
 
     def _migrate_sectors(self):
         try:
@@ -82,6 +86,8 @@ class PaperExchange:
             "trades": self.trades,
             "realized": self.realized,
             "market_history": self.market_history,
+            # --- НОВОЕ: Сохраняем последние 3000 событий, чтобы файл не раздувался ---
+            "chart_events": self.chart_events[-3000:] if hasattr(self, 'chart_events') else []
         }
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -91,6 +97,20 @@ class PaperExchange:
         if time.time() - self._last_upload > 60:
             self._last_upload = time.time()
             upload_state(REMOTE_PATH, payload)
+
+    # --- НОВЫЙ МЕТОД ЗАПИСИ СОБЫТИЙ ---
+    def log_event(self, symbol, ev_type, price, text="", rsi_val=None, mode=None):
+        if not hasattr(self, 'chart_events'):
+            self.chart_events = []
+        self.chart_events.append({
+            "ts": int(time.time()),
+            "sym": symbol,
+            "type": ev_type,  # buy, sell, order_placed, order_moved, cancel, skip, tp_sl_up
+            "price": price,
+            "text": text,
+            "rsi": round(rsi_val, 1) if rsi_val else None,
+            "mode": mode
+        })
 
     def _resolve_sector(self, symbol, fallback_sector=None):
         if fallback_sector and fallback_sector != "Other":
