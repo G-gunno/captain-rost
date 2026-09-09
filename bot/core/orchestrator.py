@@ -376,7 +376,7 @@ async def run_cycle():
                 ex = paper._sell(sym, last, "НОВОСТИ 🛑", regime_now=regime)
                 paper.log_event(sym, "sell", last, f"НОВОСТИ 🛑 {neg}/{mentions}")
                 await notify(
-                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex)} · новостная резка 🛑 {neg}/{mentions}\n"
+                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex)} · 🗞🤬 {neg}/{mentions}\n"
                     f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}"
                     f"{funding_line(ex.get('transferred', 0))}"
                 )
@@ -537,21 +537,21 @@ async def run_cycle():
             paper.cancel_order(order["id"])
             _fomo_cooldowns[order["symbol"]] = current_time + 7200
             paper.log_event(order["symbol"], "cancel", t["last"], "Сигнал умер")
-            await notify(f"📉 <b>Ордер снят</b> · {pair_html(base, order)} · сигнал умер (пауза 2ч)")
+            await notify(f"📉 <b>Ордер снят</b> · {pair_html(base, order)} · ☠️ (⏸️-2ч)")
             continue
 
         if score_now < thr - 0.5:
             paper.cancel_order(order["id"])
             _fomo_cooldowns[order["symbol"]] = current_time + 1800  
             paper.log_event(order["symbol"], "cancel", t["last"], "Сигнал ослаб")
-            await notify(f"📉 <b>Ордер снят</b> · {pair_html(base, order)} · сигнал ослаб (пауза 30м)")
+            await notify(f"📉 <b>Ордер снят</b> · {pair_html(base, order)} · 🪫 (⏸️-30м)")
             continue
 
         if (current_time - order["created"]) > 7200:
             paper.cancel_order(order["id"])
             _fomo_cooldowns[order["symbol"]] = current_time + 1800
             paper.log_event(order["symbol"], "cancel", t["last"], "Тайм-аут 2ч")
-            await notify(f"⏳ <b>Ордер снят</b> · {pair_html(base, order)} · тайм-аут 2ч без исполнения")
+            await notify(f"⏳ <b>Ордер снят</b> · {pair_html(base, order)} · 🏖 2ч без исполнения")
             continue
 
         atr_pct = a / t["last"] * 100
