@@ -395,7 +395,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
         if is_toxic:
             logger.info(f"{sym}: пропущен из-за негативного новостного фона ({neg} нег. из {mentions} упом.)")
             
-            # --- ИСПРАВЛЕНИЕ: Удаляем дубликаты перед добавлением новой записи ---
+            # Очищаем старые дубликаты этой же монеты перед добавлением
             FILTERED_BY_NEWS[:] = [item for item in FILTERED_BY_NEWS if item["symbol"] != sym]
             
             FILTERED_BY_NEWS.append({"symbol": sym, "neg_count": f"{neg}/{mentions}", "time": int(time.time())})
