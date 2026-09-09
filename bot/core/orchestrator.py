@@ -823,3 +823,5 @@ async def run_cycle():
                 await _notify_cb(digest_text)
             except Exception as e:
                 logger.error(f"digest notify error: {e}")
+
+    logger.info("=== CYCLE END ===")
