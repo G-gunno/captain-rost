@@ -496,13 +496,11 @@ async def run_cycle():
 
     # 5. Выходы остатка по TP/SL
     for ex in paper.check_exits(tickers, regime_now=regime):
-        # --- НОВОЕ: Засчитываем памп, если трейлинг закрылся выше безубытка ---
-        if ex["pnl"] > 0:
-            shadow.mark_success(ex["symbol"])
-            
-        runner_txt = ""
-        if ex.get("runner_bonus", 0) > 5:
-            
+        
+        # --- ИСПРАВЛЕНИЕ: Защита от пулеметных перезаходов! ---
+        # Блокируем монету на 2 часа после ЛЮБОГО выхода по TP или SL
+        _fomo_cooldowns[ex["symbol"]] = current_time + 7200
+        
         # Сообщаем об успехе, если сделка закрылась в плюс
         if ex["pnl"] > 0:
             shadow.mark_success(ex["symbol"])
@@ -510,6 +508,7 @@ async def run_cycle():
         runner_txt = ""
         if ex.get("runner_bonus", 0) > 5:
             runner_txt = f"\n🏃 пробежка +{ex['runner_bonus']:.1f}% выше TP1"
+            
         ind = "🔥" if ex.get("exit_type") == "TP1_RUN" else pnl_emoji(ex["pnl_pct"])
         await notify(
             f"💸 <b>Продажа</b> · {pair_html(ex['symbol'][:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · {ex['reason']}\n"
