@@ -629,17 +629,51 @@ async def cmd_log(update, context):
 
 @restricted
 async def cmd_chart(update, context):
+    import time  # Локальный импорт для работы со временем
     arg = (context.args or [None])[0]
+    public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
+
+    # Если тикер не указан — выводим список за 24 часа
     if not arg:
-        await reply(update, "⚠️ Укажите тикер. Пример: <code>/chart LINK</code>")
+        now_ts = int(time.time())
+        cutoff = now_ts - 86400
+        symbols = set()
+
+        # 1. Собираем из активных позиций
+        for sym in paper.positions.keys():
+            symbols.add(sym)
+            
+        # 2. Собираем из выставленных ордеров
+        for o in paper.orders:
+            symbols.add(o["symbol"])
+
+        # 3. Собираем из истории сделок за последние 24 часа
+        for t in paper.trades:
+            if t.get("time", 0) >= cutoff:
+                symbols.add(t["symbol"])
+
+        if not symbols:
+            await reply(update, "⚠️ За последние 24 часа активности не было. Укажите тикер вручную: <code>/chart LINK</code>")
+            return
+
+        links = []
+        for sym in sorted(symbols):
+            base_sym = sym[:-4] if sym.endswith("USDT") else sym
+            chart_url = f"{public_url}/chart?symbol={sym}"
+            links.append(f"<a href='{chart_url}'><b>{base_sym}</b></a>")
+
+        await reply(update, 
+            f"📈 <b>Графики торгов за 24 часа</b>\n\n"
+            f"{', '.join(links)}\n\n"
+            f"<i>Кликните на монету для загрузки графика (2-3 сек)</i>"
+        )
         return
         
+    # Если тикер указан явно — выдаем как раньше
     sym = arg.upper()
     if not sym.endswith("USDT"):
         sym += "USDT"
         
-    # Формируем ссылку на наш же сервер
-    public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
     chart_url = f"{public_url}/chart?symbol={sym}"
     
     await reply(update, 
