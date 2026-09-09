@@ -790,6 +790,7 @@ async def run_cycle():
                 f"💵 {usd(ex['pnl'])}{funding_line(ex.get('transferred', 0))}"
             )
 
+        # --- 5. Финальное выставление ордера ---
         qty = size / entry
         order = paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl,
                                       score=cand["score"],
@@ -808,13 +809,16 @@ async def run_cycle():
         sl_pct = (sl - entry) / entry * 100
         
         new_tag = "· 🆕 " if cand.get("is_new") else ""
+        
+        # === ИСПРАВЛЕНИЕ: МЕНЯЕМ base на sym[:-4] ===
         await notify(
-            f"📋 <b>Ордер</b> {new_tag}· {pair_html(base, order)}\n"
+            f"📋 <b>Ордер</b> {new_tag}· {pair_html(sym[:-4], order)}\n"
             f"💵 {usd(size)} · 📥 {fmt_price(entry)} ({off * 100:+.2f}%){corr_txt(cand)}\n"
             f"🎯 {fmt_price(tp)} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
             f"⭐ {cand['score']:.1f} · 🧠 {'; '.join(cand['reasons'][:3])}"
         )
         
+    # --- СБРОС И ОТПРАВКА БУФЕРА УВЕДОМЛЕНИЙ ---
     if _notification_buffer:
         digest_text = "\n\n".join(_notification_buffer)
         _notification_buffer.clear()
