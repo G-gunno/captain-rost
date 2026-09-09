@@ -43,7 +43,15 @@ def pnl_emoji(x):
 
 def pair_html(sym, data_obj):
     kind_tag = "🛰" if data_obj.get("kind") == "satellite" else "🏛"
-    mode_tag = "🚀" if data_obj.get("is_momentum") else "🏹"
+    
+    emode = data_obj.get("entry_mode", "")
+    if emode == "reversal":
+        mode_tag = "🧲"
+    elif emode == "rocket" or data_obj.get("is_momentum"):
+        mode_tag = "🚀"
+    else:
+        mode_tag = "🏹"
+        
     tier = data_obj.get("tier")
     em = TIER_EMOJI.get(tier, "") if tier else ""
     sector = data_obj.get("sector") or "Other"
@@ -63,11 +71,13 @@ def corr_txt(d):
     return f" · ₿ {v:.2f}" if v is not None else ""
 
 
-def entry_offset(score, thr, regime, atr_pct, is_momentum=False):
+def entry_offset(score, thr, regime, atr_pct, entry_mode="sniper"):
     hunt = shadow.hunt() 
 
-    if is_momentum:
+    if entry_mode == "rocket":
         return max(shadow.capture(), atr_pct / 100 * 0.1)
+    elif entry_mode == "reversal":
+        return max(0.0, atr_pct / 100 * 0.15) # Бьем почти по рынку, т.к. дно уже сформировано
 
     base_pullback = -atr_pct / 100 * 0.5 
 
@@ -179,8 +189,8 @@ async def startup_reconciliation():
 
         if a > 0:
             atr_pct = a / t["last"] * 100
-            is_mom = order.get("is_momentum", False)
-            off = entry_offset(score, thr, regime, atr_pct, is_mom)
+            entry_mode = order.get("entry_mode", "rocket" if order.get("is_momentum") else "sniper")
+            off = entry_offset(score, thr, regime, atr_pct, entry_mode)
 
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
@@ -189,7 +199,9 @@ async def startup_reconciliation():
             dev_pct = abs(ideal_price - old_price) / old_price * 100
             price_changed = False
 
-            if is_mom:
+            is_fast_entry = entry_mode in ("rocket", "reversal")
+
+            if is_fast_entry:
                 if ideal_price > old_price and dev_pct >= 0.2:
                     order["price"] = ideal_price
                     price_icon = "⬆️"
@@ -289,8 +301,9 @@ async def run_cycle():
         tp_pct = (f["tp"] - f["price"]) / f["price"] * 100
         sl_pct = (f["sl"] - f["price"]) / f["price"] * 100
         
-        # Записываем покупку на график
-        paper.log_event(f["symbol"], "buy", f["price"], mode="Ракета" if f.get("is_momentum") else "Снайпер")
+        emode = f.get("entry_mode", "")
+        ev_mode_str = "Ловец дна" if emode == "reversal" else ("Ракета" if emode == "rocket" else "Снайпер")
+        paper.log_event(f["symbol"], "buy", f["price"], mode=ev_mode_str)
         
         await notify(
             f"🛒 <b>Покупка</b> · {pair_html(f['symbol'][:-4], f)}\n"
@@ -555,8 +568,8 @@ async def run_cycle():
             continue
 
         atr_pct = a / t["last"] * 100
-        is_mom = order.get("is_momentum", False)
-        off = entry_offset(score_now, thr, regime, atr_pct, is_mom)
+        entry_mode = order.get("entry_mode", "rocket" if order.get("is_momentum") else "sniper")
+        off = entry_offset(score_now, thr, regime, atr_pct, entry_mode)
 
         ideal_price = t["last"] * (1 + off)
         old_price = order["price"]
@@ -565,7 +578,9 @@ async def run_cycle():
         dev_pct = abs(ideal_price - old_price) / old_price * 100
         action_type = None
 
-        if is_mom:
+        is_fast_entry = entry_mode in ("rocket", "reversal")
+
+        if is_fast_entry:
             if ideal_price > old_price and dev_pct >= 0.2:
                 if order.get("hunt_count", 0) >= 2:
                     paper.cancel_order(order["id"])
@@ -647,8 +662,9 @@ async def run_cycle():
         kind = cand.get("kind", "core")
         sector = cand.get("sector", "Other")
 
+        entry_mode = cand.get("entry_mode", "rocket" if cand.get("is_momentum") else "sniper")
         is_mom = cand.get("is_momentum", False)
-        off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], is_mom)
+        off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], entry_mode)
 
         t_data = tickers.get(sym, {})
         bid1 = t_data.get("bid1", cand["last"])
@@ -688,10 +704,8 @@ async def run_cycle():
         if tp <= entry or sl >= entry or round(rr, 2) < min_rr:
             continue
 
-        entry_mode = "rocket" if is_mom else "sniper"
-
         size = buy_size(equity, cand["score"], thr, cand["liquidity"], paper.usdt,
-                        kind=kind, is_momentum=is_mom, size_multiplier=cand.get("size_mult", 1.0))
+                        kind=kind, entry_mode=entry_mode, size_multiplier=cand.get("size_mult", 1.0))
 
         if size < 10:
             continue
@@ -790,7 +804,6 @@ async def run_cycle():
                 f"💵 {usd(ex['pnl'])}{funding_line(ex.get('transferred', 0))}"
             )
 
-        # --- 5. Финальное выставление ордера ---
         qty = size / entry
         order = paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl,
                                       score=cand["score"],
@@ -801,6 +814,7 @@ async def run_cycle():
         order["corr"] = cand.get("corr")
         order["regime"] = regime
         order["is_momentum"] = is_mom
+        order["entry_mode"] = entry_mode
         paper.save()
 
         paper.log_event(sym, "order_placed", entry, mode=entry_mode)
@@ -810,7 +824,6 @@ async def run_cycle():
         
         new_tag = "· 🆕 " if cand.get("is_new") else ""
         
-        # === ИСПРАВЛЕНИЕ: МЕНЯЕМ base на sym[:-4] ===
         await notify(
             f"📋 <b>Ордер</b> {new_tag}· {pair_html(sym[:-4], order)}\n"
             f"💵 {usd(size)} · 📥 {fmt_price(entry)} ({off * 100:+.2f}%){corr_txt(cand)}\n"
@@ -818,7 +831,6 @@ async def run_cycle():
             f"⭐ {cand['score']:.1f} · 🧠 {'; '.join(cand['reasons'][:3])}"
         )
         
-    # --- СБРОС И ОТПРАВКА БУФЕРА УВЕДОМЛЕНИЙ ---
     if _notification_buffer:
         digest_text = "\n\n".join(_notification_buffer)
         _notification_buffer.clear()
