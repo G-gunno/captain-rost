@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta
+import os
 
 from bot.exchange.market_data import market_data
 from bot.exchange.paper_exchange import paper
 from bot.strategy.learner import learner
+from bot.news.cmc import TIER_EMOJI
 
 PERIODS = {
     "daily": ("#Дневной_отчёт", 1),
@@ -17,6 +19,21 @@ def usd(x):
 
 def pnl_emoji(x):
     return "🟢" if x > 0.05 else ("🔴" if x < -0.05 else "🟡")
+
+
+# --- ЕДИНЫЙ СТАНДАРТ ОФОРМЛЕНИЯ МОНЕТ ДЛЯ ОТЧЕТОВ ---
+def format_coin(sym, data_obj):
+    kind = "🛰" if data_obj.get("kind") == "satellite" else "🏛"
+    mode = "🚀" if data_obj.get("is_momentum") else "🏹"
+    tier = data_obj.get("tier")
+    em = TIER_EMOJI.get(tier, "") if tier else ""
+    sector = data_obj.get("sector") or "Other"
+    
+    base_sym = sym[:-4] if sym.endswith("USDT") else sym
+    public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
+    chart_url = f"{public_url}/chart?symbol={sym}"
+    
+    return f"{mode} {kind} <a href='{chart_url}'><b>{base_sym}</b></a>{' ' + em if em else ''} · <i>{sector}</i>"
 
 
 async def build_report(period, tz):
@@ -44,7 +61,6 @@ async def build_report(period, tz):
     lines.append(f"📈 Капитал: <b>{usd(eq)}</b>")
     lines.append("")
 
-    # --- Анализ рыночного фона за период ---
     history = [h for h in getattr(paper, "market_history", []) if h.get("ts", 0) >= start_ts]
     if history:
         total_h = len(history)
@@ -70,17 +86,10 @@ async def build_report(period, tz):
     if trades:
         best = max(trades, key=lambda r: r["pnl_pct"])
         worst = min(trades, key=lambda r: r["pnl_pct"])
-        lines.append(
-            f"🏆 Лучшая: <b>{best['symbol'][:-4]}</b> · <i>{best.get('sector', 'Other')}</i> · "
-            f"{pnl_emoji(best['pnl_pct'])} {best['pnl_pct']:+.1f}%"
-        )
-        lines.append(
-            f"📉 Худшая: <b>{worst['symbol'][:-4]}</b> · <i>{worst.get('sector', 'Other')}</i> · "
-            f"{pnl_emoji(worst['pnl_pct'])} {worst['pnl_pct']:+.1f}%"
-        )
+        lines.append(f"🏆 Лучшая: {format_coin(best['symbol'], best)} · {pnl_emoji(best['pnl_pct'])} {best['pnl_pct']:+.1f}%")
+        lines.append(f"📉 Худшая: {format_coin(worst['symbol'], worst)} · {pnl_emoji(worst['pnl_pct'])} {worst['pnl_pct']:+.1f}%")
     lines.append("")
 
-    # Сектора за период
     sector_agg = {}
     for r in trades:
         sector_agg.setdefault(r.get("sector", "Other"), []).append(r["pnl_pct"])
@@ -94,7 +103,6 @@ async def build_report(period, tz):
         lines.append("   (нет закрытых сделок)")
     lines.append("")
 
-    # Стиль: core vs сателлиты
     kind_agg = {}
     for r in trades:
         kind_agg.setdefault(r.get("kind", "core"), []).append(r["pnl_pct"])
@@ -110,19 +118,13 @@ async def build_report(period, tz):
     lines.append(f"   🛰 Лимит сателлитов сейчас: <b>{learner.satellite_limit():.0f}%</b>")
     lines.append("")
 
-    # Открытые позиции
     if paper.positions:
         lines.append(f"📦 <b>Открытые позиции ({len(paper.positions)})</b>")
         for sym, pos in paper.positions.items():
             last = prices.get(sym, {}).get("last", 0)
             pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] and last else 0
-            kind = "🛰" if pos.get("kind") == "satellite" else "🏛"
-            sector = pos.get("sector") or "Other"
             tp1 = " · 🔥TP1" if pos.get("tp1_done") else ""
-            lines.append(
-                f"   {kind} <b>{sym[:-4]}</b> · <i>{sector}</i> · "
-                f"{pnl_emoji(pnl_pct)} {pnl_pct:+.1f}%{tp1}"
-            )
+            lines.append(f"   {format_coin(sym, pos)} · {pnl_emoji(pnl_pct)} {pnl_pct:+.1f}%{tp1}")
     else:
         lines.append("📦 <b>Открытые позиции</b>: нет")
 
