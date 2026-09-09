@@ -196,13 +196,14 @@ class PaperExchange:
 
         self.usdt += proceeds - fee_sell
         transferred = 0.0
-        
+
         pos["qty"] -= qty_part
         self.realized.append({
             "symbol": sym, "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 2),
             "reason": reason, "time": int(time.time()), "partial": True,
             "sector": self._resolve_sector(sym, pos.get("sector")),
             "tier": pos.get("tier"), "kind": pos.get("kind", "core"),
+            "is_momentum": pos.get("is_momentum", False)
         })
         self.trades.append({
             "side": "Sell(part)", "symbol": sym, "qty": qty_part,
@@ -214,6 +215,7 @@ class PaperExchange:
             "pnl_pct": pnl_pct, "reason": reason, "transferred": transferred,
             "sector": self._resolve_sector(sym, pos.get("sector")),
             "tier": pos.get("tier"), "kind": pos.get("kind", "core"),
+            "is_momentum": pos.get("is_momentum", False)
         }
 
     def _sell(self, sym, price, reason, regime_now=None):
@@ -268,17 +270,18 @@ class PaperExchange:
 
         self.usdt += proceeds - fee_sell
         transferred = 0.0
-        
+
         # Отчисляем 30% в копилку ТОЛЬКО если ОБЩИЙ итог сделки (TP1 + Финал) > 0
         if total_pnl > 0:
             transferred = round(total_pnl * 0.30, 4)
             self.usdt -= transferred
             self.funding += transferred
-            
+
         self.realized.append({
             "symbol": sym, "pnl": round(total_pnl, 4), "pnl_pct": round(total_pnl_pct, 2),
             "reason": reason, "time": int(time.time()), "exit_type": exit_type,
             "sector": sector, "tier": tier, "kind": kind,
+            "is_momentum": pos.get("is_momentum", False)
         })
         self.trades.append({
             "side": "Sell", "symbol": sym, "qty": pos["qty"],
@@ -290,6 +293,7 @@ class PaperExchange:
             "pnl_pct": total_pnl_pct, "reason": reason, "transferred": transferred,
             "exit_type": exit_type, "runner_bonus": runner_bonus,
             "sector": sector, "tier": tier, "kind": kind,
+            "is_momentum": pos.get("is_momentum", False)
         }
 
     def sell_all(self, prices):
@@ -323,9 +327,9 @@ class PaperExchange:
     def get_metrics(self, prices=None, hours=None):
         if prices is None:
             prices = {}
-        
+
         finals = [r for r in self.realized if not r.get("partial")]
-        
+
         # Если передан параметр hours, отсекаем старые сделки (скользящее окно)
         if hours is not None:
             cutoff = int(time.time()) - int(hours * 3600)
@@ -356,7 +360,6 @@ class PaperExchange:
                 if dd > max_dd:
                     max_dd = dd
 
-        # --- ИСПРАВЛЕНИЕ ЗДЕСЬ: Поднимаем total_pnl наверх! ---
         total_pnl = sum(r["pnl"] for r in finals)
         total_trades = len(finals)
 
@@ -366,13 +369,12 @@ class PaperExchange:
             winrate = len(wins) / total_trades
             lossrate = 1 - winrate
             expectancy = (winrate * avg_win) - (lossrate * avg_loss)
-            
+
             if max_dd > 0:
                 recovery_factor = total_pnl / max_dd
             else:
                 recovery_factor = float("inf") if total_pnl > 0 else 0.0
         else:
-            # Нет сделок — нет и метрик (возвращаем None вместо 0)
             expectancy = None
             recovery_factor = None
 
