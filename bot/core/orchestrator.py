@@ -42,15 +42,18 @@ def pnl_emoji(x):
     return "🟢" if x > 0.05 else ("🔴" if x < -0.05 else "🟡")
 
 
-def pair_html(sym, sector, kind_tag="🏛", tier=None):
+# НОВЫЙ ЕДИНЫЙ СТАНДАРТ ОТОБРАЖЕНИЯ: 🚀 🏛 LINK 🐘 · DeFi
+def pair_html(sym, data_obj):
+    kind_tag = "🛰" if data_obj.get("kind") == "satellite" else "🏛"
+    mode_tag = "🚀" if data_obj.get("is_momentum") else "🏹"
+    tier = data_obj.get("tier")
     em = TIER_EMOJI.get(tier, "") if tier else ""
+    sector = data_obj.get("sector") or "Other"
+    
     public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
     chart_url = f"{public_url}/chart?symbol={sym}USDT"
-    return f"{kind_tag} <a href='{chart_url}'><b>{sym}</b></a>{' ' + em if em else ''} · <i>{sector}</i>"
-
-
-def kind_tag_of(d):
-    return "🛰" if d.get("kind") == "satellite" else "🏛"
+    
+    return f"{mode_tag} {kind_tag} <a href='{chart_url}'><b>{sym}</b></a>{' ' + em if em else ''} · <i>{sector}</i>"
 
 
 def funding_line(x):
@@ -65,28 +68,26 @@ def corr_txt(d):
 def entry_offset(score, thr, regime, atr_pct, is_momentum=False):
     """Смещение входа: гибридная логика (ракета vs снайпер)."""
     hunt = shadow.hunt() 
-    
+
     if is_momentum:
         # Ракета бьет почти по рынку (покупает пробой)
         return max(shadow.capture(), atr_pct / 100 * 0.1)
-    
-    # --- ИСПРАВЛЕНИЕ: Жесткая привязка отката к волатильности (ATR) ---
-    # Снайпер ВСЕГДА ждет откат. Минимальный откат = 50% от текущего ATR свечи.
-    # Если свеча гигантская, бот будет ждать глубокой коррекции, а не покупать на хаях.
+
+    # Жесткая привязка отката к волатильности (ATR)
     base_pullback = -atr_pct / 100 * 0.5 
-    
+
     surplus = score - thr
     if regime == "bear":
         return min(hunt * 1.5, base_pullback * 1.5)  
     elif regime == "neutral":
         return min(hunt * 1.2, base_pullback * 1.2)  
-        
+
     # Бычий рынок
     if surplus >= 3.0:
         return min(shadow.near(), base_pullback * 0.5)  # Супер-сильный сигнал: откат обязателен, но поменьше
     if surplus >= 1.5:
         return min(hunt * 0.5, base_pullback * 0.8)
-        
+
     return min(hunt, base_pullback)
 
 
@@ -128,7 +129,7 @@ async def startup_reconciliation():
         if a <= 0:
             continue
         fixed = []
-        
+
         # Проверяем TP со стрелочкой направления
         old_tp = pos.get("tp", 0)
         tp_dist = (old_tp - entry) / entry * 100 if old_tp else 0
@@ -159,7 +160,7 @@ async def startup_reconciliation():
                 fixed.append(f"SL {fmt_price(new_sl)} {arrow}".strip())
 
         if fixed:
-            actions.append(f"{pair_html(sym[:-4], pos.get('sector') or 'Other', kind_tag_of(pos), pos.get('tier'))} · {' · '.join(fixed)}")
+            actions.append(f"{pair_html(sym[:-4], pos)} · {' · '.join(fixed)}")
     paper.save()
 
     regime, _ = await get_regime()
@@ -169,31 +170,31 @@ async def startup_reconciliation():
         t = prices.get(sym)
         if not t:
             paper.cancel_order(order["id"])
-            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · снят 🪫 (нет данных)")
+            actions.append(f"{pair_html(sym[:-4], order)} · снят 🪫 (нет данных)")
             continue
         score, candles = await live_score(sym, t, regime, deriv_t=deriv_tickers.get(sym))
         if score is None:
             continue
         a = atr(candles)
-        
+
         # 1. Сигнал полностью умер
         if score <= thr - 1.5:
             paper.cancel_order(order["id"])
-            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · снят 🪫 · ⭐ {score:.1f} (умер)")
+            actions.append(f"{pair_html(sym[:-4], order)} · снят 🪫 · ⭐ {score:.1f} (умер)")
             continue
-            
+
         # 2. Сигнал ослаб (ниже порога входа с учетом буфера -0.5)
         if score < thr - 0.5:
             paper.cancel_order(order["id"])
-            actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · снят 🪫 · ⭐ {score:.1f} (ослаб)")
+            actions.append(f"{pair_html(sym[:-4], order)} · снят 🪫 · ⭐ {score:.1f} (ослаб)")
             continue
-            
+
         # 3. Сигнал актуален -> Перевыставляем
         if a > 0:
             atr_pct = a / t["last"] * 100
             is_mom = order.get("is_momentum", False)
             off = entry_offset(score, thr, regime, atr_pct, is_mom)
-            
+
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
             bid1 = t.get("bid1", t["last"])
@@ -216,21 +217,21 @@ async def startup_reconciliation():
                 ideal_price = min(ideal_price, bid1)
                 if t["last"] > old_price + 1.5 * a:
                     paper.cancel_order(order["id"])
-                    actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · снят 🚀 (улетел)")
+                    actions.append(f"{pair_html(sym[:-4], order)} · снят 🚀 (улетел)")
                     continue
-                    
+
                 if ideal_price < old_price and dev_pct >= 0.2:
                     order["price"] = ideal_price
                     price_icon = "⬇️"
                     price_changed = True
                 sl_dist = 1.2 * a
-            
+
             order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
             order["sl"] = min(order["price"] - sl_dist, order["price"] * (1 - MIN_SL_PCT / 100))
-            
+
             if price_changed:
                 order["created"] = int(time.time())
-                actions.append(f"{pair_html(sym[:-4], order.get('sector') or 'Other', kind_tag_of(order), order.get('tier'))} · сдвиг {price_icon} · ⭐ {score:.1f}")
+                actions.append(f"{pair_html(sym[:-4], order)} · сдвиг {price_icon} · ⭐ {score:.1f}")
     paper.save()
 
     for line in actions:
@@ -275,7 +276,7 @@ async def run_cycle():
     mode, _ = learner.risk_mode(
         metrics_24h["profit_factor"], metrics_24h["max_drawdown_pct"], metrics_24h["total_trades"]
     )
-    
+
     if _last_mode is not None and mode != _last_mode:
         m_em = {"NORMAL": "🟢", "CAUTIOUS": "🟡", "STRICT": "🔴", "AGGRESSIVE": "🚀"}
         old_e, new_e = m_em.get(_last_mode, '⚪'), m_em.get(mode, '⚪')
@@ -299,13 +300,11 @@ async def run_cycle():
             pos["regime_entry"] = f.get("regime")
             pos["corr"] = f.get("corr", 0.5)
             paper.save()
-        kind_tag = kind_tag_of(f)
-        sector = (pos.get("sector") if pos else None) or f.get("sector") or "Other"
-        tier = (pos.get("tier") if pos else None) or f.get("tier")
+            
         tp_pct = (f["tp"] - f["price"]) / f["price"] * 100
         sl_pct = (f["sl"] - f["price"]) / f["price"] * 100
         await notify(
-            f"🛒 <b>Покупка</b> · {pair_html(f['symbol'][:-4], sector, kind_tag, tier)}\n"
+            f"🛒 <b>Покупка</b> · {pair_html(f['symbol'][:-4], f)}\n"
             f"💵 {usd(f['qty'] * f['price'])} · 📥 {fmt_price(f['price'])}{corr_txt(f)}\n"
             f"🎯 {fmt_price(f['tp'])} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(f['sl'])} ({fmt_pct(sl_pct)})"
         )
@@ -313,7 +312,7 @@ async def run_cycle():
     # 2. Оценка рынка
     regime, info = await get_regime()
     logger.info(f"Regime: {regime} | {info}")
-    
+
     if _last_regime is not None and regime != _last_regime:
         r_em = {"bull": "🟢", "neutral": "🟡", "bear": "🔴"}
         r_tx = {"bull": "бычий", "neutral": "нейтральный", "bear": "медвежий"}
@@ -328,7 +327,6 @@ async def run_cycle():
         "regime": regime,
         "mode": mode
     })
-    # Оставляем историю только за последние 32 дня (чтобы файл не раздувался)
     cutoff = int(time.time()) - 32 * 86400
     paper.market_history = [x for x in paper.market_history if x.get("ts", 0) >= cutoff]
     paper.save()
@@ -343,7 +341,7 @@ async def run_cycle():
         if paper.positions or paper.orders:
             for ex in paper.sell_all(tickers):
                 await notify(
-                    f"🚨 <b>Экстренный выход</b> · {pair_html(ex['symbol'][:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · "
+                    f"🚨 <b>Экстренный выход</b> · {pair_html(ex['symbol'][:-4], ex)} · "
                     f"{pnl_emoji(ex['pnl_pct'])} {ex['pnl']:+.2f}% · {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}"
                     f"{funding_line(ex.get('transferred', 0))}", urgent=True
                 )
@@ -374,14 +372,14 @@ async def run_cycle():
         base = sym[:-4]
         name = await get_coin_name(base)
         neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
-        
+
         is_toxic = neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33)
         if is_toxic:
             _fomo_cooldowns[sym] = current_time + 7200  # пауза 2 часа
             if pnl_pct >= MIN_EARLY_EXIT_PCT:
                 ex = paper._sell(sym, last, "НОВОСТИ ⚠️", regime_now=regime)
                 await notify(
-                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · новостной выход ⚠️ {neg}/{mentions}\n"
+                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex)} · новостной выход ⚠️ {neg}/{mentions}\n"
                     f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}"
                     f"{funding_line(ex.get('transferred', 0))}"
                 )
@@ -389,7 +387,7 @@ async def run_cycle():
             elif pnl_pct <= 0:
                 ex = paper._sell(sym, last, "НОВОСТИ 🛑", regime_now=regime)
                 await notify(
-                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · новостная резка 🛑 {neg}/{mentions}\n"
+                    f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex)} · новостная резка 🛑 {neg}/{mentions}\n"
                     f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}"
                     f"{funding_line(ex.get('transferred', 0))}"
                 )
@@ -400,27 +398,24 @@ async def run_cycle():
             half = pos["qty"] / 2
             ex = paper.sell_partial(sym, half, pos["tp"], "TP1 🎯")
             pos["tp1_done"] = True
-            
-            # --- НОВОЕ: Сообщаем Теневому Журналу о чистом профите ---
+
             shadow.mark_success(sym)
-            # Честный безубыток с учетом комиссий за вход и выход (0.2%)
             breakeven_price = pos["avg"] * (1 + (FEE_PCT * 2) / 100)
             pos["sl"] = max(pos["sl"], breakeven_price)
-            
+
             pos["tp"] = round(pos["tp"] + 1.5 * a, 10)
             paper.save()
-            
-            # Динамическое форматирование строки SL (как в /status)
+
             sl_pct = (pos["sl"] - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
             if sl_pct >= 0.5:
                 sl_str = f"📈 <b>{fmt_price(pos['sl'])} (+{sl_pct:.2f}%)</b>"
-            elif sl_pct >= 0.15: # Учитываем комиссию ~0.2%
+            elif sl_pct >= 0.15: 
                 sl_str = f"🔒 <b>{fmt_price(pos['sl'])} (безубыток)</b>"
             else:
                 sl_str = f"🛡 <b>{fmt_price(pos['sl'])} ({sl_pct:+.2f}%)</b>"
-                
+
             await notify(
-                f"🎯 <b>TP1</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · 50%\n"
+                f"🎯 <b>TP1</b> · {pair_html(sym[:-4], ex)} · 50%\n"
                 f"📊 {fmt_price(ex['price'])} · 🔥 {fmt_pct(ex['pnl_pct'])} · 💵 прибыль {usd(ex['pnl'])}"
                 f"{funding_line(ex.get('transferred', 0))}\n"
                 f"остаток бежит · 🎯 {fmt_price(pos['tp'])} · {sl_str}"
@@ -440,27 +435,23 @@ async def run_cycle():
             elif regime == "neutral" and score_pos < thr:
                 regime_danger = True
 
-        # Если сигнал сломан или режим рынка сменился не в нашу пользу — выходим СРАЗУ,
-        # независимо от текущей прибыли или убытка (ликвидируем мертвый груз).
         if signal_weak or regime_danger:
-            _fomo_cooldowns[sym] = current_time + 7200  # пауза 2 часа на слом тренда
-            
-            # Определяем причину для красивого отображения в логах
+            _fomo_cooldowns[sym] = current_time + 7200  
+
             if regime_danger and not signal_weak:
                 reason = "СМЕНА РЕЖИМА ⚠️"
             elif pnl_pct > 0:
                 reason = "СИГНАЛ ИСЯК (в плюс) 📉"
             else:
                 reason = "ИНВАЛИДАЦИЯ 🛑"
-                
+
             ex = paper._sell(sym, last, reason, regime_now=regime)
-            
-            # Если инвалидация произошла в профит - это тоже успех
+
             if ex["pnl"] > 0:
                 shadow.mark_success(sym)
-                
+
             await notify(
-                f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · {reason.lower()}\n"
+                f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex)} · {reason.lower()}\n"
                 f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}"
                 f"{funding_line(ex.get('transferred', 0))}"
             )
@@ -474,14 +465,14 @@ async def run_cycle():
                 pos["tp"] = round(new_tp, 10)
                 new_sl = max(new_sl or pos["sl"], pos["avg"] + 0.5 * a)
                 await notify(
-                    f"🎯 <b>TP поднят</b> (раннер) · {pair_html(sym[:-4], pos.get('sector') or 'Other', kind_tag_of(pos), pos.get('tier'))}\n"
+                    f"🎯 <b>TP поднят</b> (раннер) · {pair_html(sym[:-4], pos)}\n"
                     f"🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])}"
                 )
 
         # 4г. Трейлинг SL — динамический поджим
         if new_sl is None:
             new_sl = pos["sl"]
-            
+
         max_p = pos.get("max_price", last)
         breakeven_price = pos["avg"] * (1 + (FEE_PCT * 2) / 100)
 
@@ -502,22 +493,18 @@ async def run_cycle():
 
     # 5. Выходы остатка по TP/SL
     for ex in paper.check_exits(tickers, regime_now=regime):
-        
-        # --- ИСПРАВЛЕНИЕ: Защита от пулеметных перезаходов! ---
-        # Блокируем монету на 2 часа после ЛЮБОГО выхода по TP или SL
         _fomo_cooldowns[ex["symbol"]] = current_time + 7200
-        
-        # Сообщаем об успехе, если сделка закрылась в плюс
+
         if ex["pnl"] > 0:
             shadow.mark_success(ex["symbol"])
-            
+
         runner_txt = ""
         if ex.get("runner_bonus", 0) > 5:
             runner_txt = f"\n🏃 пробежка +{ex['runner_bonus']:.1f}% выше TP1"
-            
+
         ind = "🔥" if ex.get("exit_type") == "TP1_RUN" else pnl_emoji(ex["pnl_pct"])
         await notify(
-            f"💸 <b>Продажа</b> · {pair_html(ex['symbol'][:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · {ex['reason']}\n"
+            f"💸 <b>Продажа</b> · {pair_html(ex['symbol'][:-4], ex)} · {ex['reason']}\n"
             f"{ind} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}{runner_txt}"
             f"{funding_line(ex.get('transferred', 0))}"
         )
@@ -530,15 +517,14 @@ async def run_cycle():
             continue
 
         base = order["symbol"][:-4]
-        o_pair = pair_html(base, order.get("sector") or "Other", kind_tag_of(order), order.get("tier"))
         name = await get_coin_name(base)
         neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
-        
+
         is_toxic = neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33)
         if is_toxic:
             paper.cancel_order(order["id"])
             _fomo_cooldowns[order["symbol"]] = current_time + 7200
-            await notify(f"⚠️ <b>Ордер снят</b> · {o_pair} · негатив {neg}/{mentions} (пауза 2ч)")
+            await notify(f"⚠️ <b>Ордер снят</b> · {pair_html(base, order)} · негатив {neg}/{mentions} (пауза 2ч)")
             continue
 
         score_now, candles = await live_score(order["symbol"], t, regime, news_items)
@@ -550,62 +536,56 @@ async def run_cycle():
         if score_now <= thr - 1.5:
             paper.cancel_order(order["id"])
             _fomo_cooldowns[order["symbol"]] = current_time + 7200
-            await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал умер (пауза 2ч)")
+            await notify(f"📉 <b>Ордер снят</b> · {pair_html(base, order)} · сигнал умер (пауза 2ч)")
             continue
 
         if score_now < thr - 0.5:
             paper.cancel_order(order["id"])
-            _fomo_cooldowns[order["symbol"]] = current_time + 1800  # Снизили кулдаун до 30 минут
-            await notify(f"📉 <b>Ордер снят</b> · {o_pair} · сигнал ослаб (пауза 30м)")
-            continue
+            _fomo_cooldowns[order["symbol"]] = current_time + 1800  
+            await notify(f"📉 <b>Ордер снят</b> · {pair_html(base, order)} · сигнал ослаб (пауза 30м)")
             continue
 
-        # Проверка на протухание ордера (Тайм-аут 2 часа = 7200 сек)
         if (current_time - order["created"]) > 7200:
             paper.cancel_order(order["id"])
             _fomo_cooldowns[order["symbol"]] = current_time + 1800
-            await notify(f"⏳ <b>Ордер снят</b> · {o_pair} · тайм-аут 2ч без исполнения")
+            await notify(f"⏳ <b>Ордер снят</b> · {pair_html(base, order)} · тайм-аут 2ч без исполнения")
             continue
-            
+
         atr_pct = a / t["last"] * 100
         is_mom = order.get("is_momentum", False)
         off = entry_offset(score_now, thr, regime, atr_pct, is_mom)
-        
+
         ideal_price = t["last"] * (1 + off)
         old_price = order["price"]
         bid1 = t.get("bid1", t["last"])
-        
+
         dev_pct = abs(ideal_price - old_price) / old_price * 100
         action_type = None
-        
+
         if is_mom:
-            # Для ракеты разрешаем погоню (хантинг вверх) до 3 раз
             if ideal_price > old_price and dev_pct >= 0.2:
                 if order.get("hunt_count", 0) >= 2:
                     paper.cancel_order(order["id"])
                     _fomo_cooldowns[order["symbol"]] = current_time + 1800
-                    await notify(f"🏃 <b>Ордер снят (Убежала)</b> · {o_pair} · 3 попытки догнать")
+                    await notify(f"🏃 <b>Ордер снят (Убежала)</b> · {pair_html(base, order)} · 3 попытки догнать")
                     continue
                 order["price"] = ideal_price
                 order["hunt_count"] = order.get("hunt_count", 0) + 1
                 action_type = "hunt"
                 price_icon = "⬆️"
-            # Если цена просела - просто корректируем ордер вниз (без траты жизней хантинга)
             elif ideal_price < old_price and dev_pct >= 0.2:
                 order["price"] = ideal_price
                 action_type = "correct"
                 price_icon = "⬇️"
             sl_dist = 0.6 * a
         else:
-            # Для снайпера: если улетела больше чем на 1.5 ATR - снимаем
             if t["last"] > old_price + 1.5 * a:
                 paper.cancel_order(order["id"])
                 _fomo_cooldowns[order["symbol"]] = current_time + 1800
-                await notify(f"🚀 <b>Ордер снят (Улетела)</b> · {o_pair} · пауза 30м")
+                await notify(f"🚀 <b>Ордер снят (Улетела)</b> · {pair_html(base, order)} · пауза 30м")
                 continue
-            
+
             ideal_price = min(ideal_price, bid1)
-            # Снайпер двигает лимитку только вниз за ценой
             if ideal_price < old_price and dev_pct >= 0.2:
                 order["price"] = ideal_price
                 action_type = "correct"
@@ -614,9 +594,9 @@ async def run_cycle():
 
         order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + MIN_TP_PCT / 100))
         order["sl"] = min(order["price"] - sl_dist, order["price"] * (1 - MIN_SL_PCT / 100))
-        
+
         if action_type:
-            order["created"] = current_time  # Сброс таймера протухания при перестановке
+            order["created"] = current_time  
             paper.save()
             if action_type == "hunt":
                 msg_title = f"🏃 <b>Охота {price_icon}</b>"
@@ -624,13 +604,12 @@ async def run_cycle():
             else:
                 msg_title = f"📐 <b>Коррекция {price_icon}</b>"
                 msg_desc = f"сдвиг на {dev_pct:.2f}%"
-                
+
             await notify(
-                f"{msg_title} · {o_pair} ({'Ракета' if is_mom else 'Снайпер'})\n"
+                f"{msg_title} · {pair_html(base, order)}\n"
                 f"📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · {msg_desc}"
             )
         else:
-            # Если цена визуально не изменилась (сдвиг < 0.2%), просто тихо обновляем TP/SL в памяти
             paper.save()
 
 # 7. Сканирование и покупки / ротация
@@ -646,7 +625,6 @@ async def run_cycle():
                 f"лимит на сектор={sec_lim} | лимит Other={other_lim} | "
                 f"лимит сателлитов={sat_limit:.0f}% · Floor=${base_min:.0f}")
 
-    # Очистка старых кулдаунов (чтобы не копились в памяти бесконечно)
     current_time = int(time.time())
     for k in list(_fomo_cooldowns.keys()):
         if _fomo_cooldowns[k] < current_time:
@@ -654,30 +632,28 @@ async def run_cycle():
 
     for cand in candidates:
         sym = cand["symbol"]
-        
-        # Если монета на паузе (кулдаун еще не истек) — пропускаем её
+
         if _fomo_cooldowns.get(sym, 0) > current_time:
             continue
-            
+
         if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
             continue
 
         kind = cand.get("kind", "core")
         sector = cand.get("sector", "Other")
 
-        # --- 1. Расчет точек входа, стопов и размера ---
         is_mom = cand.get("is_momentum", False)
         off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], is_mom)
-        
+
         t_data = tickers.get(sym, {})
         bid1 = t_data.get("bid1", cand["last"])
         ideal_entry = cand["last"] * (1 + off)
-        
+
         if is_mom:
-            entry = ideal_entry  # Ракета бьет по рынку
+            entry = ideal_entry  
         else:
-            entry = min(ideal_entry, bid1)  # Снайпер встает лимиткой в стакан
-            
+            entry = min(ideal_entry, bid1)  
+
         a = cand["atr"]
         if a <= 0:
             logger.info(f"{sym}: пропущен — нулевой ATR")
@@ -711,17 +687,14 @@ async def run_cycle():
             continue
 
         entry_mode = "rocket" if is_mom else "sniper"
-        
-        # Индивидуальный Келли убран, сайзинг теперь опирается на жесткие пороги (Floor/Ceiling) и скор
+
         size = buy_size(equity, cand["score"], thr, cand["liquidity"], paper.usdt,
                         kind=kind, is_momentum=is_mom, size_multiplier=cand.get("size_mult", 1.0))
-        
-        # Защита от пыли (если что-то пошло не так с доступным балансом)
+
         if size < 10:
             logger.info(f"{sym}: пропущен — размер позиции < 10$")
             continue
 
-        # --- 2. Проверка лимитов сателлитов ---
         if kind == "satellite":
             sat_exposure = sum(
                 p["qty"] * tickers.get(s, {}).get("last", 0)
@@ -733,17 +706,14 @@ async def run_cycle():
                 logger.info(f"{sym}: пропущен — лимит сателлитов исчерпан ({sat_limit:.0f}%)")
                 continue
 
-        # --- 3. АТОМАРНЫЙ ПЛАН РОТАЦИИ (Сектор + Баланс) ---
         planned_sells = []
         planned_cancels = []
-        
+
         lim = other_lim if sector == "Other" else sec_lim
-        # Считаем ТОЛЬКО активные позиции. Очередь ордеров больше не блокирует сектор!
         sector_count = sum(1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector)
 
-        # Секторная ротация
         if sector_count >= lim:
-            if is_mom: # Ракета бьет по рынку, ей можно продавать слабые позиции
+            if is_mom: 
                 sector_positions = [(s, p) for s, p in paper.positions.items() if (p.get("sector") or "Other") == sector]
                 if sector_positions:
                     w_sym, w_pos = min(sector_positions, key=lambda kv: kv[1].get("score", 0))
@@ -755,27 +725,24 @@ async def run_cycle():
                             can_rotate = cand["score"] >= w_pos.get("score", 0) + 1.0 and not w_pos.get("tp1_done") and weak_pnl >= -2.0
                         else:
                             can_rotate = cand["score"] >= w_pos.get("score", 0) + 1.5 and not w_pos.get("tp1_done") and -0.5 <= weak_pnl < 2.0
-                            
+
                         if can_rotate:
                             planned_sells.append((w_sym, w_pos, t_w["last"], weak_pnl, "РОТАЦИЯ СЕКТОРА 🔄"))
                         else:
                             logger.info(f"{sym}: пропущен — сектор {sector} переполнен, слабак {w_sym} слишком силен")
                             continue
             else:
-                # Снайпер НЕ МОЖЕТ продавать активные позиции ради лимитки!
                 logger.info(f"{sym}: пропущен — Снайпер не продает позиции (сектор {sector} полон)")
                 continue
 
-        # Общая ротация баланса
         pending_amount = sum(o["qty"] * o["price"] for o in paper.orders)
         proj_pending = pending_amount
         proj_usdt = paper.usdt
-        
+
         for w_sym, w_pos, last, pnl, reason in planned_sells:
             proj_usdt += w_pos["qty"] * last
-            
+
         if proj_pending + size > proj_usdt:
-            # 1. Сначала пытаемся отменить слабые ордера (разрешено и Ракетам, и Снайперам)
             weak_order = None
             if paper.orders:
                 available_orders = [o for o in paper.orders if o not in planned_cancels]
@@ -783,12 +750,11 @@ async def run_cycle():
                     w_o = min(available_orders, key=lambda o: o.get("score", 0))
                     if cand["score"] >= w_o.get("score", 0) + 1.0:
                         weak_order = w_o
-                        
+
             if weak_order and (proj_pending - weak_order["qty"] * weak_order["price"]) + size <= proj_usdt:
                 planned_cancels.append(weak_order)
                 proj_pending -= weak_order["qty"] * weak_order["price"]
-                
-            # 2. Если денег всё еще не хватает, и мы РАКЕТА - продаем живую позицию
+
             if is_mom and (proj_pending + size > proj_usdt):
                 weak_pos = None
                 if paper.positions:
@@ -801,17 +767,15 @@ async def run_cycle():
                             pnl = (t_w["last"] - w_p["avg"]) / w_p["avg"] * 100
                             if cand["score"] >= w_p.get("score", 0) + 1.5 and not w_p.get("tp1_done") and pnl >= -2.0:
                                 weak_pos = (w_sym, w_p, t_w["last"], pnl, "ОБЩАЯ РОТАЦИЯ 🔄")
-                
+
                 if weak_pos and proj_pending + size <= proj_usdt + weak_pos[1]["qty"] * weak_pos[2]:
                     planned_sells.append(weak_pos)
                     proj_usdt += weak_pos[1]["qty"] * weak_pos[2]
-            
-            # Финальная проверка
+
             if proj_pending + size > proj_usdt:
                 logger.info(f"{sym}: пропущен — не хватает денег даже с планом ротации")
                 continue
 
-        # --- 4. ИСПОЛНЕНИЕ ПЛАНА ---
         for w_o in planned_cancels:
             paper.cancel_order(w_o["id"])
             await notify(
@@ -819,7 +783,7 @@ async def run_cycle():
                 f"Место для <b>{sym[:-4]}</b> · ⭐ {w_o.get('score', 0):.1f} → {cand['score']:.1f}"
             )
             logger.info(f"{sym}: ротация — снят ордер {w_o['symbol']}")
-            
+
         for w_sym, w_pos, last, pnl, reason in planned_sells:
             ex = paper._sell(w_sym, last, reason, regime_now=regime)
             await notify(
@@ -841,20 +805,19 @@ async def run_cycle():
         order["regime"] = regime
         order["is_momentum"] = is_mom
         paper.save()
-        # Логируем ордер для визуализатора графиков
+
         logger.info(f"ORDER PLACED {sym} @ {entry} (Market: {bid1}, Diff: {off * 100:+.2f}%) mode={entry_mode}")
         tp_pct = (tp - entry) / entry * 100
         sl_pct = (sl - entry) / entry * 100
-        kind_tag = "🛰" if kind == "satellite" else "🏛"
+        
         new_tag = "· 🆕 " if cand.get("is_new") else ""
-        mode_tag = "🚀 Ракета" if is_mom else "🏹 Снайпер"
         await notify(
-            f"📋 <b>Ордер ({mode_tag})</b> {new_tag}· {pair_html(sym[:-4], sector, kind_tag, cand.get('tier'))}\n"
+            f"📋 <b>Ордер</b> {new_tag}· {pair_html(sym[:-4], order)}\n"
             f"💵 {usd(size)} · 📥 {fmt_price(entry)} ({off * 100:+.2f}%){corr_txt(cand)}\n"
             f"🎯 {fmt_price(tp)} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
             f"⭐ {cand['score']:.1f} · 🧠 {'; '.join(cand['reasons'][:3])}"
         )
-    # --- СБРОС И ОТПРАВКА БУФЕРА УВЕДОМЛЕНИЙ ---
+        
     if _notification_buffer:
         digest_text = "\n\n".join(_notification_buffer)
         _notification_buffer.clear()
@@ -865,3 +828,5 @@ async def run_cycle():
                 logger.error(f"digest notify error: {e}")
 
     logger.info("=== CYCLE END ===")
+
+--- КОНЕЦ ФАЙЛА: ./bot/core/orchestrator.py ---
