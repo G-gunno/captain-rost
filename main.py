@@ -217,7 +217,12 @@ async def action_exitall(context):
 
 async def action_resetlearn(context):
     learner.reset()
-    return "🧠♻️ <b>Опыт сброшен</b>: веса = 1.0, история очищена."
+    shadow.reset()  # <--- Добавили сброс теневого журнала
+    return (
+        "🧠♻️ <b>Опыт ИИ сброшен</b>\n"
+        "• Веса индикаторов возвращены к 1.0\n"
+        "• Теневой журнал автотюна полностью очищен."
+    )
 
 
 async def action_resetstats(context):
