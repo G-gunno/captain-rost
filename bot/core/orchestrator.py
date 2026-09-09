@@ -395,6 +395,12 @@ async def run_cycle():
             ex = paper.sell_partial(sym, half, pos["tp"], "TP1 🎯")
             pos["tp1_done"] = True
             
+            # --- НОВОЕ: Сообщаем Теневому Журналу о чистом профите ---
+            shadow.mark_success(sym)
+            
+            # Честный безубыток с учетом комиссий за вход и выход (0.2%)
+            breakeven_price = pos["avg"] * (1 + (FEE_PCT * 2) / 100)
+            
             # Сообщаем Теневому Журналу, что мы успешно поймали памп!
             shadow.mark_success(sym)
             
@@ -450,6 +456,13 @@ async def run_cycle():
                 
             ex = paper._sell(sym, last, reason, regime_now=regime)
             
+            # --- НОВОЕ: Если сигнал сломался, но мы закрыли в плюс ---
+            if ex["pnl"] > 0:
+                shadow.mark_success(sym)
+                
+            await notify(
+                f"💸 <b>Продажа</b> · {pair_html(sym[:-4], ex.get('sector', 'Other'), kind_tag_of(ex), ex.get('tier'))} · {reason.lower()}\n"
+            
             # Если инвалидация произошла в профит - это тоже успех
             if ex["pnl"] > 0:
                 shadow.mark_success(sym)
@@ -497,6 +510,13 @@ async def run_cycle():
 
     # 5. Выходы остатка по TP/SL
     for ex in paper.check_exits(tickers, regime_now=regime):
+        # --- НОВОЕ: Засчитываем памп, если трейлинг закрылся выше безубытка ---
+        if ex["pnl"] > 0:
+            shadow.mark_success(ex["symbol"])
+            
+        runner_txt = ""
+        if ex.get("runner_bonus", 0) > 5:
+            
         # Сообщаем об успехе, если сделка закрылась в плюс
         if ex["pnl"] > 0:
             shadow.mark_success(ex["symbol"])
