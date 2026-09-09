@@ -29,7 +29,6 @@ class PaperExchange:
         self.chart_events = [] 
         self._last_upload = 0.0
         self._load()
-        self._migrate_sectors()
 
     def _load(self):
         data = None
@@ -52,30 +51,6 @@ class PaperExchange:
             logger.info(f"Paper state загружен: USDT={self.usdt:.2f}, позиций={len(self.positions)}")
         else:
             self.chart_events = []
-
-    def _migrate_sectors(self):
-        try:
-            from bot.news.cmc import sector_of
-        except ImportError:
-            return
-        migrated = 0
-        for sym, pos in self.positions.items():
-            base = sym[:-4] if sym.endswith("USDT") else sym
-            new_sector = sector_of(base)
-            if new_sector and new_sector != pos.get("sector"):
-                pos["sector"] = new_sector
-                migrated += 1
-        for order in self.orders:
-            base = order["symbol"][:-4] if order["symbol"].endswith("USDT") else order["symbol"]
-            new_sector = sector_of(base)
-            if new_sector and new_sector != order.get("sector"):
-                order["sector"] = new_sector
-                migrated += 1
-        if migrated:
-            logger.info(f"Миграция секторов: переопределено {migrated} позиций/ордеров")
-            self.save()
-        else:
-            logger.info("Миграция секторов: все секторы актуальны")
 
     def save(self):
         payload = {
