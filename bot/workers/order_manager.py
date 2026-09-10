@@ -4,10 +4,10 @@ from loguru import logger
 
 from bot.core.event_bus import EventBus
 from bot.exchange.paper_exchange import paper
-from bot.strategy.sizing import buy_size, portfolio_limits, tier_limits
+from bot.strategy.sizing import buy_size, portfolio_limits, tier_limits, entry_offset
 from bot.strategy.scanner import threshold
 from bot.strategy.learner import learner
-from bot.core.orchestrator import entry_offset, pair_html, corr_txt, funding_line, usd, fmt_price, fmt_pct
+from bot.utils.format import pair_html, corr_txt, funding_line, usd, fmt_price, fmt_pct
 
 class OrderManagerWorker:
     """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров."""
