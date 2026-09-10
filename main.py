@@ -327,21 +327,47 @@ async def run_all(application):
     await asyncio.to_thread(ensure_branch)
     set_notifier(send_chat)
     
-    # === ЗАПУСК НОВОЙ EVENT-DRIVEN АРХИТЕКТУРЫ (Параллельно со старой) ===
+    # === ЗАПУСК НОВОЙ EVENT-DRIVEN АРХИТЕКТУРЫ ===
     from bot.core.event_bus import EventBus
-    from bot.workers.execution import ExecutionRiskWorker
     from bot.workers.market_data import MarketDataWorker
+    from bot.workers.execution import ExecutionRiskWorker
+    # from bot.workers.scanner import ScannerWorker        # Ожидает реализации
+    # from bot.workers.order_manager import OrderManager   # Ожидает реализации
+    # from bot.workers.notification import NotifyWorker    # Ожидает реализации
 
     global_bus = EventBus()
-    exec_worker = ExecutionRiskWorker(global_bus)
+    
+    # Инициализация воркеров
     md_worker = MarketDataWorker(global_bus)
+    exec_worker = ExecutionRiskWorker(global_bus)
+    
+    # В Python 3.11+ предпочтительнее использовать asyncio.TaskGroup, 
+    # но для обратной совместимости оставляем asyncio.create_task:
+    workers = [
+        asyncio.create_task(md_worker.run(), name="Worker-MarketData"),
+        asyncio.create_task(exec_worker.run(), name="Worker-Execution"),
+        # asyncio.create_task(scanner_worker.run(), name="Worker-Scanner"),
+    ]
 
-    asyncio.create_task(md_worker.run())
-    asyncio.create_task(exec_worker.run())
+    # Если какой-то воркер упадет, мы должны об этом узнать
+    def worker_callback(t: asyncio.Task):
+        try:
+            t.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.exception(f"Воркер {t.get_name()} завершился с ошибкой: {e}")
+
+    for task in workers:
+        task.add_done_callback(worker_callback)
+
     # ====================================================================
 
-    asyncio.create_task(cycle_loop()) # Старый монолит (пока оставляем)
+    # Сохраняем старые циклы (на период переходного этапа)
+    asyncio.create_task(cycle_loop())
     asyncio.create_task(report_loop())
+
+    # ... запуск веб-сервера aiohttp и graceful shutdown ...
     
     from bot.exchange.market_data import start_ws_ticker_stream
     asyncio.create_task(start_ws_ticker_stream())
