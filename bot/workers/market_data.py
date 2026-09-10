@@ -15,7 +15,7 @@ class MarketDataWorker:
             try:
                 tickers = await market_data.get_tickers()
                 if tickers:
-                    # ИСПРАВЛЕНИЕ: убрали await и передачу класса Event
+                    # ИСПРАВЛЕНИЕ: Вызываем синхронно, передаем строку и payload
                     self.bus.publish("PRICE_UPDATED", tickers)
             except Exception as e:
                 logger.error(f"MarketDataWorker error: {e}")
