@@ -1,7 +1,7 @@
 import asyncio
 from loguru import logger
 from bot.exchange.market_data import market_data
-from bot.core.event_bus import EventBus, Event
+from bot.core.event_bus import EventBus
 
 class MarketDataWorker:
     """Фоновый воркер. Забирает цены с биржи и кидает в шину событий."""
@@ -15,8 +15,8 @@ class MarketDataWorker:
             try:
                 tickers = await market_data.get_tickers()
                 if tickers:
-                    # Рассылаем тикеры всем подписанным воркерам (Execution, Scanner и т.д.)
-                    await self.bus.publish(Event(type="PRICE_UPDATED", payload=tickers))
+                    # Убрали await и объект Event — теперь просто вызываем метод
+                    self.bus.publish("PRICE_UPDATED", tickers)
             except Exception as e:
                 logger.error(f"MarketDataWorker error: {e}")
             
