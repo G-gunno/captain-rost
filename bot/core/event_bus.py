@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 from typing import Any, Dict, List
+from loguru import logger
 
 @dataclass
 class Event:
@@ -17,10 +18,11 @@ class EventBus:
             self.subscribers[event_type] = []
         queue = asyncio.Queue()
         self.subscribers[event_type].append(queue)
+        logger.debug(f"EventBus: Новый подписчик на событие '{event_type}'")
         return queue
 
     async def publish(self, event: Event) -> None:
-        """Мгновенная рассылка события всем подписчикам."""
+        """Мгновенная асинхронная рассылка события всем подписчикам."""
         if event.type in self.subscribers:
             for queue in self.subscribers[event.type]:
                 await queue.put(event)
