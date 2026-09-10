@@ -622,9 +622,21 @@ async def run_all(application):
         allowed_updates=["message", "edited_message", "callback_query"],
     )
 
-    await application.bot.set_my_commands([
+await application.bot.set_my_commands([
+        BotCommand("start", "🚀 Запустить торговлю"),
+        BotCommand("pause", "⏸ Пауза (с подтверждением)"),
+        BotCommand("resume", "▶️ Возобновить (с подтверждением)"),
         BotCommand("status", "📊 Статус: балансы и позиции"),
-        # ... твои команды
+        BotCommand("chart", "📈 График монеты (сделки и отмены)"),
+        BotCommand("learn", "🧠 Обучение: параметры, сектора, веса, память"),
+        BotCommand("news", "📰 Статус новостной аналитики"),
+        BotCommand("exitall", "🛑 Продать всё и остановить (с подтверждением)"),
+        BotCommand("resetstats", "📊 Сбросить статистику"),
+        BotCommand("resetlearn", "🧠♻️ Сбросить опыт обучения"),
+        BotCommand("log", "📄 Файл лога"),
+        BotCommand("autotune", "🎛 Автотюн: статус и вкл/выкл"),
+        BotCommand("info", "📖 Информация о боте"),
+        BotCommand("help", "📖 Справка"),
     ])
 
     await asyncio.to_thread(ensure_branch)
