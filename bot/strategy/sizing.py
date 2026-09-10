@@ -60,3 +60,30 @@ def buy_size(equity, score, thr, liquidity, free_usdt, kind="core", entry_mode="
     size = min(size, free_usdt * 0.95, equity * 0.20)
     
     return round(size, 2)
+
+# Добавь этот импорт в начало sizing.py, если его нет:
+# from bot.strategy.shadow import shadow
+
+def entry_offset(score, thr, regime, atr_pct, entry_mode="sniper"):
+    from bot.strategy.shadow import shadow # Ленивый импорт во избежание цикличности
+    hunt = shadow.hunt() 
+
+    if entry_mode == "rocket":
+        return max(shadow.capture(), atr_pct / 100 * 0.1)
+    elif entry_mode == "reversal":
+        return max(0.0, atr_pct / 100 * 0.15)
+
+    base_pullback = -atr_pct / 100 * 0.5 
+    surplus = score - thr
+    
+    if regime == "bear":
+        return min(hunt * 1.5, base_pullback * 1.5)  
+    elif regime == "neutral":
+        return min(hunt * 1.2, base_pullback * 1.2)  
+
+    if surplus >= 3.0:
+        return min(shadow.near(), base_pullback * 0.5)  
+    if surplus >= 1.5:
+        return min(hunt * 0.5, base_pullback * 0.8)
+
+    return min(hunt, base_pullback)
