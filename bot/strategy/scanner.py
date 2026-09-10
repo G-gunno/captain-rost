@@ -79,6 +79,7 @@ async def get_regime():
     e21, e50, e200 = ema(closes, 21)[-1], ema(closes, 50)[-1], ema(closes, 200)[-1]
     last = closes[-1]
     
+    # 1. Базовый тренд по BTC
     if e21 > e50 > e200:
         regime = "bull"
     elif e21 < e50 < e200:
@@ -86,32 +87,45 @@ async def get_regime():
     else:
         regime = "neutral"
 
-    if regime == "neutral":
-        tickers = await market_data.get_tickers()
-        if tickers:
-            tradable = [s for s, t in tickers.items() if is_tradable(s) and t["quote_volume"] >= 500_000]
-            if tradable:
-                green_alts = sum(1 for s in tradable if tickers[s]["change_pct"] > 3.0)
-                breadth_pct = (green_alts / len(tradable)) * 100
-                
-                if breadth_pct >= 40.0:
-                    regime = "bull"
-                    logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые. Режим принудительно переведен в 'bull' (Альтсезон).")
+    # 2. Оценка широты рынка (Market Breadth) НЕЗАВИСИМО от режима BTC
+    tickers = await market_data.get_tickers()
+    if tickers:
+        tradable = [s for s, t in tickers.items() if is_tradable(s) and t["quote_volume"] >= 500_000]
+        if tradable:
+            green_alts = sum(1 for s in tradable if tickers[s]["change_pct"] > 3.0)
+            breadth_pct = (green_alts / len(tradable)) * 100
+            
+            # Если половина рынка летит вверх — это мощный альтсезон, игнорируем слабость BTC
+            if breadth_pct >= 50.0:
+                regime = "bull"
+                logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые. Перевод в 'bull' (Мощный альтсезон).")
+            # Если BTC в медвежке, но 35%+ альтов активно растут — смягчаем до нейтрального
+            elif breadth_pct >= 35.0 and regime == "bear":
+                regime = "neutral"
+                logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые. 'bear' -> 'neutral' (Альтсезон игнорирует BTC).")
+            # Если флэт, но 40% растут -> бычка
+            elif breadth_pct >= 40.0 and regime == "neutral":
+                regime = "bull"
+                logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые. 'neutral' -> 'bull' (Локальный альтсезон).")
 
+    # 3. Макро-деньги (Stablecoins)
     stable_trend = get_macro_trend()
     fng = get_fear_and_greed()
     
     if stable_trend == "bull" and regime == "neutral":
         regime = "bull"
-        logger.info("Macro: Приток стейблкоинов! Режим принудительно переведен в 'bull'.")
+        logger.info("Macro: Приток стейблкоинов! 'neutral' -> 'bull'.")
     elif stable_trend == "bear" and regime == "bull":
         regime = "neutral" 
-        logger.info("Macro: Отток стейблкоинов! Бычий режим охлажден до 'neutral'.")
+        logger.info("Macro: Отток стейблкоинов! 'bull' -> 'neutral'.")
 
+    # 4. Сантимент (F&G)
     if fng < 40 and regime == "bull":
         regime = "neutral" 
-    elif fng > 75 and regime == "bear":
+    # Смягчили порог выхода из медвежки с 75 до 65
+    elif fng >= 65 and regime == "bear":
         regime = "neutral" 
+        logger.info(f"F&G: {fng}. 'bear' -> 'neutral' (Жадность толпы игнорирует EMA).")
 
     return regime, {"btc": last, "ema50": e50, "ema200": e200}
 
