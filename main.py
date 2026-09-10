@@ -326,8 +326,25 @@ async def run_all(application):
 
     await asyncio.to_thread(ensure_branch)
     set_notifier(send_chat)
-    asyncio.create_task(cycle_loop())
+    
+    # === ЗАПУСК НОВОЙ EVENT-DRIVEN АРХИТЕКТУРЫ (Параллельно со старой) ===
+    from bot.core.event_bus import EventBus
+    from bot.workers.execution import ExecutionRiskWorker
+    from bot.workers.market_data import MarketDataWorker
+
+    global_bus = EventBus()
+    exec_worker = ExecutionRiskWorker(global_bus)
+    md_worker = MarketDataWorker(global_bus)
+
+    asyncio.create_task(md_worker.run())
+    asyncio.create_task(exec_worker.run())
+    # ====================================================================
+
+    asyncio.create_task(cycle_loop()) # Старый монолит (пока оставляем)
     asyncio.create_task(report_loop())
+    
+    from bot.exchange.market_data import start_ws_ticker_stream
+    asyncio.create_task(start_ws_ticker_stream())
     
     from bot.exchange.market_data import start_ws_ticker_stream
     asyncio.create_task(start_ws_ticker_stream())
