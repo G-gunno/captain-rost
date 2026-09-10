@@ -33,7 +33,7 @@ def corr_txt(d) -> str:
     v = d.get("corr") if isinstance(d, dict) else None
     return f" · ₿ {v:.2f}" if v is not None else ""
 
-def pair_html(sym: str, data_obj: dict) -> str:
+def format_coin(sym: str, data_obj: dict) -> str:
     kind_tag = "🛰" if data_obj.get("kind") == "satellite" else "🏛"
     
     emode = data_obj.get("entry_mode", "")
@@ -50,3 +50,6 @@ def pair_html(sym: str, data_obj: dict) -> str:
     chart_url = f"{public_url}/chart?symbol={base_sym}USDT"
     
     return f"{mode_tag} {kind_tag} <a href='{chart_url}'><b>{base_sym}</b></a>{' ' + em if em else ''} · <i>{sector}</i>"
+
+# Алиас для обратной совместимости старого кода и новых воркеров
+pair_html = format_coin
