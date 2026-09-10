@@ -622,7 +622,7 @@ async def run_all(application):
         allowed_updates=["message", "edited_message", "callback_query"],
     )
 
-await application.bot.set_my_commands([
+    await application.bot.set_my_commands([
         BotCommand("start", "🚀 Запустить торговлю"),
         BotCommand("pause", "⏸ Пауза (с подтверждением)"),
         BotCommand("resume", "▶️ Возобновить (с подтверждением)"),
