@@ -327,13 +327,42 @@ async def run_all(application):
     await asyncio.to_thread(ensure_branch)
     set_notifier(send_chat)
     
-    # === ЗАПУСК НОВОЙ EVENT-DRIVEN АРХИТЕКТУРЫ ===
+# === ЗАПУСК НОВОЙ EVENT-DRIVEN АРХИТЕКТУРЫ ===
     from bot.core.event_bus import EventBus
     from bot.workers.market_data import MarketDataWorker
     from bot.workers.execution import ExecutionRiskWorker
-    # from bot.workers.scanner import ScannerWorker        # Ожидает реализации
-    # from bot.workers.order_manager import OrderManager   # Ожидает реализации
-    # from bot.workers.notification import NotifyWorker    # Ожидает реализации
+    from bot.workers.scanner import ScannerWorker
+    from bot.workers.order_manager import OrderManagerWorker
+    from bot.workers.notification import NotificationWorker
+
+    global_bus = EventBus()
+    
+    # Инициализация воркеров
+    md_worker = MarketDataWorker(global_bus)
+    exec_worker = ExecutionRiskWorker(global_bus)
+    scanner_worker = ScannerWorker(global_bus)
+    order_manager_worker = OrderManagerWorker(global_bus)
+    notify_worker = NotificationWorker(global_bus, send_chat_func=send_chat)
+    
+    workers = [
+        asyncio.create_task(md_worker.run(), name="Worker-MarketData"),
+        asyncio.create_task(exec_worker.run(), name="Worker-Execution"),
+        asyncio.create_task(scanner_worker.run(), name="Worker-Scanner"),
+        asyncio.create_task(order_manager_worker.run(), name="Worker-OrderManager"),
+        asyncio.create_task(notify_worker.run(), name="Worker-Notification"),
+    ]
+
+    def worker_callback(t: asyncio.Task):
+        try:
+            t.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.exception(f"Воркер {t.get_name()} завершился с ошибкой: {e}")
+
+    for task in workers:
+        task.add_done_callback(worker_callback)
+    # ====================================================================
 
     global_bus = EventBus()
     
