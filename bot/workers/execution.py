@@ -129,17 +129,22 @@ class ExecutionRiskWorker:
             paper.save()
 
     def _update_trailing_stop(self, sym: str, pos: dict, max_p: float) -> bool:
-        # Для скорости используем % вместо ATR, если ATR не закэширован
-        atr_pct = 0.02 
-        breakeven = pos["avg"] * 1.002
+        # Расширяем дыхание с 2% до 3% базово
+        atr_pct = 0.03 
+        breakeven = pos["avg"] * 1.0025 # Уверенный безубыток с учетом комсы
         
         new_sl = pos["sl"]
+        # Перенос в БУ, когда выросли на 3%
         if max_p >= pos["avg"] * (1 + atr_pct):
             new_sl = max(new_sl, breakeven)
+            
+        # Трал на дистанции 3.6% (1.2 * 3%) вниз от максимума
         if max_p >= pos["avg"] * (1 + atr_pct * 1.5):
-            new_sl = max(new_sl, max_p * (1 - atr_pct))
+            new_sl = max(new_sl, max_p * (1 - atr_pct * 1.2))
+            
+        # Жесткий трал на дистанции 2.4% вниз от максимума, если улетели в стратосферу (>7.5%)
         if max_p >= pos["avg"] * (1 + atr_pct * 2.5):
-            new_sl = max(new_sl, max_p * (1 - atr_pct * 0.5))
+            new_sl = max(new_sl, max_p * (1 - atr_pct * 0.8))
 
         if new_sl > pos["sl"]:
             pos["sl"] = round(new_sl, 8)
