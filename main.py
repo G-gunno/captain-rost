@@ -66,18 +66,56 @@ async def webhook_handler(request):
 
 async def chart_handler(request):
     symbol = request.query.get("symbol")
+    interval_str = request.query.get("interval", "15") # По умолчанию 15 минут
+    
     if not symbol:
         return web.Response(text="Укажите тикер, например ?symbol=LINKUSDT", status=400)
     symbol = symbol.upper()
     if not symbol.endswith("USDT"): symbol += "USDT"
 
+    # Разрешенные таймфреймы Bybit
+    valid_intervals = ["1", "3", "5", "15", "30", "60", "120", "240", "D", "W"]
+    if interval_str not in valid_intervals:
+        interval_str = "15"
+
     def make_chart():
         try:
             from bot.utils.visualizer import TradeVisualizer
-            viz = TradeVisualizer(log_path="logs/bot.log", symbol=symbol)
+            viz = TradeVisualizer(log_path="logs/bot.log", symbol=symbol, interval=interval_str)
             fig = viz.build_chart(show=False) 
             if fig is None: return None
-            return fig.to_html(include_plotlyjs="cdn", full_html=True)
+            
+            # Генерируем базовый HTML от Plotly
+            raw_html = fig.to_html(include_plotlyjs="cdn", full_html=True)
+            
+            # --- Внедряем плавающую панель с кнопками таймфреймов (Без тройных кавычек) ---
+            buttons_html = (
+                '<div style="position: absolute; top: 15px; left: 15px; z-index: 1000; '
+                'background: rgba(30, 30, 30, 0.85); padding: 10px; border-radius: 8px; '
+                'border: 1px solid #444; font-family: Arial, sans-serif; '
+                'box-shadow: 0 4px 6px rgba(0,0,0,0.3);">'
+                '<span style="color: #ccc; margin-right: 10px; font-size: 14px;">Таймфрейм:</span>'
+            )
+            
+            for tf in valid_intervals:
+                # Подсвечиваем активный таймфрейм синим цветом
+                bg_color = "#2962ff" if tf == interval_str else "#444"
+                text_color = "#fff" if tf == interval_str else "#ccc"
+                hover_style = "this.style.background='#555'" if tf != interval_str else ""
+                out_style = f"this.style.background='{bg_color}'"
+                
+                buttons_html += (
+                    f'<a href="?symbol={symbol}&interval={tf}" '
+                    f'style="text-decoration: none; color: {text_color}; background: {bg_color}; '
+                    f'padding: 4px 8px; margin: 0 2px; border-radius: 4px; font-size: 13px; transition: 0.2s;" '
+                    f'onmouseover="{hover_style}" onmouseout="{out_style}">{tf}</a>'
+                )
+            
+            buttons_html += "</div>"
+            
+            # Вставляем нашу панель сразу после открывающего тега <body>
+            return raw_html.replace("<body>", f"<body style='margin:0; padding:0; background-color:#111;'>\n{buttons_html}")
+            
         except Exception as e:
             return str(e)
 
