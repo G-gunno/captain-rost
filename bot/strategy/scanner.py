@@ -122,10 +122,14 @@ async def get_regime():
     # 4. Сантимент (F&G)
     if fng < 40 and regime == "bull":
         regime = "neutral" 
-    # Смягчили порог выхода из медвежки с 75 до 65
-    elif fng >= 65 and regime == "bear":
+    # Снижаем порог с 65 до 55 (Greed официально начинается с 55)
+    elif fng >= 55 and regime == "bear":
         regime = "neutral" 
         logger.info(f"F&G: {fng}. 'bear' -> 'neutral' (Жадность толпы игнорирует EMA).")
+    # Добавляем жесткий переход в бычку при сильной жадности (даже во флэте)
+    elif fng >= 70 and regime == "neutral":
+        regime = "bull"
+        logger.info(f"F&G: {fng}. 'neutral' -> 'bull' (Высокая жадность толкает рынок).")
 
     return regime, {"btc": last, "ema50": e50, "ema200": e200}
 
