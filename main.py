@@ -88,13 +88,13 @@ async def chart_handler(request):
             # Генерируем базовый HTML от Plotly
             raw_html = fig.to_html(include_plotlyjs="cdn", full_html=True)
             
-            # --- Внедряем плавающую панель с кнопками таймфреймов (Без тройных кавычек) ---
+            # --- Плавающая панель по центру экрана ---
             buttons_html = (
-                '<div style="position: absolute; top: 15px; left: 15px; z-index: 1000; '
-                'background: rgba(30, 30, 30, 0.85); padding: 10px; border-radius: 8px; '
+                '<div style="position: absolute; top: 15px; left: 50%; transform: translateX(-50%); z-index: 1000; '
+                'background: rgba(30, 30, 30, 0.85); padding: 8px 15px; border-radius: 8px; '
                 'border: 1px solid #444; font-family: Arial, sans-serif; '
-                'box-shadow: 0 4px 6px rgba(0,0,0,0.3);">'
-                '<span style="color: #ccc; margin-right: 10px; font-size: 14px;">Таймфрейм:</span>'
+                'box-shadow: 0 4px 6px rgba(0,0,0,0.3); display: flex; align-items: center;">'
+                '<span style="color: #ccc; margin-right: 12px; font-size: 14px;">Таймфрейм:</span>'
             )
             
             for tf in valid_intervals:
@@ -107,7 +107,7 @@ async def chart_handler(request):
                 buttons_html += (
                     f'<a href="?symbol={symbol}&interval={tf}" '
                     f'style="text-decoration: none; color: {text_color}; background: {bg_color}; '
-                    f'padding: 4px 8px; margin: 0 2px; border-radius: 4px; font-size: 13px; transition: 0.2s;" '
+                    f'padding: 5px 10px; margin: 0 3px; border-radius: 4px; font-size: 13px; font-weight: bold; transition: 0.2s;" '
                     f'onmouseover="{hover_style}" onmouseout="{out_style}">{tf}</a>'
                 )
             
