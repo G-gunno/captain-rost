@@ -155,7 +155,7 @@ class PositionManagerWorker:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Токсичные новости")
                 bot_state.set_cooldown(sym, 7200)
-                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ✂️📰 (⏸️ 2ч)")
+                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🤬📰 (⏸️ 2ч)")
                 continue
 
             score_now, candles = await live_score(sym, t, regime, news_items)
