@@ -164,45 +164,61 @@ class PositionManagerWorker:
             name = await get_coin_name(base)
             neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
 
+            # Токсичные новости
             if neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33):
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Токсичные новости")
                 self._fomo_cooldowns[sym] = current_time + 7200
-                self._notify(f"⚠️ <b>Снят</b> · {pair_html(sym, order)} · 🤬📰 {neg}/{mentions} (⏸️ 2ч)")
+                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🤬📰 (⏸️ 2ч)")
                 continue
 
             score_now, candles = await live_score(sym, t, regime, news_items)
             if score_now is None: continue
             
+            # Сигнал умер
             if score_now <= thr - 1.5:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Сигнал умер")
                 self._fomo_cooldowns[sym] = current_time + 7200
-                self._notify(f"⚠️ <b>Снят</b> · {pair_html(sym, order)} · ☠️ (⏸️ 2ч)")
+                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️ (⏸️ 2ч)")
                 continue
                 
+            # Сигнал ослаб
             if score_now < thr - 0.5:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Сигнал ослаб")
                 self._fomo_cooldowns[sym] = current_time + 1800
-                self._notify(f"⚠️ <b>Снят</b> · {pair_html(sym, order)} · 🪫 (⏸️ 30м)")
+                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🪫 (⏸️ 30м)")
                 continue
 
+            # Таймаут ожидания
             if (current_time - order["created"]) > 7200:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Тайм-аут 2ч")
                 self._fomo_cooldowns[sym] = current_time + 1800
-                self._notify(f"⚠️ <b>Снят</b> · {pair_html(sym, order)} · ⏳ (⏸️ 30м)")
+                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ⏳ (⏸️ 30м)")
                 continue
 
-            # Реквот (сдвиг за ценой)
+            # --- РЕКВОТ (сдвиг за ценой) ---
             a = atr(candles)
             if a <= 0: continue
             
             atr_pct = a / t["last"] * 100
             entry_mode = order.get("entry_mode", "sniper")
+
+            # 🔥 УМНАЯ ОХОТА: Апгрейд снайпера в ракету, если сигнал всё ещё очень сильный
+            if entry_mode == "sniper" and score_now >= thr:
+                time_waiting = current_time - order["created"]
+                price_running_away = t["last"] > order["price"] + 0.8 * a
+                
+                # Если ждем дольше 10 минут или цена начала убегать вверх -> включаем агрессию
+                if time_waiting > 600 or price_running_away:
+                    order["entry_mode"] = "rocket"
+                    entry_mode = "rocket"
+                    order["hunt_count"] = 0 # Даем 3 попытки догнать
+                    paper.log_event(sym, "order_moved", t["last"], "Апгрейд до 🚀")
+
             off = entry_offset(score_now, thr, regime, atr_pct, entry_mode)
-            
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
             dev_pct = abs(ideal_price - old_price) / old_price * 100
@@ -210,12 +226,13 @@ class PositionManagerWorker:
             action_type = None
 
             if entry_mode in ("rocket", "reversal"):
+                # Если ракета отстает - двигаем вверх за ценой (охота)
                 if ideal_price > old_price and dev_pct >= 0.2:
-                    if order.get("hunt_count", 0) >= 2:
+                    if order.get("hunt_count", 0) >= 3:
                         paper.cancel_order(order["id"])
-                        paper.log_event(sym, "cancel", t["last"], "3 попытки догнать")
-                        self._fomo_cooldowns[sym] = current_time + 1800
-                        self._notify(f"⚠️ <b>Снят</b> · {pair_html(sym, order)} · 🏃 (⏸️ 30м)")
+                        paper.log_event(sym, "cancel", t["last"], "Не догнали ракету")
+                        self._fomo_cooldowns[sym] = current_time + 3600
+                        self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🏃‍♂️💨 (⏸️ 1ч)")
                         continue
                     order["price"] = ideal_price
                     order["hunt_count"] = order.get("hunt_count", 0) + 1
@@ -226,12 +243,13 @@ class PositionManagerWorker:
                     action_type = "correct"
                     price_icon = "⬇️"
             else:
+                # Снайпер двигает лимитку только ВНИЗ (вслед за падающей ценой)
                 ideal_price = min(ideal_price, t.get("bid1", t["last"]))
                 if t["last"] > old_price + 1.5 * a:
                     paper.cancel_order(order["id"])
                     paper.log_event(sym, "cancel", t["last"], "Улетела без нас")
                     self._fomo_cooldowns[sym] = current_time + 1800
-                    self._notify(f"⚠️ <b>Снят</b> · {pair_html(sym, order)} · 🚀 (⏸️ 30м)")
+                    self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🚀 (⏸️ 30м)")
                     continue
                 if ideal_price < old_price and dev_pct >= 0.2:
                     order["price"] = ideal_price
