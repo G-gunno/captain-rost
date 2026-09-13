@@ -213,6 +213,16 @@ def score_symbol(candles_15m, candles_1h, t, regime):
 
     if vol_ratio > w["vol_lo"]: score += learner.weight("volume"); reasons.append(f"объём x{vol_ratio:.1f}"); keys.append("volume")
     
+    # 🛑 АНТИ-ФЕЙКАУТ (Защита от BLAST и STABLE)
+    last_candle = candles_15m[-1]
+    candle_range = last_candle["high"] - last_candle["low"]
+    wick_up = last_candle["high"] - max(last_candle["close"], last_candle["open"])
+    
+    # Если тень сверху занимает больше 50% всей свечи на повышенном объеме — это ловушка маркетмейкера
+    if candle_range > 0 and (wick_up / candle_range) > 0.5 and vol_ratio > 1.5:
+        score -= 3.0
+        reasons.append("отвержение (длинная тень сверху)")
+    
     # 🧲 ЛОВЕЦ ДНА (Reversal) - перекрывает штрафы за падающий тренд
     if t["change_pct"] <= -7.0 and r <= 35 and vol_ratio >= 2.5:
         score += learner.weight("reversal") * 2.0
