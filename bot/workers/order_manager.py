@@ -45,12 +45,10 @@ class OrderManagerWorker:
         base_min, _ = tier_limits(equity)
         
         current_time = int(time.time())
-        # Очистка кулдаунов
         for k in list(self._fomo_cooldowns.keys()):
             if self._fomo_cooldowns[k] < current_time:
                 del self._fomo_cooldowns[k]
 
-        # Перебор найденных сканером кандидатов
         for cand in candidates:
             sym = cand["symbol"]
 
@@ -73,16 +71,22 @@ class OrderManagerWorker:
             a = cand["atr"]
             if a <= 0: continue
 
-            # Расчет стопов и тейков (из твоей логики)
             if kind == "satellite":
-                base_sl_mult = 0.75 if is_mom else 1.5
+                # Даем больше воздуха ловцу дна
+                base_sl_mult = 0.75 if is_mom else (2.0 if entry_mode == "reversal" else 1.5)
                 sl_dist_pct = max(min(base_sl_mult * a / entry * 100 * learner.weight("sl_mult"), 5.0), 2.0)
                 tp_dist_pct = max(min(2.5 * a / entry * 100 * learner.weight("tp_mult"), 12.0), sl_dist_pct * 2.0)
                 sl = entry * (1 - sl_dist_pct / 100)
                 tp = entry * (1 + tp_dist_pct / 100)
                 min_rr = 2.0
             else:
-                sl_dist_atr = 0.6 * a if is_mom else 1.2 * a
+                if is_mom:
+                    sl_dist_atr = 0.6 * a
+                elif entry_mode == "reversal":
+                    sl_dist_atr = 2.0 * a # 🔧 Широкий стоп для "ножей"
+                else:
+                    sl_dist_atr = 1.2 * a
+                
                 sl_dist_raw = sl_dist_atr * learner.weight("sl_mult")
                 tp_dist_raw = max(2.0 * a * learner.weight("tp_mult"), sl_dist_raw * 1.5)
                 sl = entry - sl_dist_raw
@@ -96,20 +100,17 @@ class OrderManagerWorker:
             if tp <= entry or sl >= entry or round(rr, 2) < min_rr:
                 continue
 
-            # Сайзинг
             size = buy_size(equity, cand["score"], thr, cand["liquidity"], paper.usdt,
                             kind=kind, entry_mode=entry_mode, size_multiplier=cand.get("size_mult", 1.0))
 
             if size < 10: continue
 
-            # Проверка лимитов сателлитов
             if kind == "satellite":
                 sat_exp = sum(p["qty"] * tickers.get(s, {}).get("last", 0) for s, p in paper.positions.items() if p.get("kind") == "satellite")
                 sat_exp += sum(o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite")
                 if sat_exp >= equity * sat_limit / 100:
                     continue
 
-            # === ЛОГИКА РОТАЦИИ ПОРТФЕЛЯ ===
             planned_sells, planned_cancels = [], []
             lim = other_lim if sector == "Other" else sec_lim
             sector_count = sum(1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector)
@@ -134,7 +135,6 @@ class OrderManagerWorker:
             proj_usdt = paper.usdt + sum(w_pos["qty"] * last for _, w_pos, last, _, _ in planned_sells)
 
             if proj_pending + size > proj_usdt:
-                # Отмена слабых ордеров
                 available_orders = [o for o in paper.orders if o not in planned_cancels]
                 if available_orders:
                     w_o = min(available_orders, key=lambda o: o.get("score", 0))
@@ -142,7 +142,6 @@ class OrderManagerWorker:
                         planned_cancels.append(w_o)
                         proj_pending -= w_o["qty"] * w_o["price"]
 
-                # Продажа слабых позиций
                 if is_mom and (proj_pending + size > proj_usdt):
                     planned_syms = [s[0] for s in planned_sells]
                     available_pos = [(s, p) for s, p in paper.positions.items() if s not in planned_syms]
@@ -156,9 +155,8 @@ class OrderManagerWorker:
                                 proj_usdt += w_p["qty"] * t_w["last"]
 
             if proj_pending + size > proj_usdt:
-                continue # Денег всё равно нет
+                continue 
 
-            # Выполнение ротации
             for w_o in planned_cancels:
                 paper.cancel_order(w_o["id"])
                 self._notify(f"🔄 <b>Ротация ордера</b> · <b>{w_o['symbol'][:-4]}</b> снят\nМесто для <b>{sym[:-4]}</b>")
@@ -167,12 +165,14 @@ class OrderManagerWorker:
                 ex = paper._sell(w_sym, last, reason, regime_now=regime)
                 self._notify(f"🔄 <b>{reason}</b> · <b>{w_sym[:-4]}</b> → <b>{sym[:-4]}</b>\n💵 Освобождено {usd(ex['pnl'])}")
 
-            # Выставление ордера
             qty = size / entry
             order = paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl, score=cand["score"], reason_keys=cand.get("reason_keys", []))
             order.update({"kind": kind, "sector": sector, "tier": cand.get("tier"), "corr": cand.get("corr"), "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode})
             paper.save()
-            paper.log_event(sym, "order_placed", entry, mode=entry_mode)
+            
+            # Сохраняем текстовые причины для вывода в график
+            reasons_html = "<br>".join([f"• {r}" for r in cand.get("reasons", [])])
+            paper.log_event(sym, "order_placed", entry, text=reasons_html, mode=entry_mode)
 
             tp_pct = (tp - entry) / entry * 100
             sl_pct = (sl - entry) / entry * 100
