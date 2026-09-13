@@ -10,7 +10,6 @@ LOG_TIMEZONE = "Europe/Moscow"
 
 class TradeVisualizer:
     def __init__(self, log_path: str, symbol: str, interval: str = "15"):
-        # log_path больше не нужен для текстового файла, читаем напрямую из state
         self.state_path = Path(os.getenv("STORAGE_DIR", "storage")) / "paper_state.json"
         self.symbol = symbol.upper()
         self.base_sym = self.symbol.replace("USDT", "")
@@ -69,6 +68,10 @@ class TradeVisualizer:
         if df_kline.empty:
             return None
 
+        # Считаем индикаторы для отрисовки
+        df_kline['EMA21'] = df_kline['close'].ewm(span=21, adjust=False).mean()
+        df_kline['EMA50'] = df_kline['close'].ewm(span=50, adjust=False).mean()
+
         fig = go.Figure()
         
         # Свечи
@@ -77,6 +80,10 @@ class TradeVisualizer:
             low=df_kline['low'], close=df_kline['close'], name='Цена',
             increasing_line_color='rgba(38, 166, 154, 0.8)', decreasing_line_color='rgba(239, 83, 80, 0.8)'
         ))
+
+        # Линии индикаторов
+        fig.add_trace(go.Scatter(x=df_kline['datetime'], y=df_kline['EMA21'], mode='lines', name='EMA 21', line=dict(color='rgba(255, 235, 59, 0.8)', width=1.5)))
+        fig.add_trace(go.Scatter(x=df_kline['datetime'], y=df_kline['EMA50'], mode='lines', name='EMA 50', line=dict(color='rgba(255, 152, 0, 0.8)', width=1.5)))
 
         # Выставляем маркеры по типам событий
         colors = {
@@ -92,17 +99,24 @@ class TradeVisualizer:
             mask = df_ev['type'] == ev_type
             if mask.any():
                 subset = df_ev[mask]
-                hover_text = subset.apply(lambda row: f"Тип: {row.get('mode', '')}<br>Инфо: {row.get('text', '')}<br>RSI: {row.get('rsi', '')}", axis=1)
+                # Формируем красивый тултип. Если текст пустой, не рисуем пустую строку
+                def format_hover(row):
+                    title = f"<b>{row.get('mode', name) or name}</b>"
+                    info = f"<br><span style='color: #aaa;'>{row.get('text', '')}</span>" if row.get('text') else ""
+                    rsi = f"<br><i>RSI: {row.get('rsi')}</i>" if row.get('rsi') and not pd.isna(row.get('rsi')) else ""
+                    return title + info + rsi
+                
+                hover_text = subset.apply(format_hover, axis=1)
                 
                 fig.add_trace(go.Scatter(
                     x=subset['datetime'], y=subset['price'], mode='markers',
-                    marker=dict(symbol=symbol, size=12, color=color, line=dict(width=1, color='white')),
+                    marker=dict(symbol=symbol, size=13, color=color, line=dict(width=1, color='white')),
                     name=name, text=hover_text, hoverinfo="text+y"
                 ))
 
         fig.update_layout(
             title=f"История торгов: {self.symbol}", template="plotly_dark", xaxis_rangeslider_visible=False,
-            hovermode="x unified"
+            hovermode="x unified", hoverlabel=dict(bgcolor="rgba(20, 20, 20, 0.9)", font_size=13)
         )
         if show: fig.show()
         return fig
