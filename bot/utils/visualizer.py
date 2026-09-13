@@ -9,7 +9,7 @@ from pathlib import Path
 LOG_TIMEZONE = "Europe/Moscow" 
 
 class TradeVisualizer:
-    def __init__(self, log_path: str, symbol: str, interval: int = 1):
+    def __init__(self, log_path: str, symbol: str, interval: str = "15"):
         # log_path больше не нужен для текстового файла, читаем напрямую из state
         self.state_path = Path(os.getenv("STORAGE_DIR", "storage")) / "paper_state.json"
         self.symbol = symbol.upper()
