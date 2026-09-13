@@ -2,11 +2,14 @@ import os
 import base64
 import time
 import threading
+import asyncio
 
 import httpx
 from loguru import logger
 
-_lock = threading.Lock()
+# Глобальный лок для защиты от 409 Conflict при многопоточном доступе к GitHub API
+_github_lock = threading.Lock()
+
 GITHUB_API = "https://api.github.com"
 _last_get_sha = {}  # кэш SHA по path: {path: sha}
 
@@ -35,15 +38,16 @@ def ensure_branch():
     repo = _repo()
     if not repo or not os.getenv("GITHUB_TOKEN"):
         return
-    code, main_ref = _do("GET", f"{GITHUB_API}/repos/{repo}/git/ref/heads/main")
-    if code != 200:
-        logger.error(f"remote_state: не удалось получить main ref: {code}")
-        return
-    sha = main_ref.get("object", {}).get("sha")
-    code, _ = _do("POST", f"{GITHUB_API}/repos/{repo}/git/refs",
-                  json={"ref": "refs/heads/learner-state", "sha": sha})
-    if code in (201, 422):
-        logger.info("remote_state: ветка learner-state готова")
+    with _github_lock:
+        code, main_ref = _do("GET", f"{GITHUB_API}/repos/{repo}/git/ref/heads/main")
+        if code != 200:
+            logger.error(f"remote_state: не удалось получить main ref: {code}")
+            return
+        sha = main_ref.get("object", {}).get("sha")
+        code, _ = _do("POST", f"{GITHUB_API}/repos/{repo}/git/refs",
+                      json={"ref": "refs/heads/learner-state", "sha": sha})
+        if code in (201, 422):
+            logger.info("remote_state: ветка learner-state готова")
 
 
 def _get_sha(path):
@@ -63,17 +67,19 @@ def download_state(path):
     repo = _repo()
     if not repo or not os.getenv("GITHUB_TOKEN"):
         return None
-    try:
-        code, data = _do("GET", f"{GITHUB_API}/repos/{repo}/contents/{path}",
-                         params={"ref": "learner-state"})
-        if code != 200:
+        
+    with _github_lock:
+        try:
+            code, data = _do("GET", f"{GITHUB_API}/repos/{repo}/contents/{path}",
+                             params={"ref": "learner-state"})
+            if code != 200:
+                return None
+            raw = base64.b64decode(data.get("content", "")).decode()
+            import json
+            return json.loads(raw)
+        except Exception as e:
+            logger.error(f"remote_state download error: {e}")
             return None
-        raw = base64.b64decode(data.get("content", "")).decode()
-        import json
-        return json.loads(raw)
-    except Exception as e:
-        logger.error(f"remote_state download error: {e}")
-        return None
 
 
 def upload_state(path, payload):
@@ -86,10 +92,9 @@ def upload_state(path, payload):
     content = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode()).decode()
     message = f"auto: update {path}"
 
-    # Сериализуем записи по path, чтобы два файла не дрались одновременно
-    with _lock:
+    # Блокируем ВСЕ попытки сохранения в GitHub от всех потоков, пока один не закончит
+    with _github_lock:
         for attempt in range(3):
-            # Получаем свежий SHA перед каждой попыткой
             sha, old_content = _get_sha(path)
 
             body = {
@@ -103,19 +108,16 @@ def upload_state(path, payload):
             code, data = _do("PUT", f"{GITHUB_API}/repos/{repo}/contents/{path}", json=body)
 
             if code in (200, 201):
-                # Успех — обновляем кэш SHA
                 new_sha = data.get("content", {}).get("sha")
                 if new_sha:
                     _last_get_sha[path] = new_sha
                 return
 
             if code == 409:
-                # Конфликт версий — ждём и пробуем снова со свежим SHA
                 logger.warning(f"remote_state: 409 conflict on {path}, retry {attempt+1}/3")
-                time.sleep(0.5)
+                time.sleep(1.0) # Увеличили паузу до 1 сек, чтобы GitHub точно обновил хэш
                 continue
 
-            # Другая ошибка — логируем и выходим
             logger.error(f"remote_state upload error: {code} {data}")
             return
 
