@@ -8,6 +8,7 @@ from bot.strategy.sizing import buy_size, portfolio_limits, tier_limits, entry_o
 from bot.strategy.scanner import threshold
 from bot.strategy.learner import learner
 from bot.utils.format import pair_html, corr_txt, funding_line, usd, fmt_price, fmt_pct
+from bot.core.state import bot_state
 
 class OrderManagerWorker:
     """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров."""
@@ -15,7 +16,6 @@ class OrderManagerWorker:
     def __init__(self, bus: EventBus):
         self.bus = bus
         self.signal_queue = self.bus.subscribe("SIGNALS_READY", maxsize=2)
-        self._fomo_cooldowns = {}
 
     async def run(self):
         logger.info("💼 Order Manager запущен: контроль портфеля и ротация...")
@@ -30,7 +30,6 @@ class OrderManagerWorker:
                 logger.exception(f"OrderManager error: {e}")
 
     def _notify(self, text: str, urgent: bool = False):
-        """Хелпер для быстрой отправки в шину NotificationWorker"""
         self.bus.publish("NOTIFY", {"text": text, "urgent": urgent})
 
     async def _process_signals(self, payload: dict):
@@ -44,16 +43,13 @@ class OrderManagerWorker:
         sat_limit = learner.satellite_limit()
         base_min, _ = tier_limits(equity)
         
-        current_time = int(time.time())
-        for k in list(self._fomo_cooldowns.keys()):
-            if self._fomo_cooldowns[k] < current_time:
-                del self._fomo_cooldowns[k]
-
         for cand in candidates:
             sym = cand["symbol"]
 
-            if self._fomo_cooldowns.get(sym, 0) > current_time:
+            # ГЛОБАЛЬНАЯ ПРОВЕРКА КУЛДАУНА
+            if bot_state.is_on_cooldown(sym):
                 continue
+                
             if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
                 continue
 
@@ -72,7 +68,6 @@ class OrderManagerWorker:
             if a <= 0: continue
 
             if kind == "satellite":
-                # Даем больше воздуха ловцу дна
                 base_sl_mult = 0.75 if is_mom else (2.0 if entry_mode == "reversal" else 1.5)
                 sl_dist_pct = max(min(base_sl_mult * a / entry * 100 * learner.weight("sl_mult"), 5.0), 2.0)
                 tp_dist_pct = max(min(2.5 * a / entry * 100 * learner.weight("tp_mult"), 12.0), sl_dist_pct * 2.0)
@@ -80,12 +75,9 @@ class OrderManagerWorker:
                 tp = entry * (1 + tp_dist_pct / 100)
                 min_rr = 2.0
             else:
-                if is_mom:
-                    sl_dist_atr = 0.6 * a
-                elif entry_mode == "reversal":
-                    sl_dist_atr = 2.0 * a # 🔧 Широкий стоп для "ножей"
-                else:
-                    sl_dist_atr = 1.2 * a
+                if is_mom: sl_dist_atr = 0.6 * a
+                elif entry_mode == "reversal": sl_dist_atr = 2.0 * a
+                else: sl_dist_atr = 1.2 * a
                 
                 sl_dist_raw = sl_dist_atr * learner.weight("sl_mult")
                 tp_dist_raw = max(2.0 * a * learner.weight("tp_mult"), sl_dist_raw * 1.5)
@@ -170,7 +162,6 @@ class OrderManagerWorker:
             order.update({"kind": kind, "sector": sector, "tier": cand.get("tier"), "corr": cand.get("corr"), "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode})
             paper.save()
             
-            # Сохраняем текстовые причины для вывода в график
             reasons_html = "<br>".join([f"• {r}" for r in cand.get("reasons", [])])
             paper.log_event(sym, "order_placed", entry, text=reasons_html, mode=entry_mode)
 
