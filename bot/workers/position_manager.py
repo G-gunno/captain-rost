@@ -166,9 +166,9 @@ class PositionManagerWorker:
 
             if neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33):
                 paper.cancel_order(order["id"])
-                self._fomo_cooldowns[sym] = current_time + 7200
                 paper.log_event(sym, "cancel", t["last"], "Токсичные новости")
-                self._notify(f"✂️📰 <b>Ордер снят</b> · {pair_html(sym, order)} · негатив {neg}/{mentions} (⏸️ 2ч)")
+                self._fomo_cooldowns[sym] = current_time + 7200
+                self._notify(f"⚠️ <b>Снят</b> · {pair_html(sym, order)} · 🤬📰 {neg}/{mentions} (⏸️ 2ч)")
                 continue
 
             score_now, candles = await live_score(sym, t, regime, news_items)
@@ -176,23 +176,23 @@ class PositionManagerWorker:
             
             if score_now <= thr - 1.5:
                 paper.cancel_order(order["id"])
-                self._fomo_cooldowns[sym] = current_time + 7200
                 paper.log_event(sym, "cancel", t["last"], "Сигнал умер")
-                self._notify(f"🪫 <b>Ордер снят</b> · {pair_html(sym, order)} · умер (⏸️ 2ч)")
+                self._fomo_cooldowns[sym] = current_time + 7200
+                self._notify(f"⚠️ <b>Снят</b> · {pair_html(sym, order)} · ☠️ (⏸️ 2ч)")
                 continue
                 
             if score_now < thr - 0.5:
                 paper.cancel_order(order["id"])
-                self._fomo_cooldowns[sym] = current_time + 1800
                 paper.log_event(sym, "cancel", t["last"], "Сигнал ослаб")
-                self._notify(f"🪫 <b>Ордер снят</b> · {pair_html(sym, order)} · ослаб (⏸️ 30м)")
+                self._fomo_cooldowns[sym] = current_time + 1800
+                self._notify(f"⚠️ <b>Снят</b> · {pair_html(sym, order)} · 🪫 (⏸️ 30м)")
                 continue
 
             if (current_time - order["created"]) > 7200:
                 paper.cancel_order(order["id"])
-                self._fomo_cooldowns[sym] = current_time + 1800
                 paper.log_event(sym, "cancel", t["last"], "Тайм-аут 2ч")
-                self._notify(f"⏳ <b>Ордер снят</b> · {pair_html(sym, order)} · таймаут (⏸️ 30м)")
+                self._fomo_cooldowns[sym] = current_time + 1800
+                self._notify(f"⚠️ <b>Снят</b> · {pair_html(sym, order)} · ⏳ (⏸️ 30м)")
                 continue
 
             # Реквот (сдвиг за ценой)
@@ -213,9 +213,9 @@ class PositionManagerWorker:
                 if ideal_price > old_price and dev_pct >= 0.2:
                     if order.get("hunt_count", 0) >= 2:
                         paper.cancel_order(order["id"])
-                        self._fomo_cooldowns[sym] = current_time + 1800
                         paper.log_event(sym, "cancel", t["last"], "3 попытки догнать")
-                        self._notify(f"🏃 <b>Ордер снят (Убежала)</b> · {pair_html(sym, order)} · (⏸️ 30м)")
+                        self._fomo_cooldowns[sym] = current_time + 1800
+                        self._notify(f"⚠️ <b>Снят</b> · {pair_html(sym, order)} · 🏃 (⏸️ 30м)")
                         continue
                     order["price"] = ideal_price
                     order["hunt_count"] = order.get("hunt_count", 0) + 1
@@ -229,9 +229,9 @@ class PositionManagerWorker:
                 ideal_price = min(ideal_price, t.get("bid1", t["last"]))
                 if t["last"] > old_price + 1.5 * a:
                     paper.cancel_order(order["id"])
-                    self._fomo_cooldowns[sym] = current_time + 1800
                     paper.log_event(sym, "cancel", t["last"], "Улетела без нас")
-                    self._notify(f"🚀 <b>Ордер снят (Улетела)</b> · {pair_html(sym, order)} · (⏸️ 30м)")
+                    self._fomo_cooldowns[sym] = current_time + 1800
+                    self._notify(f"⚠️ <b>Снят</b> · {pair_html(sym, order)} · 🚀 (⏸️ 30м)")
                     continue
                 if ideal_price < old_price and dev_pct >= 0.2:
                     order["price"] = ideal_price
