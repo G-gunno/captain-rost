@@ -65,15 +65,18 @@ def buy_size(equity, score, thr, liquidity, free_usdt, kind="core", entry_mode="
 # from bot.strategy.shadow import shadow
 
 def entry_offset(score, thr, regime, atr_pct, entry_mode="sniper"):
-    from bot.strategy.shadow import shadow # Ленивый импорт во избежание цикличности
+    from bot.strategy.shadow import shadow 
     hunt = shadow.hunt() 
 
+    # 🔥 ИСПРАВЛЕНИЕ ДЛЯ TREE И MINA
     if entry_mode == "rocket":
-        return max(shadow.capture(), atr_pct / 100 * 0.1)
+        # Бьем прямо в Ask, переплачивая 0.05%, чтобы гарантированно заскочить в ракету
+        return 0.0005 
+        
     elif entry_mode == "reversal":
         return max(0.0, atr_pct / 100 * 0.15)
 
-    base_pullback = -atr_pct / 100 * 0.5 
+    base_pullback = -atr_pct / 100 * 0.5
     surplus = score - thr
     
     if regime == "bear":
