@@ -625,10 +625,20 @@ async def cmd_status(update, context):
 
         from bot.strategy.fundamental import get_fear_and_greed
         fng = get_fear_and_greed()
-        fng_emoji = "🤑" if fng >= 60 else ("😱" if fng <= 40 else "😴")
+        
+        if fng >= 75:
+            fng_emoji, fng_text = "🌋", "Экстр. Жадность"
+        elif fng >= 55:
+            fng_emoji, fng_text = "🤑", "Жадность"
+        elif fng <= 24:
+            fng_emoji, fng_text = "😱", "Экстр. Страх"
+        elif fng <= 45:
+            fng_emoji, fng_text = "😨", "Страх"
+        else:
+            fng_emoji, fng_text = "😴", "Нейтрально"
 
         btc = prices.get("BTCUSDT", {}).get("last", 0)
-        msg.append(f"₿ <b>${fmt_price(btc)}</b> · {regime_emoji} {regime_text} · 🧭 F&G: {fng} {fng_emoji} · 🎯 порог {threshold(regime):g}")
+        msg.append(f"₿ <b>${fmt_price(btc)}</b> · {regime_emoji} {regime_text} · {fng_emoji} F&G: {fng} ({fng_text}) · 🎯 порог {threshold(regime):g}")
         if SCAN_SUMMARY.get("text"): msg.append(f"🔎 {SCAN_SUMMARY['text']}")
         wr, n = learner.winrate()
         top = sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True)[:3]
