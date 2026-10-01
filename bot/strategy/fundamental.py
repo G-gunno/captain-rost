@@ -76,16 +76,13 @@ async def _fetch_fear_and_greed():
 
 # ================= ПУБЛИЧНЫЕ МЕТОДЫ =================
 
-async def update_fundamental_data():
-    """Фоновый воркер (вызывается 1 раз в час из main.py)."""
-    while True:
-        logger.info("📡 Сбор фундаментальных макро-данных (DefiLlama, F&G)...")
-        await asyncio.gather(
-            _fetch_stablecoin_flows(),
-            _fetch_defillama_sectors(),
-            _fetch_fear_and_greed()
-        )
-        await asyncio.sleep(CACHE_TTL)
+async def fetch_macro_data():
+    """Единый метод обновления всех макро-метрик (вызывается Data Feeder'ом)."""
+    await asyncio.gather(
+        _fetch_stablecoin_flows(),
+        _fetch_defillama_sectors(),
+        _fetch_fear_and_greed()
+    )
 
 def get_macro_trend():
     return _cache["stablecoins"]["trend"]
