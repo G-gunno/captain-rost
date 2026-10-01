@@ -444,7 +444,13 @@ async def cmd_status(update, context):
         fng = get_fear_and_greed()
         fng_emoji = "🌋" if fng >= 75 else "🤑" if fng >= 55 else "😱" if fng <= 24 else "😨" if fng <= 45 else "😴"
         
-        msg.append(f"₿ <b>${fmt_price(prices.get('BTCUSDT', {}).get('last', 0))}</b> · {{'bull': '🟢 BULL', 'neutral': '🟡 NEUTRAL', 'bear': '🔴 BEAR'}.get(regime, '⚪')} · {fng_emoji} F&G: {fng} · 🎯 порог {threshold(regime):g}")
+        # === ИСПРАВЛЕНИЕ: ВЫНЕСЛИ ЛОГИКУ ИЗ F-СТРОКИ ===
+        regime_str = {'bull': '🟢 BULL', 'neutral': '🟡 NEUTRAL', 'bear': '🔴 BEAR'}.get(regime, '⚪')
+        btc_price = prices.get('BTCUSDT', {}).get('last', 0)
+        
+        msg.append(f"₿ <b>${fmt_price(btc_price)}</b> · {regime_str} · {fng_emoji} F&G: {fng} · 🎯 порог {threshold(regime):g}")
+        # ===============================================
+        
         if SCAN_SUMMARY.get("text"): msg.append(f"🔎 {SCAN_SUMMARY['text']}")
         wr, n = learner.winrate()
         top_txt = " · ".join(f"{k} {v:.2f}" for k, v in sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True)[:3])
