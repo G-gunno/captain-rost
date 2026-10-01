@@ -6,44 +6,40 @@ from bot.strategy.scanner import get_regime, scan
 from bot.core.state import bot_state
 
 class ScannerWorker:
-"""Тяжелый I/O воркер: собирает метрики, анализирует RSI/EMA, генерирует сигналы."""
+    """Тяжелый I/O воркер: собирает метрики, анализирует RSI/EMA, генерирует сигналы."""
+    
+    def __init__(self, bus: EventBus):
+        self.bus = bus
 
-def __init__(self, bus: EventBus):
-    self.bus = bus
-
-async def run(self):
-    logger.info("🔎 Scanner Worker запущен: параллельное сканирование рынка каждые 60с...")
-    while True:
-        if bot_state.paused or not bot_state.trading_enabled:
-            await asyncio.sleep(10)
-            continue
-            
-        try:
-            tickers = await market_data.get_tickers()
-            deriv_tickers = await market_data.get_derivatives_tickers()
-            
-            if tickers:
-                regime, info = await get_regime()
+    async def run(self):
+        logger.info("🔎 Scanner Worker запущен: параллельное сканирование рынка каждые 60с...")
+        while True:
+            if bot_state.paused or not bot_state.trading_enabled:
+                await asyncio.sleep(10)
+                continue
                 
-                # Сохраняем в память для мгновенного ответа на /status
-                bot_state.current_regime = regime
-                bot_state.regime_info = info
+            try:
+                tickers = await market_data.get_tickers()
+                deriv_tickers = await market_data.get_derivatives_tickers()
                 
-                # Уведомляем другие воркеры о текущем режиме
-                self.bus.publish("REGIME_UPDATED", {"regime": regime, "info": info})
+                if tickers:
+                    regime, info = await get_regime()
+                    
+                    # ⚡ Кэшируем глобально, чтобы /status в Телеге отвечал моментально
+                    bot_state.current_regime = regime 
+                    self.bus.publish("REGIME_UPDATED", {"regime": regime, "info": info})
+                    
+                    candidates = await scan(regime, tickers, deriv_tickers, limit=20)
+                    
+                    if candidates:
+                        self.bus.publish("SIGNALS_READY", {
+                            "candidates": candidates,
+                            "tickers": tickers,
+                            "regime": regime
+                        })
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.exception(f"ScannerWorker error: {e}")
                 
-                # Тяжеловесная функция сканирования
-                candidates = await scan(regime, tickers, deriv_tickers, limit=20)
-                
-                if candidates:
-                    self.bus.publish("SIGNALS_READY", {
-                        "candidates": candidates,
-                        "tickers": tickers,
-                        "regime": regime
-                    })
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.exception(f"ScannerWorker error: {e}")
-            
-        await asyncio.sleep(60) # Тот самый цикл 60 секунд
+            await asyncio.sleep(60)
