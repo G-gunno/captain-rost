@@ -1,3 +1,4 @@
+import gzip
 import os
 import asyncio
 import calendar
@@ -53,7 +54,8 @@ async def reply(update, text, markup=None):
 
 # ==================== HTTP handlers ====================
 async def health_handler(request):
-    return web.Response(text="OK")
+    # Оптимизация пинга: 204 No Content отдает 0 байт данных в теле.
+    return web.Response(status=204)
 
 async def webhook_handler(request):
     try:
@@ -66,14 +68,13 @@ async def webhook_handler(request):
 
 async def chart_handler(request):
     symbol = request.query.get("symbol")
-    interval_str = request.query.get("interval", "15") # По умолчанию 15 минут
+    interval_str = request.query.get("interval", "15") 
     
     if not symbol:
         return web.Response(text="Укажите тикер, например ?symbol=LINKUSDT", status=400)
     symbol = symbol.upper()
     if not symbol.endswith("USDT"): symbol += "USDT"
 
-    # Разрешенные таймфреймы Bybit
     valid_intervals = ["1", "3", "5", "15", "30", "60", "120", "240", "D", "W"]
     if interval_str not in valid_intervals:
         interval_str = "15"
@@ -85,10 +86,8 @@ async def chart_handler(request):
             fig = viz.build_chart(show=False) 
             if fig is None: return None
             
-            # Генерируем базовый HTML от Plotly
             raw_html = fig.to_html(include_plotlyjs="cdn", full_html=True)
             
-            # --- Плавающая панель по центру экрана ---
             buttons_html = (
                 '<div style="position: absolute; top: 15px; left: 50%; transform: translateX(-50%); z-index: 1000; '
                 'background: rgba(30, 30, 30, 0.85); padding: 8px 15px; border-radius: 8px; '
@@ -98,7 +97,6 @@ async def chart_handler(request):
             )
             
             for tf in valid_intervals:
-                # Подсвечиваем активный таймфрейм синим цветом
                 bg_color = "#2962ff" if tf == interval_str else "#444"
                 text_color = "#fff" if tf == interval_str else "#ccc"
                 hover_style = "this.style.background='#555'" if tf != interval_str else ""
@@ -112,8 +110,6 @@ async def chart_handler(request):
                 )
             
             buttons_html += "</div>"
-            
-            # Вставляем нашу панель сразу после открывающего тега <body>
             return raw_html.replace("<body>", f"<body style='margin:0; padding:0; background-color:#111;'>\n{buttons_html}")
             
         except Exception as e:
@@ -125,7 +121,20 @@ async def chart_handler(request):
             return web.Response(text=f"Нет данных лога или свечей для {symbol}.", status=404)
         if not html_or_error.startswith("<"):
              return web.Response(text=f"Ошибка генерации: {html_or_error}", status=500)
-        return web.Response(text=html_or_error, content_type="text/html")
+             
+        # === ОПТИМИЗАЦИЯ ТРАФИКА: СЖИМАЕМ HTML ===
+        # Заставляем сервер отдавать данные в формате gzip.
+        # Браузер пользователя сам распакует это "на лету".
+        compressed_html = gzip.compress(html_or_error.encode('utf-8'))
+        
+        return web.Response(
+            body=compressed_html, 
+            content_type="text/html",
+            headers={
+                "Content-Encoding": "gzip",
+                "Vary": "Accept-Encoding"
+            }
+        )
     except Exception as e:
         return web.Response(text=f"Внутренняя ошибка сервера: {e}", status=500)
 
