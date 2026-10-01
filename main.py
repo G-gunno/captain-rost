@@ -507,6 +507,7 @@ async def run_all(application):
     from bot.workers.order_manager import OrderManagerWorker
     from bot.workers.notification import NotificationWorker
     from bot.workers.position_manager import PositionManagerWorker
+    from bot.workers.data_feeder import DataFeederWorker  # <--- НОВЫЙ ИМПОРТ
 
     global_bus = EventBus()
     
@@ -517,6 +518,7 @@ async def run_all(application):
         asyncio.create_task(OrderManagerWorker(global_bus).run(), name="OrderManager"),
         asyncio.create_task(PositionManagerWorker(global_bus).run(), name="PositionManager"),
         asyncio.create_task(NotificationWorker(global_bus, send_chat_func=send_chat).run(), name="Notification"),
+        asyncio.create_task(DataFeederWorker(global_bus).run(), name="DataFeeder"),  # <--- ЗАПУСК ПЫЛЕСОСА
     ]
 
     def worker_callback(t: asyncio.Task):
@@ -528,8 +530,6 @@ async def run_all(application):
     
     # Фоновые процессы
     asyncio.create_task(report_loop())
-    from bot.strategy.fundamental import update_fundamental_data
-    asyncio.create_task(update_fundamental_data()) # Тот самый DataFeederWorker
     
     logger.info("⚡ EDA Core успешно запущено. (WEBHOOK MODE)")
 
