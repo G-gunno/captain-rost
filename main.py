@@ -32,7 +32,6 @@ WEBHOOK_PATH = "/telegram-webhook"
 from functools import wraps
 
 def restricted(func):
-    """Декоратор для блокировки доступа чужим пользователям."""
     @wraps(func)
     async def wrapped(update, context, *args, **kwargs):
         user_chat_id = str(update.effective_chat.id)
@@ -52,10 +51,9 @@ async def reply(update, text, markup=None):
         await update.message.reply_text(
             text, reply_markup=markup, disable_web_page_preview=True
         )
-
+        
 # ==================== HTTP handlers ====================
 async def health_handler(request):
-    # ОПТИМИЗАЦИЯ ТРАФИКА: 204 No Content (0 байт данных)
     return web.Response(status=204)
 
 async def webhook_handler(request):
@@ -123,7 +121,6 @@ async def chart_handler(request):
         if not html_or_error.startswith("<"):
              return web.Response(text=f"Ошибка генерации: {html_or_error}", status=500)
              
-        # ОПТИМИЗАЦИЯ ТРАФИКА: Сжимаем HTML-код графика
         compressed_html = gzip.compress(html_or_error.encode('utf-8'))
         
         return web.Response(
@@ -182,7 +179,7 @@ async def action_resume(context):
     orders = bot_state.resume()
     paper.orders.extend(orders)
     paper.save()
-    return f"▶️️ <b>Возобновлено</b>: ордеров восстановлено {len(orders)}."
+    return f"▶ <b>Возобновлено</b>: ордеров восстановлено {len(orders)}."
 
 async def action_exitall(context):
     bot_state.trading_enabled = False
@@ -427,7 +424,9 @@ async def cmd_status(update, context):
         pf_text, pf_mark = ("—", "") if pf is None else ("∞", "🎯") if pf == float("inf") else (f"{pf:.2f}", "🎯" if pf >= 1.3 else ("⚠️" if pf >= 1.0 else "❌"))
         dd = metrics_24h["max_drawdown_pct"]
         dd_mark = "✅" if dd < 5 else ("⚠️" if dd < 15 else "🔴")
-        msg.append(f"📈 PF: <b>{pf_text}</b> {pf_mark} · 📉 DD: <b>{dd:.1f}%</b> {dd_mark}")
+        
+        if pf is None: msg.append(f"📈 PF: <b>—</b> · 📉 DD: <b>{dd:.1f}%</b> {dd_mark} (лимит 15%)")
+        else: msg.append(f"📈 PF: <b>{pf_text}</b> {pf_mark} (цель ≥ 1.3) · 📉 DD: <b>{dd:.1f}%</b> {dd_mark} (лимит 15%)")
 
         exp = metrics_24h["expectancy"]
         rf = metrics_24h["recovery_factor"]
@@ -444,13 +443,10 @@ async def cmd_status(update, context):
         fng = get_fear_and_greed()
         fng_emoji = "🌋" if fng >= 75 else "🤑" if fng >= 55 else "😱" if fng <= 24 else "😨" if fng <= 45 else "😴"
         
-        # === ИСПРАВЛЕНИЕ: ВЫНЕСЛИ ЛОГИКУ ИЗ F-СТРОКИ ===
         regime_str = {'bull': '🟢 BULL', 'neutral': '🟡 NEUTRAL', 'bear': '🔴 BEAR'}.get(regime, '⚪')
         btc_price = prices.get('BTCUSDT', {}).get('last', 0)
         
         msg.append(f"₿ <b>${fmt_price(btc_price)}</b> · {regime_str} · {fng_emoji} F&G: {fng} · 🎯 порог {threshold(regime):g}")
-        # ===============================================
-        
         if SCAN_SUMMARY.get("text"): msg.append(f"🔎 {SCAN_SUMMARY['text']}")
         wr, n = learner.winrate()
         top_txt = " · ".join(f"{k} {v:.2f}" for k, v in sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True)[:3])
@@ -499,7 +495,7 @@ async def run_all(application):
 
     await asyncio.to_thread(ensure_branch)
     
-    # === ЗАПУСК НОВОЙ EVENT-DRIVEN АРХИТЕКТУРЫ ===
+    # === Event-Driven Architecture ===
     from bot.core.event_bus import EventBus
     from bot.workers.market_data import MarketDataWorker
     from bot.workers.execution import ExecutionRiskWorker
@@ -507,7 +503,7 @@ async def run_all(application):
     from bot.workers.order_manager import OrderManagerWorker
     from bot.workers.notification import NotificationWorker
     from bot.workers.position_manager import PositionManagerWorker
-    from bot.workers.data_feeder import DataFeederWorker  # <--- НОВЫЙ ИМПОРТ
+    from bot.workers.data_feeder import DataFeederWorker
 
     global_bus = EventBus()
     
@@ -518,7 +514,7 @@ async def run_all(application):
         asyncio.create_task(OrderManagerWorker(global_bus).run(), name="OrderManager"),
         asyncio.create_task(PositionManagerWorker(global_bus).run(), name="PositionManager"),
         asyncio.create_task(NotificationWorker(global_bus, send_chat_func=send_chat).run(), name="Notification"),
-        asyncio.create_task(DataFeederWorker(global_bus).run(), name="DataFeeder"),  # <--- ЗАПУСК ПЫЛЕСОСА
+        asyncio.create_task(DataFeederWorker(global_bus).run(), name="DataFeeder"),
     ]
 
     def worker_callback(t: asyncio.Task):
