@@ -150,10 +150,11 @@ def _extract_listing(title, link, pub_date):
     return {'symbol': symbol, 'title': title.strip(), 'link': (link or '').strip(), 'ts': ts}
 
 
-async def fetch_news_cache():
+async def fetch_news_cache(force=False):
     """Свежие заголовки из RSS (кэш 15 минут)."""
     now = time.time()
-    if _cache["items"] is not None and now - _cache["ts"] < 900:
+    # Если force=True, игнорируем кэш и идем в сеть
+    if not force and _cache["items"] is not None and now - _cache["ts"] < 900:
         return _cache["items"]
     all_items = []
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
@@ -167,10 +168,10 @@ async def fetch_news_cache():
     return all_items
 
 
-async def fetch_listings_cache():
+async def fetch_listings_cache(force=False):
     """Новые листинги Bybit (кэш 1 час)."""
     now = time.time()
-    if _cache["listings"] is not None and now - _cache["listings_ts"] < 3600:
+    if not force and _cache["listings"] is not None and now - _cache["listings_ts"] < 3600:
         return _cache["listings"]
     listings = []
     for url in [
