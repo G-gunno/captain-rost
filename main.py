@@ -28,7 +28,7 @@ from bot.utils.format import format_coin, usd, pnl_emoji, weight_emoji, fmt_pric
 _app = None
 WEBHOOK_PATH = "/telegram-webhook"
 
-==================== Хелперы ====================
+#==================== Хелперы ====================
 
 from functools import wraps
 
@@ -53,7 +53,7 @@ await update.message.reply_text(
 text, reply_markup=markup, disable_web_page_preview=True
 )
 
-==================== HTTP handlers ====================
+#==================== HTTP handlers ====================
 
 async def health_handler(request):
 # 204 No Content отдает 0 байт данных
@@ -138,7 +138,7 @@ except Exception as e:
     return web.Response(text=f"Внутренняя ошибка сервера: {e}", status=500)
 
 
-==================== Уведомления и Отчеты ====================
+#==================== Уведомления и Отчеты ====================
 
 async def send_chat(text):
 chat = os.getenv("TELEGRAM_CHAT_ID")
@@ -170,7 +170,7 @@ err = context.error
 if isinstance(err, TelegramConflict): return
 logger.exception(f"Unhandled error: {err}")
 
-==================== ДЕЙСТВИЯ С ПОДТВЕРЖДЕНИЕМ ====================
+#==================== ДЕЙСТВИЯ С ПОДТВЕРЖДЕНИЕМ ====================
 
 async def action_pause(context):
 if bot_state.paused: return "⏸ Уже на паузе."
@@ -253,7 +253,7 @@ if data.startswith("confirm:"):
         logger.exception(f"confirm action error: {e}")
 
 
-==================== Команды Telegram ====================
+#==================== Команды Telegram ====================
 
 @restricted
 async def cmd_start(update, context):
@@ -467,7 +467,7 @@ except Exception as e:
     await reply(update, f"⚠️ Ошибка: {e}")
 
 
-==================== Главный запуск ====================
+#==================== Главный запуск ====================
 
 async def run_all(application):
 global _app
