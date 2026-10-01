@@ -80,6 +80,16 @@ class TradeVisualizer:
         rs = gain / loss
         df_kline['RSI'] = 100 - (100 / (1 + rs))
 
+        # === ОПТИМИЗАЦИЯ ТРАФИКА: ОБРЕЗАЕМ ДАННЫЕ ПЕРЕД ОТРИСОВКОЙ ===
+        # Математика индикаторов выше посчитана верно на всей истории.
+        # Но на график отправляем только последние 200 свечей, чтобы JSON не весил мегабайты.
+        df_kline = df_kline.tail(200).reset_index(drop=True)
+        
+        # Фильтруем события, чтобы маркеры, оставшиеся за левым краем, не ломали масштаб
+        min_time = df_kline['datetime'].min()
+        df_ev = df_ev[df_ev['datetime'] >= min_time]
+        # =============================================================
+
         # Цвета баров объема
         colors_vol = ['rgba(38, 166, 154, 0.5)' if row['close'] >= row['open'] else 'rgba(239, 83, 80, 0.5)' for _, row in df_kline.iterrows()]
 
@@ -105,7 +115,7 @@ class TradeVisualizer:
         fig.add_hline(y=70, line_dash="dash", line_color="rgba(239, 83, 80, 0.5)", row=3, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="rgba(38, 166, 154, 0.5)", row=3, col=1)
 
-        # Выставляем маркеры (Только на 1 графике)
+        # Выставляем маркеры
         colors = {
             "order_placed": ("cyan", "line-ew", "Ордер"),
             "order_moved": ("blue", "diamond-open", "Сдвиг"),
@@ -140,7 +150,7 @@ class TradeVisualizer:
         
         # Настройка осей
         fig.update_yaxes(title_text="Цена", row=1, col=1)
-        fig.update_yaxes(title_text="Объем", row=2, col=1, showticklabels=False) # Скрываем цифры объемов (они мешают)
+        fig.update_yaxes(title_text="Объем", row=2, col=1, showticklabels=False)
         fig.update_yaxes(title_text="RSI", range=[0, 100], row=3, col=1, tickvals=[30, 50, 70])
         
         if show: fig.show()
