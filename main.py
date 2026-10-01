@@ -182,7 +182,7 @@ return f"⏸ Пауза: ордеров снято {len(orders)}, позиции
 
 async def action_resume(context):
 if not bot_state.paused:
-return "▶️ Не на паузе."
+return "▶️️ Не на паузе."
 orders = bot_state.resume()
 paper.orders.extend(orders)
 paper.save()
@@ -264,7 +264,7 @@ if data.startswith("confirm:"):
         if "Message is not modified" in str(e):
             return
         try:
-            await query.edit_message_text(f"⚠️️ Ошибка: {e}", reply_markup=InlineKeyboardMarkup([]))
+            await query.edit_message_text(f"⚠ Ошибка: {e}", reply_markup=InlineKeyboardMarkup([]))
         except BadRequest:
             pass
     except Exception as e:
@@ -753,7 +753,7 @@ free_pct = paper.usdt / eq * 100 if eq else 0
         pf_text, pf_mark = "∞", "🎯"
     else:
         pf_text = f"{pf:.2f}"
-        pf_mark = "🎯" if pf >= 1.3 else ("⚠️" if pf >= 1.0 else "❌")
+        pf_mark = "🎯" if pf >= 1.3 else ("⚠️️" if pf >= 1.0 else "❌")
     dd = metrics_24h["max_drawdown_pct"]
     dd_mark = "✅" if dd < 5 else ("⚠️" if dd < 15 else "🔴")
     
