@@ -499,7 +499,7 @@ async def run_all(application):
 
     await asyncio.to_thread(ensure_branch)
     
-    # === Event-Driven Architecture ===
+    # === ЗАПУСК НОВОЙ EVENT-DRIVEN АРХИТЕКТУРЫ ===
     from bot.core.event_bus import EventBus
     from bot.workers.market_data import MarketDataWorker
     from bot.workers.execution import ExecutionRiskWorker
