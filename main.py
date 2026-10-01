@@ -22,7 +22,7 @@ from bot.services.info import info_full_text
 from bot.strategy.shadow import shadow
 from bot.strategy.scanner import SCAN_SUMMARY, FILTERED_BY_NEWS, get_regime, threshold
 from bot.strategy.learner import learner, TIERS
-from bot.news.cmc import TIER_EMOJI, TIER_NAMES, memory_stats
+from bot.news.cmc import sector_of, TIER_EMOJI, TIER_NAMES, memory_stats
 from bot.utils.format import format_coin, usd, pnl_emoji, weight_emoji, fmt_price, fmt_pct, fmt_sym
 
 _app = None
@@ -181,7 +181,7 @@ bot_state.pause(orders)
 return f"⏸ Пауза: ордеров снято {len(orders)}, позиции открыты."
 
 async def action_resume(context):
-if not bot_state.paused: return "▶️️ Не на паузе."
+if not bot_state.paused: return "▶ Не на паузе."
 orders = bot_state.resume()
 paper.orders.extend(orders)
 paper.save()
@@ -464,7 +464,7 @@ free_pct = paper.usdt / eq * 100 if eq else 0
     await reply(update, "\n".join(msg))
 except Exception as e:
     logger.exception("Ошибка в /status")
-    await reply(update, f"⚠️️ Ошибка: {e}")
+    await reply(update, f"⚠️ Ошибка: {e}")
 
 
 ==================== Главный запуск ====================
