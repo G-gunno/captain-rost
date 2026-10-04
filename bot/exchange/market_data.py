@@ -8,26 +8,34 @@ MAINNET_PUBLIC = "https://api.bybit.com"
 _tickers_cache = {}
 _tickers_ts = 0
 
-
 class MarketData:
-    """Рыночные данные Bybit (Надежный REST API с кэшем)."""
+    """Рыночные данные Bybit (Надежный REST API с пулом соединений)."""
 
     def __init__(self, base_url: str = MAINNET_PUBLIC):
         self.base_url = base_url
+        self._client = None
+
+    @property
+    def client(self):
+        # Ленивая инициализация клиента для удержания единого TCP/TLS туннеля (Keep-Alive)
+        if self._client is None:
+            limits = httpx.Limits(max_keepalive_connections=20, max_connections=50)
+            self._client = httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=20,
+                limits=limits
+            )
+        return self._client
 
     async def get_tickers(self) -> dict:
         global _tickers_cache, _tickers_ts
         now = time.time()
         
-        # Кэш на 5 секунд: защищает от спама API, если функция вызывается 5 раз за один цикл
         if _tickers_cache and now - _tickers_ts < 5:
             return _tickers_cache
         
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.get(
-                    self.base_url + "/v5/market/tickers", params={"category": "spot"}
-                )
+            resp = await self.client.get("/v5/market/tickers", params={"category": "spot"})
             data = resp.json()
             if data.get("retCode") != 0:
                 logger.error(f"Tickers error: {data}")
@@ -55,10 +63,7 @@ class MarketData:
 
     async def get_derivatives_tickers(self) -> dict:
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.get(
-                    self.base_url + "/v5/market/tickers", params={"category": "linear"}
-                )
+            resp = await self.client.get("/v5/market/tickers", params={"category": "linear"})
             data = resp.json()
             if data.get("retCode") != 0:
                 return {}
@@ -75,11 +80,10 @@ class MarketData:
 
     async def get_kline(self, symbol: str, interval: str = "15", limit: int = 200) -> list:
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.get(
-                    self.base_url + "/v5/market/kline",
-                    params={"category": "spot", "symbol": symbol, "interval": interval, "limit": limit},
-                )
+            resp = await self.client.get(
+                "/v5/market/kline",
+                params={"category": "spot", "symbol": symbol, "interval": interval, "limit": limit},
+            )
             data = resp.json()
             if data.get("retCode") != 0:
                 return []
@@ -98,12 +102,9 @@ class MarketData:
         except Exception:
             return []
 
-
-# Функция-заглушка, чтобы не ломать импорты в main.py
 async def start_ws_ticker_stream():
     logger.info("ℹ️ WebSocket стрим отключен. Перешли на пуленепробиваемый REST-кэш (5 сек).")
     while True:
         await asyncio.sleep(3600)
-
 
 market_data = MarketData()
