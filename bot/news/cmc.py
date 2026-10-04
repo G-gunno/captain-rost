@@ -93,8 +93,8 @@ def _save_sectors():
         SECTOR_FILE.write_text(json.dumps(_sector_cache, ensure_ascii=False))
     except Exception as e:
         logger.error(f"sectors save error: {e}")
-    # Бэкап в GitHub не чаще раза в 60 секунд
-    if time.time() - _last_upload > 60:
+    # Бэкап в GitHub не чаще раза в час
+    if time.time() - _last_upload > 3600:
         _last_upload = time.time()
         upload_state(SECTOR_REMOTE, _sector_cache)
 
