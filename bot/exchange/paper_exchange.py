@@ -62,14 +62,14 @@ class PaperExchange:
             "trades": self.trades,
             "realized": self.realized,
             "market_history": self.market_history,
-            "chart_events": self.chart_events[-500:] if hasattr(self, 'chart_events') else [] # <-- Сжимаем до 500
+            "chart_events": self.chart_events[-500:] if hasattr(self, 'chart_events') else [] # <-- Было -3000:
         }
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             self.state_file.write_text(json.dumps(payload, ensure_ascii=False))
         except Exception as e:
             logger.error(f"Paper save error: {e}")
-        if time.time() - self._last_upload > 3600:  # <-- Бэкап 1 раз в час
+        if time.time() - self._last_upload > 3600:  # <-- Было 900. Ставим 1 раз в час.
             self._last_upload = time.time()
             upload_state(REMOTE_PATH, payload)
             
