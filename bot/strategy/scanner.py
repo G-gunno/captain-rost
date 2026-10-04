@@ -191,6 +191,19 @@ def score_symbol(candles_15m, candles_1h, t, regime):
     if candle_range > 0 and (wick_up / candle_range) > 0.5 and vol_ratio > 1.5:
         score -= 3.0
         reasons.append("отвержение (длинная тень сверху)")
+    # 🛑 ЗАЩИТА ОТ FOMO (Эффект натянутой резинки)
+    # Покупать, когда цена улетела вертикально вверх от средних — это гарантированный стоп-лосс.
+    a15 = atr(candles_15m)
+    if a15 > 0 and e21 > 0:
+        dist_from_ema = last - e21
+        # Если оторвались вверх больше чем на 2.5 средних размаха свечи (ATR)
+        if dist_from_ema > 2.5 * a15:
+            score -= 4.0  # Убиваем скор, чтобы монета не прошла порог
+            reasons.append(f"FOMO-перегрев (+{dist_from_ema/a15:.1f} ATR от EMA21)")
+        # Или если просто улетели больше чем на 3.5% от базовой линии
+        elif (dist_from_ema / e21 * 100) > 3.5:
+            score -= 3.0
+            reasons.append(f"отрыв от EMA21 на {(dist_from_ema / e21 * 100):.1f}%")
     
     if t["change_pct"] <= -7.0 and r <= 35 and vol_ratio >= 2.5:
         score += learner.weight("reversal") * 2.0
