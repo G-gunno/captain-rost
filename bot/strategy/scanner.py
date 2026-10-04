@@ -159,7 +159,7 @@ async def fetch_new_listings():
     return out
 
 
-def score_symbol(candles_15m, candles_1h, t, regime):
+def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     closes = [c["close"] for c in candles_15m]
     last = closes[-1]
     e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
@@ -192,18 +192,16 @@ def score_symbol(candles_15m, candles_1h, t, regime):
         score -= 3.0
         reasons.append("отвержение (длинная тень сверху)")
     # 🛑 ЗАЩИТА ОТ FOMO (Эффект натянутой резинки)
-    # Покупать, когда цена улетела вертикально вверх от средних — это гарантированный стоп-лосс.
-    a15 = atr(candles_15m)
-    if a15 > 0 and e21 > 0:
-        dist_from_ema = last - e21
-        # Если оторвались вверх больше чем на 2.5 средних размаха свечи (ATR)
-        if dist_from_ema > 2.5 * a15:
-            score -= 4.0  # Убиваем скор, чтобы монета не прошла порог
-            reasons.append(f"FOMO-перегрев (+{dist_from_ema/a15:.1f} ATR от EMA21)")
-        # Или если просто улетели больше чем на 3.5% от базовой линии
-        elif (dist_from_ema / e21 * 100) > 3.5:
-            score -= 3.0
-            reasons.append(f"отрыв от EMA21 на {(dist_from_ema / e21 * 100):.1f}%")
+    if not is_open_pos:
+        a15 = atr(candles_15m)
+        if a15 > 0 and e21 > 0:
+            dist_from_ema = last - e21
+            if dist_from_ema > 2.5 * a15:
+                score -= 4.0  
+                reasons.append(f"FOMO-перегрев (+{dist_from_ema/a15:.1f} ATR от EMA21)")
+            elif (dist_from_ema / e21 * 100) > 3.5:
+                score -= 3.0
+                reasons.append(f"отрыв от EMA21 на {(dist_from_ema / e21 * 100):.1f}%")
     
     if t["change_pct"] <= -7.0 and r <= 35 and vol_ratio >= 2.5:
         score += learner.weight("reversal") * 2.0
@@ -251,14 +249,14 @@ def normalize(raw, regime):
 
 
 # ИСПРАВЛЕНИЕ: Передаем btc_ret извне, чтобы не качать свечи BTC для каждой монеты
-async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None):
+async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_open_pos=False):
     candles_15m = await market_data.get_kline(sym, "15", 120)
     candles_1h = await market_data.get_kline(sym, "60", 250)
     
     if len(candles_15m) < 60 or len(candles_1h) < 60:
         return None, candles_15m
         
-    raw, _, _, _ = score_symbol(candles_15m, candles_1h, t, regime)
+    raw, _, _, _ = score_symbol(candles_15m, candles_1h, t, regime, is_open_pos)
 
     corr = _corr(_returns([c["close"] for c in candles_15m]), btc_ret)
     if corr > 0.85 and regime == "neutral":
@@ -284,7 +282,7 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None):
 
     score10 = normalize(raw, regime)
     
-    _, _, keys_live, sv_live = score_symbol(candles_15m, candles_1h, t, regime)
+    _, _, keys_live, sv_live = score_symbol(candles_15m, candles_1h, t, regime, is_open_pos)
     is_reversal = "reversal" in keys_live
     is_momentum = ("impulse" in keys_live and sv_live.get("rsi", 0) >= 60 and (sv_live.get("volume", 0) >= 1.5 or sv_live.get("chg24h", 0) >= 6.0))
     
