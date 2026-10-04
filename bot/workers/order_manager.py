@@ -75,7 +75,7 @@ class OrderManagerWorker:
                 tp = entry * (1 + tp_dist_pct / 100)
                 min_rr = 2.0
             else:
-                if is_mom: sl_dist_atr = 0.6 * a
+                if is_mom: sl_dist_atr = 1.2 * a  # Было 0.6, даем ракетам дышать
                 elif entry_mode == "reversal": sl_dist_atr = 2.0 * a
                 else: sl_dist_atr = 1.2 * a
                 
