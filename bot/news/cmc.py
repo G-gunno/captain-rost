@@ -269,7 +269,7 @@ def _save_names():
     except Exception as e:
         logger.error(f"names save error: {e}")
         
-    if time.time() - _last_names_upload > 60:
+    if time.time() - _last_names_upload > 3600:
         _last_names_upload = time.time()
         upload_state(NAMES_REMOTE, _names_cache)
 
