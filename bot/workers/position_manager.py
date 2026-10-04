@@ -75,7 +75,7 @@ class PositionManagerWorker:
             t = tickers.get(sym)
             if not t: continue
             
-            score_pos, candles = await live_score(sym, t, regime, btc_ret, news_items, deriv_t=deriv_tickers.get(sym))
+            score_pos, candles = await live_score(sym, t, regime, btc_ret, news_items, deriv_t=deriv_tickers.get(sym), is_open_pos=True)
             if score_pos is None: continue
             
             closes = [c["close"] for c in candles]
@@ -86,11 +86,16 @@ class PositionManagerWorker:
             pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
             e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
             
-            # === ИСПРАВЛЕНИЕ: АМНИСТИЯ ДЛЯ ЛОВЦА ДНА ===
-            # Ловец дна покупает против тренда. Ему нельзя резать позицию по EMA.
+            # === АМНИСТИЯ ДЛЯ НОВЫХ ПОЗИЦИЙ И СНАЙПЕРОВ ===
+            # Даем позициям "подышать" минимум 2 часа (7200 сек), чтобы отработал нормальный SL
+            time_held = current_time - pos.get("entry_time", current_time)
             is_reversal = pos.get("entry_mode") == "reversal"
-            trend_broken = (last < e50 and e21 < e50) and not is_reversal
-            # ============================================
+            
+            if time_held < 7200:
+                trend_broken = False
+            else:
+                trend_broken = (last < e50 and e21 < e50) and not is_reversal
+            # ===============================================
             
             base = sym[:-4]
             name = await get_coin_name(base)
