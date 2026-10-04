@@ -191,16 +191,6 @@ class PositionManagerWorker:
             atr_pct = a / t["last"] * 100
             entry_mode = order.get("entry_mode", "sniper")
 
-            if entry_mode == "sniper" and score_now >= thr:
-                time_waiting = current_time - order["created"]
-                price_running_away = t["last"] > order["price"] + 0.5 * a
-                
-                if time_waiting > 300 or price_running_away:
-                    order["entry_mode"] = "rocket"
-                    entry_mode = "rocket"
-                    order["hunt_count"] = 0
-                    paper.log_event(sym, "order_moved", t["last"], "Апгрейд до 🚀")
-
             off = entry_offset(score_now, thr, regime, atr_pct, entry_mode)
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
