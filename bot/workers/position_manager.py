@@ -85,7 +85,12 @@ class PositionManagerWorker:
             last = t["last"]
             pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
             e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
-            trend_broken = last < e50 and e21 < e50
+            
+            # === ИСПРАВЛЕНИЕ: АМНИСТИЯ ДЛЯ ЛОВЦА ДНА ===
+            # Ловец дна покупает против тренда. Ему нельзя резать позицию по EMA.
+            is_reversal = pos.get("entry_mode") == "reversal"
+            trend_broken = (last < e50 and e21 < e50) and not is_reversal
+            # ============================================
             
             base = sym[:-4]
             name = await get_coin_name(base)
@@ -101,7 +106,8 @@ class PositionManagerWorker:
                     self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · {reason} {neg}/{mentions}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                     continue
 
-            signal_weak = trend_broken or score_pos <= thr - 2
+            # Для реверса даем чуть больше свободы по скору (он быстро остывает после пампа объема)
+            signal_weak = trend_broken or (score_pos <= thr - (3.0 if is_reversal else 2.0))
             pos_corr = pos.get("corr", 0.5)
             regime_danger = (pos.get("regime_entry") == "bull" and pos_corr >= 0.45 and (regime == "bear" or (regime == "neutral" and score_pos < thr)))
 
