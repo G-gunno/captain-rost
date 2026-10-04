@@ -71,7 +71,7 @@ class Learner:
             STATE_FILE.write_text(json.dumps(payload, ensure_ascii=False))
         except Exception as e:
             logger.error(f"learner save error: {e}")
-        if time.time() - self._last_upload > 900:  # Бэкап раз в 15 минут
+        if time.time() - self._last_upload > 3600:  # <-- Изменить на 3600
             self._last_upload = time.time()
             upload_state(REMOTE_PATH, payload)
 
