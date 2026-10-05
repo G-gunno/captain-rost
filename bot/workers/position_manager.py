@@ -249,12 +249,17 @@ class PositionManagerWorker:
                     price_icon = "⬇️"
             else:
                 ideal_price = min(ideal_price, t.get("bid1", t["last"]))
-                if t["last"] > old_price + 1.5 * a:
+                
+                # === ФИКС ДРЕБЕЗГА ОРДЕРОВ (Order Thrashing) ===
+                # Даем снайперу коридор в 4 ATR для спокойного ожидания во флэте
+                if t["last"] > old_price + 4.0 * a: 
                     paper.cancel_order(order["id"])
                     paper.log_event(sym, "cancel", t["last"], "Улетела без нас")
                     bot_state.set_cooldown(sym, 900)
-                    self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🚀 (⏸️ 15м)")
+                    self._notify(f"⚠️️ Снят · {pair_html(sym, order)} · 🚀 (⏸️ 15м)")
                     continue
+                # ===============================================
+                
                 if ideal_price < old_price and dev_pct >= 0.2:
                     order["price"] = ideal_price
                     action_type = "correct"
