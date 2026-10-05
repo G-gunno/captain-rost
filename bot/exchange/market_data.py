@@ -7,6 +7,7 @@ MAINNET_PUBLIC = "https://api.bybit.com"
 
 _tickers_cache = {}
 _tickers_ts = 0
+_kline_cache = {} # <-- ДОБАВИЛИ КЭШ ДЛЯ СВЕЧЕЙ
 
 class MarketData:
     """Рыночные данные Bybit (Надежный REST API с пулом соединений)."""
@@ -79,6 +80,16 @@ class MarketData:
             return {}
 
     async def get_kline(self, symbol: str, interval: str = "15", limit: int = 200) -> list:
+        global _kline_cache
+        cache_key = f"{symbol}_{interval}_{limit}"
+        now = time.time()
+        
+        # Часовики ("60") кэшируем на 15 минут (900 сек). 15-минутки не кэшируем.
+        ttl = 900 if interval == "60" else 0
+        
+        if ttl > 0 and cache_key in _kline_cache and now - _kline_cache[cache_key]['ts'] < ttl:
+            return _kline_cache[cache_key]['data']
+
         try:
             resp = await self.client.get(
                 "/v5/market/kline",
@@ -98,6 +109,11 @@ class MarketData:
                     "volume": float(r[5]),
                 })
             candles.reverse()
+            
+            # Сохраняем в кэш, если это часовик
+            if ttl > 0:
+                _kline_cache[cache_key] = {'data': candles, 'ts': now}
+                
             return candles
         except Exception:
             return []
