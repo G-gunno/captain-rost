@@ -58,7 +58,6 @@ class PositionManagerWorker:
         deriv_tickers = await market_data.get_derivatives_tickers()
         if not tickers: return
 
-        # ИСПРАВЛЕНИЕ: Качаем свечи BTC один раз
         btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
         btc_ret = _returns([c["close"] for c in btc_candles])
 
@@ -91,13 +90,12 @@ class PositionManagerWorker:
             entry_mode = pos.get("entry_mode", "sniper")
             is_reversal = (entry_mode == "reversal")
             
-            # Динамический таймер иммунитета (в секундах)
             if entry_mode == "rocket":
-                amnesty_limit = 1800   # 🚀 Ракете даем всего 30 минут. Не полетела сразу — режем.
+                amnesty_limit = 1800
             elif entry_mode == "reversal":
-                amnesty_limit = 7200   # 🧲 Ловцу дна даем 2 часа на формирование отскока.
+                amnesty_limit = 7200
             else:
-                amnesty_limit = 10800  # 🏹 Снайперу в накоплении даем 3 часа высидеть во флэте.
+                amnesty_limit = 10800
             
             if time_held < amnesty_limit:
                 trend_broken = False
@@ -107,7 +105,6 @@ class PositionManagerWorker:
                 score_drop_allowed = False
             # ===============================================
             
-            # --- БЛОК НОВОСТЕЙ ---
             base = sym[:-4]
             name = await get_coin_name(base)
             neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
@@ -116,18 +113,18 @@ class PositionManagerWorker:
             if is_toxic:
                 bot_state.set_cooldown(sym, 7200)
                 if pnl_pct >= 1.0 or pnl_pct <= 0:
-                    reason = "✂️📰 Новости"
+                    reason = "✂️️📰 Новости"
                     ex = paper._sell(sym, last, reason, regime_now=regime)
                     paper.log_event(sym, "sell", last, f"Новости {neg}/{mentions}")
                     self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · {reason} {neg}/{mentions}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                     continue
 
-            # === ИСПРАВЛЕНИЕ: ПРИМЕНЕНИЕ АМНИСТИИ ===
+            # === ПРИМЕНЕНИЕ АМНИСТИИ ===
             if score_drop_allowed:
                 signal_weak = False
             else:
                 signal_weak = trend_broken or (score_pos <= thr - (3.0 if is_reversal else 2.0))
-            # ========================================
+            # ===========================
 
             pos_corr = pos.get("corr", 0.5)
             regime_danger = (pos.get("regime_entry") == "bull" and pos_corr >= 0.45 and (regime == "bear" or (regime == "neutral" and score_pos < thr)))
@@ -171,49 +168,48 @@ class PositionManagerWorker:
             ind = "🔥" if ex.get("exit_type") == "TP1_RUN" else pnl_emoji(ex["pnl_pct"])
             self._notify(f"💸 <b>Продажа</b> · {pair_html(ex['symbol'], ex)} · {ex['reason']}\n{ind} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}{runner_txt}{funding_line(ex.get('transferred', 0))}")
 
-            # 4. Проверка ОРДЕРОВ (реквоты и отмены)
-            for order in list(paper.orders):
-                sym = order["symbol"]
-                t = tickers.get(sym)
-                if not t: continue
-                
-                base = sym[:-4]
-                name = await get_coin_name(base)
-                neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
+        # 4. Проверка ОРДЕРОВ (реквоты и отмены)
+        for order in list(paper.orders):
+            sym = order["symbol"]
+            t = tickers.get(sym)
+            if not t: continue
+            
+            base = sym[:-4]
+            name = await get_coin_name(base)
+            neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
 
-                if neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33):
+            if neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33):
+                paper.cancel_order(order["id"])
+                paper.log_event(sym, "cancel", t["last"], "Токсичные новости")
+                bot_state.set_cooldown(sym, 7200)
+                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🤬📰 (⏸️ 2ч)")
+                continue
+
+            score_now, candles = await live_score(sym, t, regime, btc_ret, news_items)
+            if score_now is None: continue
+            
+            # === ИММУНИТЕТ ДЛЯ ОРДЕРОВ В СТАКАНЕ ===
+            order_age = current_time - order["created"]
+            is_sniper = order.get("entry_mode") == "sniper"
+            order_amnesty = (is_sniper and order_age < 3600) 
+            
+            if not order_amnesty:
+                if score_now <= thr - 1.5:
                     paper.cancel_order(order["id"])
-                    paper.log_event(sym, "cancel", t["last"], "Токсичные новости")
-                    bot_state.set_cooldown(sym, 7200)
-                    self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🤬📰 (⏸️ 2ч)")
+                    paper.log_event(sym, "cancel", t["last"], "Сигнал умер")
+                    bot_state.set_cooldown(sym, 900)
+                    self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️ (⏸️ 15м)")
                     continue
+                    
+                if score_now < thr - 0.5:
+                    paper.cancel_order(order["id"])
+                    paper.log_event(sym, "cancel", t["last"], "Сигнал ослаб")
+                    bot_state.set_cooldown(sym, 300)
+                    self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🪫 (⏸️ 5м)")
+                    continue
+            # =======================================
 
-                score_now, candles = await live_score(sym, t, regime, btc_ret, news_items)
-                if score_now is None: continue
-                
-                # === ИММУНИТЕТ ДЛЯ ОРДЕРОВ В СТАКАНЕ ===
-                order_age = current_time - order["created"]
-                is_sniper = order.get("entry_mode") == "sniper"
-                # Снайперу (накоплению) даем 1 час железобетонного удержания в стакане
-                order_amnesty = (is_sniper and order_age < 3600) 
-                
-                if not order_amnesty:
-                    if score_now <= thr - 1.5:
-                        paper.cancel_order(order["id"])
-                        paper.log_event(sym, "cancel", t["last"], "Сигнал умер")
-                        bot_state.set_cooldown(sym, 900)
-                        self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️ (⏸️ 15м)")
-                        continue
-                        
-                    if score_now < thr - 0.5:
-                        paper.cancel_order(order["id"])
-                        paper.log_event(sym, "cancel", t["last"], "Сигнал ослаб")
-                        bot_state.set_cooldown(sym, 300)
-                        self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🪫 (⏸️ 5м)")
-                        continue
-                # =======================================
-
-                if (current_time - order["created"]) > 7200:
+            if (current_time - order["created"]) > 7200:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Тайм-аут 2ч")
                 bot_state.set_cooldown(sym, 900)
