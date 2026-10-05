@@ -146,10 +146,17 @@ class ExecutionRiskWorker:
         if max_p >= pos["avg"] * (1 + atr_pct * 2.5):
             new_sl = max(new_sl, max_p * (1 - atr_pct * 0.8))
 
+        # === ФИКС СПАМА ТРЕЙЛИНГ-СТОПА ===
         if new_sl > pos["sl"]:
-            pos["sl"] = round(new_sl, 8)
-            pos["max_sl"] = pos["sl"]
-            paper.log_event(sym, "sl_moved", pos["sl"], "Трейлинг SL")
-            self.bus.publish("NOTIFY", {"text": f"🛡 SL поднят по <b>{sym[:-4]}</b> до {fmt_price(pos['sl'])}", "urgent": False})
-            return True
+            old_sl_str = fmt_price(pos["sl"])
+            new_sl_str = fmt_price(new_sl)
+            
+            # Обновляем память и шлем уведомление ТОЛЬКО если шаг сдвига значимый
+            if new_sl_str != old_sl_str:
+                pos["sl"] = round(new_sl, 8)
+                pos["max_sl"] = pos["sl"]
+                paper.log_event(sym, "sl_moved", pos["sl"], "Трейлинг SL")
+                self.bus.publish("NOTIFY", {"text": f"🛡 SL поднят по <b>{sym[:-4]}</b> до {new_sl_str}", "urgent": False})
+                return True
+                
         return False
