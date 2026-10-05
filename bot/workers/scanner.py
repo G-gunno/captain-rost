@@ -42,4 +42,6 @@ class ScannerWorker:
             except Exception as e:
                 logger.exception(f"ScannerWorker error: {e}")
                 
-            await asyncio.sleep(60)
+            # БЫЛО: await asyncio.sleep(60)
+            # СТАЛО: Сканируем раз в 3 минуты. Идеально для 15m таймфрейма.
+            await asyncio.sleep(180)
