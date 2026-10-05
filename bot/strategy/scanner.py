@@ -202,6 +202,24 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             elif (dist_from_ema / e21 * 100) > 3.5:
                 score -= 3.0
                 reasons.append(f"отрыв от EMA21 на {(dist_from_ema / e21 * 100):.1f}%")
+
+    # 🛑 1. ФИЛЬТР ИСТОЩЕНИЯ ТРЕНДА (Лекарство от зеленых кругов ADA)
+    # Если монета выросла за день > 6%, RSI уже долго высокий (больше 60), 
+    # а EMA21 слишком далеко ушла от EMA50 (тренд стар), мы запрещаем поздний вход.
+    if t["change_pct"] > 6.0 and r > 60 and e21 > (e50 * 1.025):
+        score -= 3.5
+        reasons.append("истощение тренда (поздний вход в лесенку)")
+
+    # 🎯 2. ПОКУПКА В СИНЕМ ПРЯМОУГОЛЬНИКЕ (Стратегия "Тихое накопление")
+    # Ищем флэт: объемы спят, цена прилипла к EMA50, RSI нейтрален, макро-режим позволяет
+    is_flat = (0.995 <= (last / e50) <= 1.008) # Цена лежит прямо на EMA50 (от -0.5% до +0.8%)
+    is_quiet = vol_ratio < 1.1                  # Объемов пока нет
+    rsi_cool = 42 <= r <= 55                    # RSI разряжен
+    
+    if is_flat and is_quiet and rsi_cool and regime in ("bull", "neutral"):
+        score += 3.5  # Даем мощный буст, чтобы пробить порог входа без помощи объемов
+        reasons.append("тихая консолидация на EMA50 (накопление)")
+        keys.append("accumulation")
     
     if t["change_pct"] <= -7.0 and r <= 35 and vol_ratio >= 2.5:
         score += learner.weight("reversal") * 2.0
