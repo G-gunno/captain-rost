@@ -171,41 +171,49 @@ class PositionManagerWorker:
             ind = "🔥" if ex.get("exit_type") == "TP1_RUN" else pnl_emoji(ex["pnl_pct"])
             self._notify(f"💸 <b>Продажа</b> · {pair_html(ex['symbol'], ex)} · {ex['reason']}\n{ind} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}{runner_txt}{funding_line(ex.get('transferred', 0))}")
 
-        # 4. Проверка ОРДЕРОВ (реквоты и отмены)
-        for order in list(paper.orders):
-            sym = order["symbol"]
-            t = tickers.get(sym)
-            if not t: continue
-            
-            base = sym[:-4]
-            name = await get_coin_name(base)
-            neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
-
-            if neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33):
-                paper.cancel_order(order["id"])
-                paper.log_event(sym, "cancel", t["last"], "Токсичные новости")
-                bot_state.set_cooldown(sym, 7200)
-                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🤬📰 (⏸️ 2ч)")
-                continue
-
-            score_now, candles = await live_score(sym, t, regime, btc_ret, news_items)
-            if score_now is None: continue
-            
-            if score_now <= thr - 1.5:
-                paper.cancel_order(order["id"])
-                paper.log_event(sym, "cancel", t["last"], "Сигнал умер")
-                bot_state.set_cooldown(sym, 900)
-                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️ (⏸️ 15м)")
-                continue
+            # 4. Проверка ОРДЕРОВ (реквоты и отмены)
+            for order in list(paper.orders):
+                sym = order["symbol"]
+                t = tickers.get(sym)
+                if not t: continue
                 
-            if score_now < thr - 0.5:
-                paper.cancel_order(order["id"])
-                paper.log_event(sym, "cancel", t["last"], "Сигнал ослаб")
-                bot_state.set_cooldown(sym, 300)
-                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🪫 (⏸️ 5м)")
-                continue
+                base = sym[:-4]
+                name = await get_coin_name(base)
+                neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
 
-            if (current_time - order["created"]) > 7200:
+                if neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33):
+                    paper.cancel_order(order["id"])
+                    paper.log_event(sym, "cancel", t["last"], "Токсичные новости")
+                    bot_state.set_cooldown(sym, 7200)
+                    self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🤬📰 (⏸️ 2ч)")
+                    continue
+
+                score_now, candles = await live_score(sym, t, regime, btc_ret, news_items)
+                if score_now is None: continue
+                
+                # === ИММУНИТЕТ ДЛЯ ОРДЕРОВ В СТАКАНЕ ===
+                order_age = current_time - order["created"]
+                is_sniper = order.get("entry_mode") == "sniper"
+                # Снайперу (накоплению) даем 1 час железобетонного удержания в стакане
+                order_amnesty = (is_sniper and order_age < 3600) 
+                
+                if not order_amnesty:
+                    if score_now <= thr - 1.5:
+                        paper.cancel_order(order["id"])
+                        paper.log_event(sym, "cancel", t["last"], "Сигнал умер")
+                        bot_state.set_cooldown(sym, 900)
+                        self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️ (⏸️ 15м)")
+                        continue
+                        
+                    if score_now < thr - 0.5:
+                        paper.cancel_order(order["id"])
+                        paper.log_event(sym, "cancel", t["last"], "Сигнал ослаб")
+                        bot_state.set_cooldown(sym, 300)
+                        self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🪫 (⏸️ 5м)")
+                        continue
+                # =======================================
+
+                if (current_time - order["created"]) > 7200:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Тайм-аут 2ч")
                 bot_state.set_cooldown(sym, 900)
