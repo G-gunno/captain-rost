@@ -97,14 +97,8 @@ class PositionManagerWorker:
                 trend_broken = (last < e50 and e21 < e50) and not is_reversal
                 score_drop_allowed = False
             # ===============================================
-
-            # === ИСПРАВЛЕНИЕ: ПРИМЕНЕНИЕ АМНИСТИИ ===
-            if score_drop_allowed:
-                signal_weak = False
-            else:
-                signal_weak = trend_broken or (score_pos <= thr - (3.0 if is_reversal else 2.0))
-            # ========================================
             
+            # --- БЛОК НОВОСТЕЙ ---
             base = sym[:-4]
             name = await get_coin_name(base)
             neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
@@ -119,8 +113,13 @@ class PositionManagerWorker:
                     self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · {reason} {neg}/{mentions}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                     continue
 
-            # Для реверса даем чуть больше свободы по скору (он быстро остывает после пампа объема)
-            signal_weak = trend_broken or (score_pos <= thr - (3.0 if is_reversal else 2.0))
+            # === ИСПРАВЛЕНИЕ: ПРИМЕНЕНИЕ АМНИСТИИ ===
+            if score_drop_allowed:
+                signal_weak = False
+            else:
+                signal_weak = trend_broken or (score_pos <= thr - (3.0 if is_reversal else 2.0))
+            # ========================================
+
             pos_corr = pos.get("corr", 0.5)
             regime_danger = (pos.get("regime_entry") == "bull" and pos_corr >= 0.45 and (regime == "bear" or (regime == "neutral" and score_pos < thr)))
 
