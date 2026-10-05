@@ -86,13 +86,22 @@ class PositionManagerWorker:
             pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
             e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
             
-            # === АМНИСТИЯ ДЛЯ НОВЫХ ПОЗИЦИЙ И СНАЙПЕРОВ ===
+            # === УМНАЯ АМНИСТИЯ ДЛЯ НОВЫХ ПОЗИЦИЙ ===
             time_held = current_time - pos.get("entry_time", current_time)
-            is_reversal = pos.get("entry_mode") == "reversal"
+            entry_mode = pos.get("entry_mode", "sniper")
+            is_reversal = (entry_mode == "reversal")
             
-            if time_held < 7200:
+            # Динамический таймер иммунитета (в секундах)
+            if entry_mode == "rocket":
+                amnesty_limit = 1800   # 🚀 Ракете даем всего 30 минут. Не полетела сразу — режем.
+            elif entry_mode == "reversal":
+                amnesty_limit = 7200   # 🧲 Ловцу дна даем 2 часа на формирование отскока.
+            else:
+                amnesty_limit = 10800  # 🏹 Снайперу в накоплении даем 3 часа высидеть во флэте.
+            
+            if time_held < amnesty_limit:
                 trend_broken = False
-                score_drop_allowed = True # <-- Игнорируем падение скора первые 2 часа
+                score_drop_allowed = True
             else:
                 trend_broken = (last < e50 and e21 < e50) and not is_reversal
                 score_drop_allowed = False
