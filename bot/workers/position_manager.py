@@ -87,14 +87,15 @@ class PositionManagerWorker:
             e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
             
             # === АМНИСТИЯ ДЛЯ НОВЫХ ПОЗИЦИЙ И СНАЙПЕРОВ ===
-            # Даем позициям "подышать" минимум 2 часа (7200 сек), чтобы отработал нормальный SL
             time_held = current_time - pos.get("entry_time", current_time)
             is_reversal = pos.get("entry_mode") == "reversal"
             
             if time_held < 7200:
                 trend_broken = False
+                score_drop_allowed = True # <-- Игнорируем падение скора первые 2 часа
             else:
                 trend_broken = (last < e50 and e21 < e50) and not is_reversal
+                score_drop_allowed = False
             # ===============================================
             
             base = sym[:-4]
