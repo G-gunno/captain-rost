@@ -97,6 +97,13 @@ class PositionManagerWorker:
                 trend_broken = (last < e50 and e21 < e50) and not is_reversal
                 score_drop_allowed = False
             # ===============================================
+
+            # === ИСПРАВЛЕНИЕ: ПРИМЕНЕНИЕ АМНИСТИИ ===
+            if score_drop_allowed:
+                signal_weak = False
+            else:
+                signal_weak = trend_broken or (score_pos <= thr - (3.0 if is_reversal else 2.0))
+            # ========================================
             
             base = sym[:-4]
             name = await get_coin_name(base)
