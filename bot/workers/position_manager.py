@@ -131,13 +131,13 @@ class PositionManagerWorker:
 
             if signal_weak or regime_danger:
                 if regime_danger and not signal_weak:
-                    reason = "⚠️ Режим"
+                    reason = "🔐📉" # <-- Было "⚠️ Режим"
                     bot_state.set_cooldown(sym, 1800)
                 elif pnl_pct > 0:
-                    reason = "🪫 Ослаб"
+                    reason = "🪫"
                     bot_state.set_cooldown(sym, 300)
                 else:
-                    reason = "✂️📉 Резка убытка"
+                    reason = "✂️📉"
                     bot_state.set_cooldown(sym, 1800)
 
                 ex = paper._sell(sym, last, reason, regime_now=regime)
