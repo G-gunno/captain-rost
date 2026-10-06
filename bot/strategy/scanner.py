@@ -211,12 +211,14 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         reasons.append("истощение тренда (поздний вход в лесенку)")
 
     # 🎯 2. ПОКУПКА В СИНЕМ ПРЯМОУГОЛЬНИКЕ (Стратегия "Тихое накопление")
-    is_flat = (0.995 <= (last / e50) <= 1.008) 
-    is_quiet = vol_ratio < 1.1                  
-    rsi_cool = 42 <= r <= 55                    
+    # Накоплением считаем только ситуации, где краткосрочный тренд не смотрит в пол
+    is_flat = (0.995 <= (last / e50) <= 1.008)
+    is_quiet = vol_ratio < 1.1
+    rsi_cool = 42 <= r <= 55
     no_recent_pump = t["change_pct"] < 4.0      # <-- НОВОЕ: Запрещаем считать флэтом монеты, которые уже выросли за сутки
+    trend_ok = e21 >= (e50 * 0.998)             # <-- НОВОЕ: EMA21 не должна быть завалена глубоко под EMA50
     
-    if is_flat and is_quiet and rsi_cool and no_recent_pump and regime in ("bull", "neutral"):
+    if is_flat and is_quiet and rsi_cool and no_recent_pump and trend_ok and regime in ("bull", "neutral"):
         score += 3.5  
         reasons.append("тихая консолидация на EMA50 (накопление)")
         keys.append("accumulation")
