@@ -129,29 +129,31 @@ class ExecutionRiskWorker:
             paper.save()
 
     def _update_trailing_stop(self, sym: str, pos: dict, max_p: float) -> bool:
-        # Расширяем дыхание с 2% до 3% базово
-        atr_pct = 0.03 
+        # === ДИНАМИЧЕСКИЙ ТРЕЙЛИНГ ===
+        # Берем дистанцию до TP и начинаем тралить на полпути к нему (но не меньше 1.2%)
+        tp_dist_pct = (pos["tp"] - pos["avg"]) / pos["avg"]
+        atr_pct = max(tp_dist_pct * 0.5, 0.012) 
+        
         breakeven = pos["avg"] * 1.0025 # Уверенный безубыток с учетом комсы
         
         new_sl = pos["sl"]
-        # Перенос в БУ, когда выросли на 3%
+        # 1. Перенос в БУ (когда прошли половину пути до TP)
         if max_p >= pos["avg"] * (1 + atr_pct):
             new_sl = max(new_sl, breakeven)
             
-        # Трал на дистанции 3.6% (1.2 * 3%) вниз от максимума
+        # 2. Стандартный трал на дистанции atr_pct вниз от пика
         if max_p >= pos["avg"] * (1 + atr_pct * 1.5):
-            new_sl = max(new_sl, max_p * (1 - atr_pct * 1.2))
+            new_sl = max(new_sl, max_p * (1 - atr_pct))
             
-        # Жесткий трал на дистанции 2.4% вниз от максимума, если улетели в стратосферу (>7.5%)
+        # 3. Жесткий трал, если ракета улетела очень высоко
         if max_p >= pos["avg"] * (1 + atr_pct * 2.5):
-            new_sl = max(new_sl, max_p * (1 - atr_pct * 0.8))
+            new_sl = max(new_sl, max_p * (1 - atr_pct * 0.6))
 
         # === ФИКС СПАМА ТРЕЙЛИНГ-СТОПА ===
         if new_sl > pos["sl"]:
             old_sl_str = fmt_price(pos["sl"])
             new_sl_str = fmt_price(new_sl)
             
-            # Обновляем память и шлем уведомление ТОЛЬКО если шаг сдвига значимый
             if new_sl_str != old_sl_str:
                 pos["sl"] = round(new_sl, 8)
                 pos["max_sl"] = pos["sl"]
