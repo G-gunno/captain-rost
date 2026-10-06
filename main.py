@@ -237,8 +237,8 @@ async def confirm_handler(update, context):
         fn, _ = entry
         try:
             result = await fn(context)
-            try: await query.edit_message_text(f"✅ <b>Подтверждено</b>\n\n{result}", reply_markup=InlineKeyboardMarkup([]))
-            except BadRequest: await query.edit_message_text(f"✅ Подтверждено\n\n{result}", reply_markup=InlineKeyboardMarkup([]))
+            try: await query.edit_message_text(f"✅ <b>Подтверждено</b>\n\n{result}", reply_markup=InlineKeyboardMarkup([]), parse_mode="HTML")
+            except BadRequest: await query.edit_message_text(f"✅ Подтверждено\n\n{result}", reply_markup=InlineKeyboardMarkup([]), parse_mode="HTML")
         except BadRequest as e:
             if "Message is not modified" in str(e): return
             try: await query.edit_message_text(f"⚠️ Ошибка: {e}", reply_markup=InlineKeyboardMarkup([]))
