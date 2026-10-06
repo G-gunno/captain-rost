@@ -369,13 +369,20 @@ async def cmd_status(update, context):
     try:
         prices = await market_data.get_tickers()
         eq = paper.equity(prices)
-        free_pct = paper.usdt / eq * 100 if eq else 0
+        
+        # === ИСПРАВЛЕНИЕ: Считаем доступный кэш с учетом заморозки в ордерах ===
+        locked_usdt = sum(o["qty"] * o["price"] for o in paper.orders)
+        available_usdt = paper.usdt - locked_usdt
+        free_pct = available_usdt / eq * 100 if eq else 0
+        # ======================================================================
         
         metrics_all = paper.get_metrics(prices)
         metrics_24h = paper.get_metrics(prices, hours=24)
 
         msg = ["📊 <b>Капитан Рост</b> · <i>тренировка</i> 🎓", ""]
-        msg.append(f"💰 Свободно: <b>{usd(paper.usdt)}</b> ({free_pct:.0f}%)")
+        msg.append(f"💰 Доступно: <b>{usd(available_usdt)}</b> ({free_pct:.0f}%)")
+        if locked_usdt > 0:
+            msg.append(f"🔒 В ордерах: <b>{usd(locked_usdt)}</b>")
         msg.append(f"🏦 Накопления: <b>{usd(paper.funding)}</b>")
         msg.append(f"📈 Капитал: <b>{usd(eq)}</b>")
         msg.append(f"💵 PnL (за всё время): {pnl_emoji(metrics_all['total_pnl'])} <b>{usd(metrics_all['total_pnl'])}</b>")
