@@ -80,6 +80,13 @@ class OrderManagerWorker:
                 else: sl_dist_atr = 1.2 * a
                 
                 sl_dist_raw = sl_dist_atr * learner.weight("sl_mult")
+                
+                # === ЗАЩИТА СНАЙПЕРА ===
+                # Во флэте ATR сжимается, поэтому ставим жесткий лимит: стоп не может быть уже 1.8%
+                if entry_mode == "sniper":
+                    sl_dist_raw = max(sl_dist_raw, entry * 0.018)
+                # =======================
+                
                 tp_dist_raw = max(2.0 * a * learner.weight("tp_mult"), sl_dist_raw * 1.5)
                 sl = entry - sl_dist_raw
                 tp = max(entry + tp_dist_raw, entry * 1.006)
