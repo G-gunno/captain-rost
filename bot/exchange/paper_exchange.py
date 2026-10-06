@@ -273,9 +273,28 @@ class PaperExchange:
         transferred = 0.0
 
         if total_pnl > 0:
-            transferred = round(total_pnl * 0.30, 4)
-            self.usdt -= transferred
-            self.funding += transferred
+            if tier == "TOP20":
+                # === СТРАТЕГИЯ НАКОПЛЕНИЯ КРИПТЫ (Funding Account) ===
+                # Считаем, сколько монет нужно продать, чтобы вернуть тело сделки + комиссии
+                target_return = cost + fee_buy
+                qty_to_sell = (target_return / (1 - self.FEE_PCT / 100)) / price
+                qty_kept = pos["qty"] - qty_to_sell
+                
+                # Откатываем стандартную продажу всей позиции, возвращаем на торговый баланс только USDT-тело
+                self.usdt -= (proceeds - fee_sell) 
+                self.usdt += target_return         
+                
+                # Переводим бесплатные монеты на Аккаунт Финансирования
+                if not hasattr(self, 'funding_coins'): self.funding_coins = {}
+                self.funding_coins[sym] = self.funding_coins.get(sym, 0.0) + qty_kept
+                
+                reason += " 🏦"
+                # ====================================================
+            else:
+                # Для альткоинов переводим 30% профита в USDT на Аккаунт Финансирования
+                transferred = round(total_pnl * 0.30, 4)
+                self.usdt -= transferred
+                self.funding += transferred
 
         self.realized.append({
             "symbol": sym, "pnl": round(total_pnl, 4), "pnl_pct": round(total_pnl_pct, 2),
