@@ -219,7 +219,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     trend_ok = e21 >= (e50 * 0.998)             # <-- НОВОЕ: EMA21 не должна быть завалена глубоко под EMA50
     
     if is_flat and is_quiet and rsi_cool and no_recent_pump and trend_ok and regime in ("bull", "neutral"):
-        score += 3.5  
+        score += 3.5 * learner.weight("accumulation")  # <-- ТЕПЕРЬ ИИ БУДЕТ УПРАВЛЯТЬ ВЕСОМ
         reasons.append("тихая консолидация на EMA50 (накопление)")
         keys.append("accumulation")
     
