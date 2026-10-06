@@ -191,12 +191,17 @@ class PositionManagerWorker:
             # === ИММУНИТЕТ ДЛЯ ОРДЕРОВ В СТАКАНЕ ===
             order_age = current_time - order["created"]
             is_sniper = order.get("entry_mode") == "sniper"
-            order_amnesty = (is_sniper and order_age < 3600) 
+            
+            # НОВОЕ: Проверяем, не сломался ли локальный тренд, пока мы сидели в засаде
+            trend_broken_order = (t["last"] < e50 and e21 < e50)
+            
+            # Амнистия работает, только если тренд жив! Если он сломан - срываем иммунитет.
+            order_amnesty = (is_sniper and order_age < 3600 and not trend_broken_order) 
             
             if not order_amnesty:
                 if score_now <= thr - 1.5:
                     paper.cancel_order(order["id"])
-                    paper.log_event(sym, "cancel", t["last"], "Сигнал умер")
+                    paper.log_event(sym, "cancel", t["last"], "Сигнал умер (Слом тренда)")
                     bot_state.set_cooldown(sym, 900)
                     self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️ (⏸️ 15м)")
                     continue
