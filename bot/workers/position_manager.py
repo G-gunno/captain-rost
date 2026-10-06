@@ -188,14 +188,18 @@ class PositionManagerWorker:
             score_now, candles = await live_score(sym, t, regime, btc_ret, news_items)
             if score_now is None: continue
             
+            # === ФИКС ОШИБКИ: ДОБАВЛЯЕМ РАСЧЕТ EMA ДЛЯ ОРДЕРОВ ===
+            closes_order = [c["close"] for c in candles]
+            e21 = ema(closes_order, 21)[-1]
+            e50 = ema(closes_order, 50)[-1]
+            # =======================================================
+            
             # === ИММУНИТЕТ ДЛЯ ОРДЕРОВ В СТАКАНЕ ===
             order_age = current_time - order["created"]
             is_sniper = order.get("entry_mode") == "sniper"
             
-            # НОВОЕ: Проверяем, не сломался ли локальный тренд, пока мы сидели в засаде
+            # Теперь переменные e50 и e21 существуют, ошибка уйдет!
             trend_broken_order = (t["last"] < e50 and e21 < e50)
-            
-            # Амнистия работает, только если тренд жив! Если он сломан - срываем иммунитет.
             order_amnesty = (is_sniper and order_age < 3600 and not trend_broken_order) 
             
             if not order_amnesty:
