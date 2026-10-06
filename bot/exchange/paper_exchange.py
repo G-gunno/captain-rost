@@ -24,6 +24,7 @@ class PaperExchange:
         self.positions = {}
         self.orders = []
         self.trades = []
+        self.funding_coins = {} # Хранит крипту в Накоплениях (Аккаунт финансирования)
         self.realized = []
         self.market_history = []
         self.chart_events = [] 
@@ -46,6 +47,7 @@ class PaperExchange:
             self.positions = data.get("positions", {})
             self.orders = data.get("orders", [])
             self.trades = data.get("trades", [])
+            self.funding_coins = data.get("funding_coins", {})
             self.realized = data.get("realized", [])
             self.market_history = data.get("market_history", [])
             self.chart_events = data.get("chart_events", [])  
@@ -60,6 +62,7 @@ class PaperExchange:
             "positions": self.positions,
             "orders": self.orders,
             "trades": self.trades,
+            "funding_coins": getattr(self, "funding_coins", {}),
             "realized": self.realized,
             "market_history": self.market_history,
             "chart_events": self.chart_events[-500:] if hasattr(self, 'chart_events') else [] # <-- Было -3000:
