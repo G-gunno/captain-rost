@@ -130,14 +130,17 @@ class ExecutionRiskWorker:
 
     def _update_trailing_stop(self, sym: str, pos: dict, max_p: float) -> bool:
         # === ДИНАМИЧЕСКИЙ ТРЕЙЛИНГ ===
-        # Берем дистанцию до TP и начинаем тралить на полпути к нему (но не меньше 1.2%)
         tp_dist_pct = (pos["tp"] - pos["avg"]) / pos["avg"]
-        atr_pct = max(tp_dist_pct * 0.5, 0.012) 
+        
+        # ИСПРАВЛЕНИЕ: Трал стартует на полпути к тейк-профиту.
+        # Защита от шума: не раньше чем +0.8%.
+        # Ограничитель: гарантированно ДО тейк-профита (максимум на 80% пути).
+        atr_pct = min(max(tp_dist_pct * 0.5, 0.008), tp_dist_pct * 0.8) 
         
         breakeven = pos["avg"] * 1.0025 # Уверенный безубыток с учетом комсы
         
         new_sl = pos["sl"]
-        # 1. Перенос в БУ (когда прошли половину пути до TP)
+        # 1. Перенос в БУ (когда достигли atr_pct)
         if max_p >= pos["avg"] * (1 + atr_pct):
             new_sl = max(new_sl, breakeven)
             
