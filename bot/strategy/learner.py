@@ -9,7 +9,8 @@ from bot.core.remote_state import download_state, upload_state
 STATE_FILE = Path("storage/learner.json")
 REMOTE_PATH = "learner.json"
 
-KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "news_pos", "hype", "indep", "mtf_dip", "reversal", "accumulation"]
+# Убрали паттерны: "mtf_dip", "reversal", "accumulation". Они теперь имеют жесткий скор.
+KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "news_pos", "hype", "indep"]
 
 SAT_LIMIT_BASE = 20.0
 SAT_LIMIT_MAX = 30.0
@@ -239,28 +240,6 @@ class Learner:
         top = sorted(self.weights.items(), key=lambda kv: kv[1], reverse=True)[:3]
         txt = ", ".join(f"{k} {v:.2f}" for k, v in top[:3])
         return f"wr {wr:.0%} ({n}) · топ: {txt} · строгость {self.threshold_adj:+.1f}"
-
-    def entry_mode_bias(self, mode):
-        # Оставили только чисто статистическое преимущество на основе винрейта стратегий
-        if mode != "rocket":
-            return 0.0, 1.0 
-            
-        rock_hist = self.entry_stats.get("rocket") or []
-        snip_hist = self.entry_stats.get("sniper") or []
-        
-        if len(rock_hist) < 3 or len(snip_hist) < 3:
-            return 0.0, 1.0
-            
-        r_avg = sum(rock_hist) / len(rock_hist)
-        s_avg = sum(snip_hist) / len(snip_hist)
-        diff = r_avg - s_avg
-        
-        if diff >= 0.5:
-            return 0.3, 1.3   
-        elif diff <= -0.5:
-            return -0.3, 0.7  
-        
-        return 0.0, 1.0
 
     def kelly_multiplier(self, mode):
         hist = self.entry_stats.get(mode) or []
