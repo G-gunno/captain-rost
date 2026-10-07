@@ -24,7 +24,7 @@ def portfolio_limits(equity):
     if equity <= 5000: return 10, 12
     return 12, 15
 
-def buy_size(equity, score, thr, liquidity, free_usdt, kind="core", entry_mode="sniper", size_multiplier=1.0):
+def buy_size(equity, score, thr, liquidity, free_usdt, kind="core", entry_mode="sniper"):
     base_min, base_max = tier_limits(equity)
     
     if kind == "satellite":
@@ -45,15 +45,6 @@ def buy_size(equity, score, thr, liquidity, free_usdt, kind="core", entry_mode="
 
     if liquidity < 500_000:
         size = base_min
-
-    # --- ИСПРАВЛЕНИЕ: Сайзинг по режимам ---
-    if entry_mode == "rocket":
-        size = size * size_multiplier
-    elif entry_mode == "reversal":
-        # Защита от падающих ножей: урезаем на 30%
-        size = size * 0.7 * size_multiplier
-    else:
-        size = size * 1.1
 
     max_allowed = (base_min * 3.0) if kind == "satellite" else base_max
     size = max(base_min, min(size, max_allowed))
