@@ -83,7 +83,7 @@ class ExecutionRiskWorker:
             # SL
             if last <= pos["sl"]:
                 ex = paper._sell(sym, last, "SL 🛡")
-                paper.log_event(sym, "sell", last, "SL 🛡")
+                paper.log_event(sym, "sell_loss", last, "SL 🛡")
                 self.bus.publish("NOTIFY", {
                     "text": f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · SL 🛡\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}",
                     "urgent": False
@@ -96,7 +96,7 @@ class ExecutionRiskWorker:
                     half = pos["qty"] / 2
                     ex = paper.sell_partial(sym, half, pos["tp"], "TP1 🎯")
                     pos["tp1_done"] = True
-                    paper.log_event(sym, "sell", last, "TP1 🎯")
+                    paper.log_event(sym, "sell_profit", last, "TP1 🎯")
                     shadow.mark_success(sym)
                     
                     breakeven_price = pos["avg"] * 1.002
@@ -111,7 +111,7 @@ class ExecutionRiskWorker:
                     })
                 else:
                     ex = paper._sell(sym, last, "TP ✅")
-                    paper.log_event(sym, "sell", last, "TP ✅")
+                    paper.log_event(sym, "sell_profit", last, "TP ✅")
                     shadow.mark_success(sym)
                     self.bus.publish("NOTIFY", {
                         "text": f"🎯 <b>TP RUNNER</b> · {pair_html(sym, ex)} · ✅\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}",
