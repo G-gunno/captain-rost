@@ -120,7 +120,9 @@ class TradeVisualizer:
             "order_placed": ("cyan", "line-ew", "Ордер"),
             "order_moved": ("blue", "diamond-open", "Сдвиг"),
             "buy": ("lime", "triangle-up", "Покупка"),
-            "sell": ("red", "x", "Продажа"),
+            "sell_profit": ("#00e676", "x", "Профит"),
+            "sell_loss": ("#ff1744", "x", "Убыток"),
+            "sell": ("red", "x", "Продажа"), # Фоллбэк для старых сделок
             "sl_moved": ("orange", "circle-open", "Трейлинг"),
             "cancel": ("silver", "x-open", "Отмена")
         }
