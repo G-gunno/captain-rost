@@ -100,8 +100,9 @@ class OrderManagerWorker:
             if tp <= entry or sl >= entry or round(rr, 2) < min_rr:
                 continue
 
+            # Удалили size_multiplier
             size = buy_size(equity, cand["score"], thr, cand["liquidity"], paper.usdt,
-                            kind=kind, entry_mode=entry_mode, size_multiplier=cand.get("size_mult", 1.0))
+                            kind=kind, entry_mode=entry_mode)
 
             if size < 10: continue
 
