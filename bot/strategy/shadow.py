@@ -10,7 +10,7 @@ from bot.strategy.learner import learner
 STATE_FILE = Path(os.getenv("STORAGE_DIR", "storage")) / "shadow.json"
 REMOTE_PATH = "shadow.json"
 
-OBS_GAP = 2.0            # порог наблюдения = thr - 2
+OBS_GAP = 2.0            # порог наблюдения
 H4 = 4 * 3600
 H24 = 24 * 3600
 PUMP_PCT = 3.0
@@ -27,8 +27,7 @@ def _band(score):
 
 
 class Shadow:
-    """Теневой журнал: наблюдает монеты (в т.ч. упущенные), копит агрегаты,
-    мягко тюнит порог/веса/охоту/SL. Хранит копейки данных."""
+    """Теневой журнал: наблюдает монеты, копит агрегаты и независимо тюнит стратегии."""
 
     def __init__(self):
         self.episodes = {}
@@ -36,7 +35,7 @@ class Shadow:
         self.cooldown = {}
         self.tuning = {
             "auto": True,
-            "thr_nudge": 0.0,
+            "nudge_rocket": 0.0, "nudge_sniper": 0.0, "nudge_reversal": 0.0,
             "hunt": -0.004, "near": -0.0015, "capture": +0.002,
             "sl_mult": 1.0, "tp_mult": 1.0,
             "signal_windows": {"rsi_hi": 90, "chg_hi": 30, "vol_lo": 1.3},
@@ -69,21 +68,26 @@ class Shadow:
             STATE_FILE.write_text(json.dumps(payload, ensure_ascii=False))
         except Exception as e:
             logger.error(f"shadow save error: {e}")
-        if time.time() - self._last_upload > 3600:  # <-- Изменить на 3600
+        if time.time() - self._last_upload > 3600:
             self._last_upload = time.time()
             upload_state(REMOTE_PATH, payload)
 
-    def observe(self, scored, regime, thr):
+    def observe(self, scored, regime, thrs):
         from bot.exchange.paper_exchange import paper
         now = time.time()
-        obs_thr = thr - OBS_GAP
+        
         for c in scored:
             sym = c["symbol"]
+            mode = c.get("entry_mode", "sniper")
+            thr = thrs.get(mode, 6.0)
+            obs_thr = thr - OBS_GAP
+            
             if sym in self.episodes:
                 ep = self.episodes[sym]
                 if c["score"] > ep["max_score"]:
                     ep["max_score"] = c["score"]
                 continue
+                
             if c["score"] < obs_thr:
                 continue
             if now < self.cooldown.get(sym, 0):
@@ -91,22 +95,20 @@ class Shadow:
             if len(self.episodes) >= MAX_EPISODES:
                 continue
             
-            # ИСПРАВЛЕНИЕ: success=True только если был реальный заработок
-            traded = (sym in paper.positions or
-                      any(o["symbol"] == sym for o in paper.orders))
+            traded = (sym in paper.positions or any(o["symbol"] == sym for o in paper.orders))
             
             self.episodes[sym] = {
                 "ts": now, "price": c["last"], "max_score": c["score"],
-                "regime": regime, "sector": c.get("sector"), "tier": c.get("tier"),
+                "regime": regime, "entry_mode": mode,
+                "sector": c.get("sector"), "tier": c.get("tier"),
                 "keys": c.get("reason_keys", []), "traded": bool(traded),
                 "success": False, 
                 "hi": c["last"], "lo": c["last"], "p4": None,
-                "lo_before_pump": c["last"], "pumped": False,  # ИСПРАВЛЕНИЕ: трекинг чистого отката
+                "lo_before_pump": c["last"], "pumped": False,  
                 "signal_values": c.get("signal_values", {}),
             }
 
     def mark_success(self, sym):
-        """Вызывается ядром, только если мы закрыли позицию в ПЛЮС (TP1 или трейлинг)."""
         if sym in self.episodes:
             self.episodes[sym]["success"] = True
             self.save()
@@ -121,7 +123,6 @@ class Shadow:
             ep["hi"] = max(ep["hi"], last)
             ep["lo"] = min(ep["lo"], last)
             
-            # ИСПРАВЛЕНИЕ 1: Фиксируем лой ТОЛЬКО до момента пампа (+3%)
             if not ep.get("pumped"):
                 ep["lo_before_pump"] = min(ep.get("lo_before_pump", last), last)
                 if last >= ep["price"] * (1 + PUMP_PCT / 100):
@@ -147,12 +148,14 @@ class Shadow:
         mfe = (ep["hi"] - dec) / dec * 100
         pullback = (ep.get("lo_before_pump", ep["lo"]) - dec) / dec * 100
         
-        key = f"{ep['regime']}|{_band(ep['max_score'])}"
+        # === Ключ агрегации теперь содержит тип стратегии ===
+        mode = ep.get("entry_mode", "sniper")
+        key = f"{ep['regime']}|{mode}|{_band(ep['max_score'])}"
         
         a = self.agg.setdefault(key, {
             "n": 0, "sum4": 0.0, "sum24": 0.0, "pumps4": 0, "pumps24": 0,
             "traded": 0, "sum_mae": 0.0, "sum_mfe": 0.0, "sum_pull": 0.0,
-            "sum_pull_pump": 0.0, "sum_mae_pump": 0.0, # Метрики только для победителей
+            "sum_pull_pump": 0.0, "sum_mae_pump": 0.0, 
             "keys_pump": {}, "keys_all": {},
         })
         a["n"] += 1
@@ -167,7 +170,6 @@ class Shadow:
             
         if move24 >= PUMP_PCT:
             a["pumps24"] += 1
-            # ИСПРАВЛЕНИЕ 2: Изолированная статистика для успешных пампов
             a["sum_pull_pump"] = a.get("sum_pull_pump", 0.0) + pullback
             a["sum_mae_pump"] = a.get("sum_mae_pump", 0.0) + mae
             
@@ -191,30 +193,38 @@ class Shadow:
             return
         self._last_tune = now
 
-        # ИСПРАВЛЕНИЕ 3: Двусторонняя калибровка порога
-        nudge = 0.0
-        base = {"bull": 5.0, "neutral": 6.0, "bear": 7.0}
-        total_missed_pumps = 0
+        # === ИНДИВИДУАЛЬНАЯ КАЛИБРОВКА ПО СТРАТЕГИЯМ ===
+        for mode in ["rocket", "sniper", "reversal"]:
+            nudge = 0.0
+            mode_pumps = 0
+            mode_traded = 0
+            mode_n = 0
+            
+            for key, a in self.agg.items():
+                if f"|{mode}|" in key:
+                    mode_n += a["n"]
+                    mode_pumps += a["pumps24"]
+                    mode_traded += a["traded"]
+            
+            if mode_n >= 5:
+                pump_rate = mode_pumps / mode_n
+                missed = mode_pumps - mode_traded
+                
+                # Если упускаем пампы -> Смягчаем порог
+                if missed >= 3 and pump_rate >= 0.3:
+                    nudge -= 0.25
+                # Если ловим фейкауты -> Ужесточаем порог
+                elif pump_rate < 0.15 and mode_traded >= 1:
+                    nudge += 0.25
+                    
+            self.tuning[f"nudge_{mode}"] = round(max(-0.5, min(0.5, nudge)), 2)
+
+        # Общие агрегаты (SL и Hunt) по успешным пампам
         total_pumps = 0
+        total_missed_pumps = 0
         sum_pull_pump = 0.0
         sum_mae_pump = 0.0
         
-        for reg, b in base.items():
-            a = self.agg.get(f"{reg}|{_band(b)}")
-            if a and a["n"] >= 10:
-                pump_rate = a["pumps24"] / a["n"]
-                missed = a["pumps24"] - a["traded"]
-                
-                # Если упускаем много крутых пампов -> Смягчаем порог
-                if missed >= 5 and pump_rate >= 0.3:
-                    nudge -= 0.25
-                # Если на рынке много фейкаутов (мы входим, но монеты не пампят) -> Ужесточаем порог
-                elif pump_rate < 0.15 and a["traded"] >= 2:
-                    nudge += 0.25
-
-        self.tuning["thr_nudge"] = round(max(-0.5, min(0.5, nudge)), 2)
-
-        # Считаем агрегаты ТОЛЬКО по успешным пампам
         for a in self.agg.values():
             pumps = a.get("pumps24", 0)
             total_pumps += pumps
@@ -222,18 +232,15 @@ class Shadow:
             sum_pull_pump += a.get("sum_pull_pump", 0.0)
             sum_mae_pump += a.get("sum_mae_pump", 0.0)
 
-        # Охота (Hunt) и Стоп-Лосс (SL) на базе реальных победителей
         if total_pumps >= 5:
             avg_pull = sum_pull_pump / total_pumps
             avg_mae = sum_mae_pump / total_pumps
 
-            # Если мы массово упускаем пампы, значит мы жадничаем с лимитками (берем 30% от отката)
             if total_missed_pumps > 10:
                 self.tuning["hunt"] = round(max(-0.01, min(-0.001, avg_pull / 100 * 0.3)), 4)
             else:
                 self.tuning["hunt"] = round(max(-0.01, min(-0.002, avg_pull / 100 * 0.6)), 4)
 
-            # Расширяем SL только если реальные победители терпели сильную просадку
             self.tuning["sl_mult"] = round(max(0.8, min(1.5, 1.0 + abs(avg_mae) / 100 * 0.3)), 2)
 
         self._apply_weight_lift()
@@ -285,14 +292,6 @@ class Shadow:
     def signal_windows(self):
         return self.tuning.get("signal_windows", {"rsi_hi": 90, "chg_hi": 30, "vol_lo": 1.3})
 
-    def _avg(self, field, min_n=10):
-        tn = sum(a["n"] for a in self.agg.values())
-        ts = sum(a.get(field, 0.0) for a in self.agg.values())
-        return ts / tn if tn >= min_n else None
-
-    def threshold_nudge(self):
-        return self.tuning["thr_nudge"] if self.tuning["auto"] else 0.0
-
     def hunt(self):
         return self.tuning["hunt"]
 
@@ -322,10 +321,19 @@ class Shadow:
         for key in sorted(self.agg):
             a = self.agg[key]
             if a["n"] < 3: continue
-            reg, band = key.split("|")
+            
+            # Парсим новый 3-составной ключ (Режим|Стратегия|Скор)
+            parts = key.split("|")
+            if len(parts) == 3:
+                reg, mode, band = parts
+            else:
+                continue
+                
             avg = a["sum24"] / a["n"]
             em = reg_emoji.get(reg, "⚪")
-            out.append(f"   {em} {band}: {a['n']} набл. · ср. {avg:+.1f}% · "
+            mode_icon = "🚀" if mode == "rocket" else "🧲" if mode == "reversal" else "🏹"
+            
+            out.append(f"   {em} {mode_icon} {band}: {a['n']} набл. · ср. {avg:+.1f}% · "
                        f"🎯 {a.get('traded', 0)}/{a['pumps24']} пампов")
             shown = True
             
@@ -334,21 +342,21 @@ class Shadow:
             
         t = self.tuning
         w = t.get("signal_windows", {})
-        out.append(f"   ⚙️ порог {t['thr_nudge']:+.2f} · откат {t['hunt']*100:+.2f}% · SL ×{t['sl_mult']:.2f}")
+        out.append(f"   ⚙️ тюнинг: 🚀 {t.get('nudge_rocket', 0):+.2f} | 🏹 {t.get('nudge_sniper', 0):+.2f} | 🧲 {t.get('nudge_reversal', 0):+.2f}")
+        out.append(f"   📏 откат {t['hunt']*100:+.2f}% · SL ×{t['sl_mult']:.2f}")
         out.append(f"   📏 RSI ≤{w.get('rsi_hi', 90)} · chg ≤{w.get('chg_hi', 30)}% · vol ≥{w.get('vol_lo', 1.3)}×")
         return out
 
     def stats_text(self):
         return "\n".join(self.learn_lines())
 
-    # --- НОВЫЙ МЕТОД (добавь в самый низ класса Shadow, перед shadow = Shadow()) ---
     def reset(self):
         self.episodes = {}
         self.agg = {}
         self.cooldown = {}
         self.tuning = {
             "auto": True,
-            "thr_nudge": 0.0,
+            "nudge_rocket": 0.0, "nudge_sniper": 0.0, "nudge_reversal": 0.0,
             "hunt": -0.004, "near": -0.0015, "capture": +0.002,
             "sl_mult": 1.0, "tp_mult": 1.0,
             "signal_windows": {"rsi_hi": 90, "chg_hi": 30, "vol_lo": 1.3},
