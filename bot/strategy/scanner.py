@@ -14,7 +14,7 @@ from bot.news.cmc import (get_coin_name, get_sectors_for_pool,
 from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sentiment
 from bot.strategy.fundamental import get_macro_trend, is_sector_hot, get_fear_and_greed, check_coinglass_liquidation_threat
 
-SCAN_SUMMARY = {"text": "", "thr": 0, "ts": 0}
+SCAN_SUMMARY = {"text": "", "thrs": {}, "ts": 0}
 FILTERED_BY_NEWS = []
 
 SAT_ATR_PCT = 1.2
@@ -26,6 +26,25 @@ STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
                 "USD1", "USDD", "EUR", "EURT", "AEUR", "USDT",
                 "RLUSD", "PYUSD", "EURI", "USDS", "USD0", "FRAX",
                 "LUSD", "GUSD", "XUSD", "USDX", "CUSD", "SUSD"}
+
+# === МАТРИЦА ПОРОГОВ ===
+BASE_THRESHOLDS = {
+    "bull": {"rocket": 6.0, "sniper": 5.5, "reversal": 6.5},
+    "neutral": {"rocket": 6.5, "sniper": 6.0, "reversal": 6.0},
+    "bear": {"rocket": 7.0, "sniper": 6.5, "reversal": 5.5},
+}
+
+
+def get_thresholds(regime):
+    base = BASE_THRESHOLDS.get(regime, BASE_THRESHOLDS["neutral"])
+    adj = learner.threshold_adj 
+    t = shadow.tuning
+    
+    return {
+        "rocket": round(max(0.0, min(SCORE_MAX - 0.5, base["rocket"] + adj + t.get("nudge_rocket", 0.0))), 2),
+        "sniper": round(max(0.0, min(SCORE_MAX - 0.5, base["sniper"] + adj + t.get("nudge_sniper", 0.0))), 2),
+        "reversal": round(max(0.0, min(SCORE_MAX - 0.5, base["reversal"] + adj + t.get("nudge_reversal", 0.0))), 2),
+    }
 
 
 def is_tradable(symbol):
@@ -46,12 +65,6 @@ def raw_max_score(regime):
     m += 1.0   
     m += 0.5   
     return m
-
-
-def threshold(regime):
-    base = {"bull": 5.0, "neutral": 6.0, "bear": 7.0}.get(regime, 6.0)
-    thr = base + learner.threshold_adj + shadow.threshold_nudge()
-    return round(max(min(thr, SCORE_MAX - 0.5), SCORE_MAX * 0.5), 2)
 
 
 def _returns(closes):
@@ -191,7 +204,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     if candle_range > 0 and (wick_up / candle_range) > 0.5 and vol_ratio > 1.5:
         score -= 3.0
         reasons.append("отвержение (длинная тень сверху)")
-    # 🛑 ЗАЩИТА ОТ FOMO (Эффект натянутой резинки)
+
     if not is_open_pos:
         a15 = atr(candles_15m)
         if a15 > 0 and e21 > 0:
@@ -203,23 +216,18 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
                 score -= 3.0
                 reasons.append(f"отрыв от EMA21 на {(dist_from_ema / e21 * 100):.1f}%")
 
-    # 🛑 1. ФИЛЬТР ИСТОЩЕНИЯ ТРЕНДА (Лекарство от зеленых кругов ADA)
-    # Если монета выросла за день > 6%, RSI уже долго высокий (больше 60), 
-    # а EMA21 слишком далеко ушла от EMA50 (тренд стар), мы запрещаем поздний вход.
     if t["change_pct"] > 6.0 and r > 60 and e21 > (e50 * 1.025):
         score -= 3.5
         reasons.append("истощение тренда (поздний вход в лесенку)")
 
-    # 🎯 2. ПОКУПКА В СИНЕМ ПРЯМОУГОЛЬНИКЕ (Стратегия "Тихое накопление")
-    # Накоплением считаем только ситуации, где краткосрочный тренд не смотрит в пол
     is_flat = (0.995 <= (last / e50) <= 1.008)
     is_quiet = vol_ratio < 1.1
     rsi_cool = 42 <= r <= 55
-    no_recent_pump = t["change_pct"] < 4.0      # <-- НОВОЕ: Запрещаем считать флэтом монеты, которые уже выросли за сутки
-    trend_ok = e21 >= (e50 * 0.998)             # <-- НОВОЕ: EMA21 не должна быть завалена глубоко под EMA50
+    no_recent_pump = t["change_pct"] < 4.0      
+    trend_ok = e21 >= (e50 * 0.998)             
     
     if is_flat and is_quiet and rsi_cool and no_recent_pump and trend_ok and regime in ("bull", "neutral"):
-        score += 3.5 * learner.weight("accumulation")  # <-- ТЕПЕРЬ ИИ БУДЕТ УПРАВЛЯТЬ ВЕСОМ
+        score += 3.5 * learner.weight("accumulation")  
         reasons.append("тихая консолидация на EMA50 (накопление)")
         keys.append("accumulation")
     
@@ -268,7 +276,6 @@ def normalize(raw, regime):
     return round(max(0.0, min(SCORE_MAX, raw / rm * SCORE_MAX)), 2)
 
 
-# ИСПРАВЛЕНИЕ: Передаем btc_ret извне, чтобы не качать свечи BTC для каждой монеты
 async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_open_pos=False):
     candles_15m = await market_data.get_kline(sym, "15", 120)
     candles_1h = await market_data.get_kline(sym, "60", 250)
@@ -382,14 +389,12 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
     news_items = await fetch_news_cache()
     
-    # ИСПРАВЛЕНИЕ: Качаем свечи BTC один раз для всех монет
     btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
     btc_ret = _returns([c["close"] for c in btc_candles])
 
     raw_max = raw_max_score(regime)
     fng = get_fear_and_greed()
 
-    # ИСПРАВЛЕНИЕ: Асинхронный параллельный запуск (по 10 монет за раз)
     sem = asyncio.Semaphore(10)
 
     async def _analyze_sym(sym):
@@ -426,7 +431,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             elif fng <= 25: 
                 score += 0.5
                 reasons.append(f"F&G страх ({fng}): +0.5")
-                return None # Игнорируем входы в экстремальном страхе кроме реверсов
+                return None 
 
             sb = learner.sector_bias(sector)
             if sb:
@@ -510,9 +515,9 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
     scored = [r for r in results if r is not None]
     scored.sort(key=lambda c: c["score"], reverse=True)
 
-    thr = threshold(regime)
+    thrs = get_thresholds(regime)
     try:
-        shadow.observe(scored, regime, thr)
+        shadow.observe(scored, regime, thrs)
         shadow.tick(tickers)
         shadow.autotune()
     except Exception as e:
@@ -523,18 +528,23 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
     for c in scored[:5]:
         k_tag = "🛰" if c.get("kind") == "satellite" else "🏛"
         chart_url = f"{public_url}/chart?symbol={c['symbol']}"
-        parts_html.append(f"{k_tag} <a href='{chart_url}'><b>{c['symbol'][:-4]}</b></a> {TIER_EMOJI.get(c['tier'], '🐭')} · <i>{c['sector']}</i> · {c['score']:.1f}/{thr:g} · ₿ {c['corr']:.2f}")
+        mode = c.get("entry_mode", "sniper")
+        thr = thrs.get(mode, 6.0)
+        mode_icon = "🚀" if mode == "rocket" else "🧲" if mode == "reversal" else "🏹"
+        
+        parts_html.append(f"{mode_icon} <a href='{chart_url}'><b>{c['symbol'][:-4]}</b></a> {TIER_EMOJI.get(c['tier'], '🐭')} · <i>{c['sector']}</i> · {c['score']:.1f}/{thr:g} · ₿ {c['corr']:.2f}")
         parts_plain.append(f"{c['symbol']} {c['score']:.1f}/{thr:g} [{'+'.join(c['reason_keys'][:5])}] btc{c['corr']:.2f}")
         
     SCAN_SUMMARY["text"] = " | ".join(parts_html) or "сигналов нет"
-    SCAN_SUMMARY["thr"] = thr
+    SCAN_SUMMARY["thrs"] = thrs
     SCAN_SUMMARY["ts"] = time.time()
     logger.info(f"Scan top: {' | '.join(parts_plain) or 'сигналов нет'}")
 
     new_set = set(s for s, _ in by_listings)
     candidates = []
     for c in scored:
-        if c["score"] < thr: continue
+        mode = c.get("entry_mode", "sniper")
+        if c["score"] < thrs.get(mode, 6.0): continue
         c["is_new"] = c["symbol"] in new_set
         candidates.append(c)
 
