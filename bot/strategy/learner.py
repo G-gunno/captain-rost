@@ -9,7 +9,6 @@ from bot.core.remote_state import download_state, upload_state
 STATE_FILE = Path("storage/learner.json")
 REMOTE_PATH = "learner.json"
 
-# --- ИСПРАВЛЕНИЕ: ДОБАВЛЕН КЛЮЧ reversal ---
 KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "news_pos", "hype", "indep", "mtf_dip", "reversal", "accumulation"]
 
 SAT_LIMIT_BASE = 20.0
@@ -71,7 +70,7 @@ class Learner:
             STATE_FILE.write_text(json.dumps(payload, ensure_ascii=False))
         except Exception as e:
             logger.error(f"learner save error: {e}")
-        if time.time() - self._last_upload > 3600:  # <-- Изменить на 3600
+        if time.time() - self._last_upload > 3600:
             self._last_upload = time.time()
             upload_state(REMOTE_PATH, payload)
 
@@ -216,15 +215,22 @@ class Learner:
         return mode, adj
 
     def update_threshold(self, profit_factor, max_dd_pct, total_trades=0):
-        _, dyn_adj = self.risk_mode(profit_factor, max_dd_pct, total_trades)
+        mode, dyn_adj = self.risk_mode(profit_factor, max_dd_pct, total_trades)
+        self.current_risk_mode = mode 
+        
         wr_adj = 0.0
         if total_trades >= 5:  
             last = self.results[-20:]
             if last:
                 wr = sum(last) / len(last)
                 if wr < 0.35:
-                    wr_adj = 0.5
-        self.threshold_adj = dyn_adj + wr_adj
+                    wr_adj = 0.25 
+                    
+        # === ИНСТИТУЦИОНАЛЬНЫЙ ФИКС: Ограничиваем влияние паники ===
+        # Глобальный порог теперь дышит очень мягко (максимум ±0.25 балла). 
+        raw_adj = dyn_adj + wr_adj
+        self.threshold_adj = round(max(-0.25, min(0.25, raw_adj * 0.2)), 2)
+        
         self.save()
         return self.threshold_adj
 
@@ -235,6 +241,7 @@ class Learner:
         return f"wr {wr:.0%} ({n}) · топ: {txt} · строгость {self.threshold_adj:+.1f}"
 
     def entry_mode_bias(self, mode):
+        # Оставили только чисто статистическое преимущество на основе винрейта стратегий
         if mode != "rocket":
             return 0.0, 1.0 
             
