@@ -445,7 +445,11 @@ async def cmd_status(update, context):
         msg.append(f"🛰 Сателлиты: <b>{sat_exposure / eq * 100 if eq else 0:.1f}%</b> / {learner.satellite_limit():.0f}%")
         msg.append(f"⏱ PnL за 24 часа: {pnl_emoji(metrics_24h['total_pnl'])} <b>{usd(metrics_24h['total_pnl'])}</b>\n")
 
-        regime, _ = await get_regime()
+        # === ФИКС РАССИНХРОНА ПОРОГОВ ===
+        # Берем режим и порог напрямую из кэша последнего сканирования
+        regime = bot_state.current_regime
+        current_thr = SCAN_SUMMARY.get("thr") or threshold(regime)
+        
         from bot.strategy.fundamental import get_fear_and_greed
         fng = get_fear_and_greed()
         fng_emoji = "🌋" if fng >= 75 else "🤑" if fng >= 55 else "😱" if fng <= 24 else "😨" if fng <= 45 else "😴"
@@ -453,7 +457,8 @@ async def cmd_status(update, context):
         regime_str = {'bull': '🟢 BULL', 'neutral': '🟡 NEUTRAL', 'bear': '🔴 BEAR'}.get(regime, '⚪')
         btc_price = prices.get('BTCUSDT', {}).get('last', 0)
         
-        msg.append(f"₿ <b>${fmt_price(btc_price)}</b> · {regime_str} · {fng_emoji} F&G: {fng} · 🎯 порог {threshold(regime):g}")
+        msg.append(f"₿ <b>${fmt_price(btc_price)}</b> · {regime_str} · {fng_emoji} F&G: {fng} · 🎯 порог {current_thr:g}")
+        # ================================
         if SCAN_SUMMARY.get("text"): msg.append(f"🔎 {SCAN_SUMMARY['text']}")
         wr, n = learner.winrate()
         top_txt = " · ".join(f"{k} {v:.2f}" for k, v in sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True)[:3])
