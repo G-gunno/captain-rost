@@ -319,10 +319,7 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
     elif is_momentum: entry_mode_live = "rocket"
     else: entry_mode_live = "sniper"
         
-    mode_score_bonus, _ = learner.entry_mode_bias(entry_mode_live)
-    if mode_score_bonus != 0.0:
-        score10 += mode_score_bonus
-        
+     
     if deriv_t:
         funding = deriv_t.get("funding", 0)
         if funding > 0.05 and entry_mode_live == "rocket":
