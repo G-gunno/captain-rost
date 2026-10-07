@@ -289,11 +289,6 @@ async def cmd_learn(update, context):
         if sat_hist:
             lines.append(f"   🛰 Сателлиты: {len(sat_hist)} сдел. · wr {sum(1 for p in sat_hist if p > 0)/len(sat_hist):.0%} · ср. {sum(sat_hist)/len(sat_hist):+.2f}%")
 
-    lines.append("\n🏹/🚀 <b>Стратегии входа</b>")
-    for k, name in [("rocket", "🚀 Ракеты"), ("sniper", "🏹 Снайпер"), ("reversal", "🧲 Ловец дна")]:
-        h = learner.entry_stats.get(k) or []
-        if h: lines.append(f"   {name}: {len(h)} сдел. · wr {sum(1 for p in h if p > 0)/len(h):.0%} · ср. {sum(h)/len(h):+.2f}%")
-
     lines.append("\n🧭 <b>Где деньги</b>")
     if learner.sector_stats:
         rows = sorted([(s, sum(1 for p in h if p>0)/len(h), len(h), sum(h)/len(h), learner.sector_bias(s)) for s, h in learner.sector_stats.items() if h], key=lambda r: r[4], reverse=True)
