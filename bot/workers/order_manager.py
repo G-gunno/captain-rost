@@ -5,7 +5,7 @@ from loguru import logger
 from bot.core.event_bus import EventBus
 from bot.exchange.paper_exchange import paper
 from bot.strategy.sizing import buy_size, portfolio_limits, tier_limits, entry_offset
-from bot.strategy.scanner import threshold
+from bot.strategy.scanner import get_thresholds
 from bot.strategy.learner import learner
 from bot.utils.format import pair_html, corr_txt, funding_line, usd, fmt_price, fmt_pct
 from bot.core.state import bot_state
@@ -38,7 +38,7 @@ class OrderManagerWorker:
         regime = payload["regime"]
         
         equity = paper.equity(tickers)
-        thr = threshold(regime)
+        thrs = get_thresholds(regime)
         sec_lim, other_lim = portfolio_limits(equity)
         sat_limit = learner.satellite_limit()
         base_min, _ = tier_limits(equity)
@@ -57,6 +57,8 @@ class OrderManagerWorker:
             sector = cand.get("sector", "Other")
             entry_mode = cand.get("entry_mode", "rocket" if cand.get("is_momentum") else "sniper")
             is_mom = cand.get("is_momentum", False)
+            
+            thr = thrs.get(entry_mode, 6.0)
             off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], entry_mode)
 
             t_data = tickers.get(sym, {})
@@ -75,14 +77,13 @@ class OrderManagerWorker:
                 tp = entry * (1 + tp_dist_pct / 100)
                 min_rr = 2.0
             else:
-                if is_mom: sl_dist_atr = 1.2 * a  # Было 0.6, даем ракетам дышать
+                if is_mom: sl_dist_atr = 1.2 * a  
                 elif entry_mode == "reversal": sl_dist_atr = 2.0 * a
                 else: sl_dist_atr = 1.2 * a
                 
                 sl_dist_raw = sl_dist_atr * learner.weight("sl_mult")
                 
                 # === ЗАЩИТА СНАЙПЕРА ===
-                # Во флэте ATR сжимается, поэтому ставим жесткий лимит: стоп не может быть уже 1.8%
                 if entry_mode == "sniper":
                     sl_dist_raw = max(sl_dist_raw, entry * 0.018)
                 # =======================
