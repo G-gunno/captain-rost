@@ -129,28 +129,31 @@ class ExecutionRiskWorker:
             paper.save()
 
     def _update_trailing_stop(self, sym: str, pos: dict, max_p: float) -> bool:
-        # === ДИНАМИЧЕСКИЙ ТРЕЙЛИНГ ===
+        # === ДИНАМИЧЕСКИЙ ТРЕЙЛИНГ (С ВОЗДУХОМ) ===
         tp_dist_pct = (pos["tp"] - pos["avg"]) / pos["avg"]
         
-        # ИСПРАВЛЕНИЕ: Трал стартует на полпути к тейк-профиту.
-        # Защита от шума: не раньше чем +0.8%.
-        # Ограничитель: гарантированно ДО тейк-профита (максимум на 80% пути).
-        atr_pct = min(max(tp_dist_pct * 0.5, 0.008), tp_dist_pct * 0.8) 
+        # Дистанция старта (когда бот начинает готовиться к трейлингу)
+        start_trail_pct = min(max(tp_dist_pct * 0.5, 0.008), tp_dist_pct * 0.8) 
         
-        breakeven = pos["avg"] * 1.0025 # Уверенный безубыток с учетом комсы
+        # Воздух для стопа (минимум 1.2%, чтобы тень свечи не выбила позицию)
+        trail_air_pct = max(start_trail_pct, 0.012)
+        
+        breakeven = pos["avg"] * 1.0025 # Уверенный безубыток с учетом комиссий
         
         new_sl = pos["sl"]
-        # 1. Перенос в БУ (когда достигли atr_pct)
-        if max_p >= pos["avg"] * (1 + atr_pct):
+        
+        # 1. Мягкий БУ: переносим только когда цена ушла достаточно высоко (1.5x от старта),
+        # чтобы случайный рыночный вдох не задел нашу точку входа.
+        if max_p >= pos["avg"] * (1 + start_trail_pct * 1.5):
             new_sl = max(new_sl, breakeven)
             
-        # 2. Стандартный трал на дистанции atr_pct вниз от пика
-        if max_p >= pos["avg"] * (1 + atr_pct * 1.5):
-            new_sl = max(new_sl, max_p * (1 - atr_pct))
+        # 2. Основной трал: тянем стоп на безопасном расстоянии от пика
+        if max_p >= pos["avg"] * (1 + start_trail_pct * 2.0):
+            new_sl = max(new_sl, max_p * (1 - trail_air_pct))
             
-        # 3. Жесткий трал, если ракета улетела очень высоко
-        if max_p >= pos["avg"] * (1 + atr_pct * 2.5):
-            new_sl = max(new_sl, max_p * (1 - atr_pct * 0.6))
+        # 3. Агрессивный трал: если ракета улетела в космос (X3 от старта)
+        if max_p >= pos["avg"] * (1 + start_trail_pct * 3.0):
+            new_sl = max(new_sl, max_p * (1 - trail_air_pct * 0.5))
 
         # === ФИКС СПАМА ТРЕЙЛИНГ-СТОПА ===
         if new_sl > pos["sl"]:
