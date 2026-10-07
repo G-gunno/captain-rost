@@ -5,7 +5,7 @@ from loguru import logger
 from bot.core.event_bus import EventBus
 from bot.exchange.market_data import market_data
 from bot.exchange.paper_exchange import paper
-from bot.strategy.scanner import live_score, threshold, _returns
+from bot.strategy.scanner import live_score, get_thresholds, _returns
 from bot.strategy.indicators import atr, ema, rsi
 from bot.strategy.learner import learner
 from bot.strategy.shadow import shadow
@@ -66,7 +66,7 @@ class PositionManagerWorker:
 
         news_items = await fetch_news_cache()
         regime = self.current_regime
-        thr = threshold(regime)
+        thrs = get_thresholds(regime)
         current_time = int(time.time())
 
         # 1. Проверка ОТКРЫТЫХ ПОЗИЦИЙ
@@ -99,15 +99,15 @@ class PositionManagerWorker:
                     self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · {reason} {neg}/{mentions}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                     continue
 
-            # === АЛМАЗНЫЕ РУКИ ДЛЯ СНАЙПЕРОВ (ОТКРЫТЫЕ ПОЗИЦИИ) ===
-            is_sniper = pos.get("entry_mode") == "sniper" or "accumulation" in pos.get("reason_keys", [])
+            # === АЛМАЗНЫЕ РУКИ ДЛЯ СНАЙПЕРОВ ===
+            entry_mode = pos.get("entry_mode", "sniper")
+            is_sniper = entry_mode == "sniper" or "accumulation" in pos.get("reason_keys", [])
             trend_broken = (last < e50 and e21 < (e50 * 0.998))
+            thr = thrs.get(entry_mode, 6.0)
             
             if is_sniper:
-                # Снайперы игнорируют падение макро-скора. Их выбивает только слом тренда.
                 signal_weak = trend_broken
             else:
-                # Стандартные импульсные сделки закрываются при остывании индикаторов
                 signal_weak = score_pos <= (thr - 1.5)
             # ======================================================
 
@@ -181,15 +181,13 @@ class PositionManagerWorker:
             
             # === ИММУНИТЕТ ДЛЯ ОРДЕРОВ В СТАКАНЕ ===
             order_age = current_time - order["created"]
-            is_sniper = order.get("entry_mode") == "sniper"
+            entry_mode = order.get("entry_mode", "sniper")
+            is_sniper = entry_mode == "sniper"
+            thr = thrs.get(entry_mode, 6.0)
             
-            # ФИКС 1: Даем микро-буфер 0.2% для EMA21, чтобы шум не убивал идеальные засады
             trend_broken_order = (t["last"] < e50 and e21 < (e50 * 0.998))
-            
-            # ФИКС 2: Защита от падающих ножей. Провалились мгновенно под EMA50 - отменяем!
             flash_crash = t["last"] < (e50 * 0.985)
             
-            # Амнистия снимается при сломе тренда ИЛИ при внезапном проливе
             order_amnesty = (is_sniper and order_age < 3600 and not trend_broken_order and not flash_crash) 
             
             if not order_amnesty:
@@ -219,7 +217,6 @@ class PositionManagerWorker:
             if a <= 0: continue
             
             atr_pct = a / t["last"] * 100
-            entry_mode = order.get("entry_mode", "sniper")
 
             off = entry_offset(score_now, thr, regime, atr_pct, entry_mode)
             ideal_price = t["last"] * (1 + off)
@@ -249,14 +246,12 @@ class PositionManagerWorker:
             else:
                 ideal_price = min(ideal_price, t.get("bid1", t["last"]))
                 
-                # === ФИКС ДРЕБЕЗГА ОРДЕРОВ (Order Thrashing) ===
                 if t["last"] > old_price + 4.0 * a: 
                     paper.cancel_order(order["id"])
                     paper.log_event(sym, "cancel", t["last"], "Улетела без нас")
                     bot_state.set_cooldown(sym, 900)
                     self._notify(f"⚠ Снят · {pair_html(sym, order)} · 🚀 (⏸️ 15м)")
                     continue
-                # ===============================================
                 
                 if ideal_price < old_price and dev_pct >= 0.2:
                     order["price"] = ideal_price
