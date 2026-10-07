@@ -59,7 +59,6 @@ def is_tradable(symbol):
 
 
 def raw_max_score(regime):
-    # Убрали паттерны, считаем только индикаторы силы
     m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
     m += learner.weight("indep")
     m += max(learner.weight("news_pos"), learner.weight("hype"))
@@ -228,18 +227,17 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     trend_ok = e21 >= (e50 * 0.998)             
     
     if is_flat and is_quiet and rsi_cool and no_recent_pump and trend_ok and regime in ("bull", "neutral"):
-        score += 3.5  # ФИКСИРОВАННЫЙ БАЛЛ: Снайперы всегда получают +3.5
+        score += 3.5  
         reasons.append("тихая консолидация на EMA50 (накопление)")
         keys.append("accumulation")
     
     if t["change_pct"] <= -7.0 and r <= 35 and vol_ratio >= 2.5:
-        score += 2.0  # ФИКСИРОВАННЫЙ БАЛЛ
+        score += 2.0
         reasons.append(f"ОТКУП ДНА (vol x{vol_ratio:.1f})")
         keys.append("reversal")
     elif t["change_pct"] <= -15.0 and vol_ratio >= 3.0:
-        score += 2.0  # ФИКСИРОВАННЫЙ БАЛЛ
+        score += 2.0
         reasons.append(f"ПАНИКА ВЫКУПЛЕНА (vol x{vol_ratio:.1f})")
-        keys.append("reversal")ПАНИКА ВЫКУПЛЕНА (vol x{vol_ratio:.1f})")
         keys.append("reversal")
     else:
         if 0 < t["change_pct"] < w["chg_hi"]: 
@@ -261,7 +259,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         micro_turn = e12 > e26 
         
         if global_uptrend and local_dip and micro_turn:
-            score += 1.5  # ФИКСИРОВАННЫЙ БАЛЛ
+            score += 1.5
             reasons.append("MTF: выкуп отката по тренду")
             keys.append("mtf_dip")
         elif not global_uptrend and r_1h > 65:
@@ -319,7 +317,6 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
     elif is_momentum: entry_mode_live = "rocket"
     else: entry_mode_live = "sniper"
         
-     
     if deriv_t:
         funding = deriv_t.get("funding", 0)
         if funding > 0.05 and entry_mode_live == "rocket":
@@ -474,8 +471,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             elif is_momentum: entry_mode = "rocket"
             else: entry_mode = "sniper"
                 
-
-          deriv_t = deriv_tickers.get(sym)
+            deriv_t = deriv_tickers.get(sym)
             if deriv_t:
                 funding = deriv_t.get("funding", 0)
                 if funding > 0.05 and entry_mode == "rocket":
@@ -501,7 +497,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 "signal_values": signal_values,
                 "is_momentum": is_momentum,
                 "entry_mode": entry_mode,
-                "size_mult": mode_size_mult
+                "size_mult": 1.0
             }
 
     tasks = [_analyze_sym(sym) for sym in pool]
