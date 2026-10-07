@@ -188,11 +188,25 @@ class PositionManagerWorker:
             score_now, candles = await live_score(sym, t, regime, btc_ret, news_items)
             if score_now is None: continue
             
-            # === ФИКС ОШИБКИ: ДОБАВЛЯЕМ РАСЧЕТ EMA ДЛЯ ОРДЕРОВ ===
-            closes_order = [c["close"] for c in candles]
-            e21 = ema(closes_order, 21)[-1]
-            e50 = ema(closes_order, 50)[-1]
-            # =======================================================
+            closes = [c["close"] for c in candles]
+            e21 = ema(closes, 21)[-1]
+            e50 = ema(closes, 50)[-1]
+
+            # === АЛМАЗНЫЕ РУКИ ДЛЯ СНАЙПЕРОВ ===
+            is_sniper = pos.get("entry_mode") == "sniper" or "accumulation" in pos.get("keys", [])
+            trend_broken = (t["last"] < e50 and e21 < (e50 * 0.998))
+            
+            if is_sniper:
+                # Снайперы игнорируют падение макро-скора. Их выбивает только слом тренда.
+                signal_weak = trend_broken
+            else:
+                # Стандартные импульсные сделки закрываются при остывании индикаторов
+                signal_weak = score_now <= (thr - 1.5)
+            # ====================================
+
+            if signal_weak or regime_danger:
+                if regime_danger and not signal_weak:
+                    reason = "⚠️ Смена тренда рынка"
             
             # === ИММУНИТЕТ ДЛЯ ОРДЕРОВ В СТАКАНЕ ===
             order_age = current_time - order["created"]
