@@ -85,26 +85,6 @@ class PositionManagerWorker:
             pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
             e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
             
-            # === УМНАЯ АМНИСТИЯ ДЛЯ НОВЫХ ПОЗИЦИЙ ===
-            time_held = current_time - pos.get("entry_time", current_time)
-            entry_mode = pos.get("entry_mode", "sniper")
-            is_reversal = (entry_mode == "reversal")
-            
-            if entry_mode == "rocket":
-                amnesty_limit = 1800
-            elif entry_mode == "reversal":
-                amnesty_limit = 7200
-            else:
-                amnesty_limit = 10800
-            
-            if time_held < amnesty_limit:
-                trend_broken = False
-                score_drop_allowed = True
-            else:
-                trend_broken = (last < e50 and e21 < e50) and not is_reversal
-                score_drop_allowed = False
-            # ===============================================
-            
             base = sym[:-4]
             name = await get_coin_name(base)
             neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
@@ -113,25 +93,30 @@ class PositionManagerWorker:
             if is_toxic:
                 bot_state.set_cooldown(sym, 7200)
                 if pnl_pct >= 1.0 or pnl_pct <= 0:
-                    reason = "✂️️📰 Новости"
+                    reason = "✂📰 Новости"
                     ex = paper._sell(sym, last, reason, regime_now=regime)
                     paper.log_event(sym, "sell", last, f"Новости {neg}/{mentions}")
                     self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · {reason} {neg}/{mentions}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                     continue
 
-            # === ПРИМЕНЕНИЕ АМНИСТИИ ===
-            if score_drop_allowed:
-                signal_weak = False
+            # === АЛМАЗНЫЕ РУКИ ДЛЯ СНАЙПЕРОВ (ОТКРЫТЫЕ ПОЗИЦИИ) ===
+            is_sniper = pos.get("entry_mode") == "sniper" or "accumulation" in pos.get("reason_keys", [])
+            trend_broken = (last < e50 and e21 < (e50 * 0.998))
+            
+            if is_sniper:
+                # Снайперы игнорируют падение макро-скора. Их выбивает только слом тренда.
+                signal_weak = trend_broken
             else:
-                signal_weak = trend_broken or (score_pos <= thr - (3.0 if is_reversal else 2.0))
-            # ===========================
+                # Стандартные импульсные сделки закрываются при остывании индикаторов
+                signal_weak = score_pos <= (thr - 1.5)
+            # ======================================================
 
             pos_corr = pos.get("corr", 0.5)
             regime_danger = (pos.get("regime_entry") == "bull" and pos_corr >= 0.45 and (regime == "bear" or (regime == "neutral" and score_pos < thr)))
 
             if signal_weak or regime_danger:
                 if regime_danger and not signal_weak:
-                    reason = "🔐📉" # <-- Было "⚠️ Режим"
+                    reason = "🔐📉"
                     bot_state.set_cooldown(sym, 1800)
                 elif pnl_pct > 0:
                     reason = "🪫"
@@ -191,35 +176,24 @@ class PositionManagerWorker:
             closes = [c["close"] for c in candles]
             e21 = ema(closes, 21)[-1]
             e50 = ema(closes, 50)[-1]
-
-            # === АЛМАЗНЫЕ РУКИ ДЛЯ СНАЙПЕРОВ ===
-            is_sniper = pos.get("entry_mode") == "sniper" or "accumulation" in pos.get("keys", [])
-            trend_broken = (t["last"] < e50 and e21 < (e50 * 0.998))
-            
-            if is_sniper:
-                # Снайперы игнорируют падение макро-скора. Их выбивает только слом тренда.
-                signal_weak = trend_broken
-            else:
-                # Стандартные импульсные сделки закрываются при остывании индикаторов
-                signal_weak = score_now <= (thr - 1.5)
-            # ====================================
-
-            if signal_weak or regime_danger:
-                if regime_danger and not signal_weak:
-                    reason = "⚠️ Смена тренда рынка"
             
             # === ИММУНИТЕТ ДЛЯ ОРДЕРОВ В СТАКАНЕ ===
             order_age = current_time - order["created"]
             is_sniper = order.get("entry_mode") == "sniper"
             
-            # Теперь переменные e50 и e21 существуют, ошибка уйдет!
-            trend_broken_order = (t["last"] < e50 and e21 < e50)
-            order_amnesty = (is_sniper and order_age < 3600 and not trend_broken_order) 
+            # ФИКС 1: Даем микро-буфер 0.2% для EMA21, чтобы шум не убивал идеальные засады
+            trend_broken_order = (t["last"] < e50 and e21 < (e50 * 0.998))
+            
+            # ФИКС 2: Защита от падающих ножей. Провалились мгновенно под EMA50 - отменяем!
+            flash_crash = t["last"] < (e50 * 0.985)
+            
+            # Амнистия снимается при сломе тренда ИЛИ при внезапном проливе
+            order_amnesty = (is_sniper and order_age < 3600 and not trend_broken_order and not flash_crash) 
             
             if not order_amnesty:
                 if score_now <= thr - 1.5:
                     paper.cancel_order(order["id"])
-                    paper.log_event(sym, "cancel", t["last"], "Сигнал умер (Слом тренда)")
+                    paper.log_event(sym, "cancel", t["last"], "Сигнал умер (Слом тренда/Дамп)")
                     bot_state.set_cooldown(sym, 900)
                     self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️ (⏸️ 15м)")
                     continue
@@ -274,12 +248,11 @@ class PositionManagerWorker:
                 ideal_price = min(ideal_price, t.get("bid1", t["last"]))
                 
                 # === ФИКС ДРЕБЕЗГА ОРДЕРОВ (Order Thrashing) ===
-                # Даем снайперу коридор в 4 ATR для спокойного ожидания во флэте
                 if t["last"] > old_price + 4.0 * a: 
                     paper.cancel_order(order["id"])
                     paper.log_event(sym, "cancel", t["last"], "Улетела без нас")
                     bot_state.set_cooldown(sym, 900)
-                    self._notify(f"⚠️️ Снят · {pair_html(sym, order)} · 🚀 (⏸️ 15м)")
+                    self._notify(f"⚠ Снят · {pair_html(sym, order)} · 🚀 (⏸️ 15м)")
                     continue
                 # ===============================================
                 
