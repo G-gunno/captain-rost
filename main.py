@@ -20,7 +20,7 @@ from bot.core.remote_state import ensure_branch
 from bot.services.reports import build_report
 from bot.services.info import info_full_text
 from bot.strategy.shadow import shadow
-from bot.strategy.scanner import SCAN_SUMMARY, FILTERED_BY_NEWS, get_regime, threshold
+from bot.strategy.scanner import SCAN_SUMMARY, FILTERED_BY_NEWS, get_regime, get_thresholds
 from bot.strategy.learner import learner, TIERS
 from bot.news.cmc import sector_of, TIER_EMOJI, TIER_NAMES, memory_stats
 from bot.utils.format import format_coin, usd, pnl_emoji, weight_emoji, fmt_price, fmt_pct, fmt_sym
@@ -28,7 +28,6 @@ from bot.utils.format import format_coin, usd, pnl_emoji, weight_emoji, fmt_pric
 _app = None
 WEBHOOK_PATH = "/telegram-webhook"
 
-# ==================== Хелперы ====================
 from functools import wraps
 
 def restricted(func):
@@ -52,7 +51,6 @@ async def reply(update, text, markup=None):
             text, reply_markup=markup, disable_web_page_preview=True
         )
         
-# ==================== HTTP handlers ====================
 async def health_handler(request):
     return web.Response(status=204)
 
@@ -134,7 +132,6 @@ async def chart_handler(request):
     except Exception as e:
         return web.Response(text=f"Внутренняя ошибка сервера: {e}", status=500)
 
-# ==================== Уведомления и Отчеты ====================
 async def send_chat(text):
     chat = os.getenv("TELEGRAM_CHAT_ID")
     if chat and _app:
@@ -165,7 +162,6 @@ async def error_handler(update, context):
     if isinstance(err, TelegramConflict): return
     logger.exception(f"Unhandled error: {err}")
 
-# ==================== ДЕЙСТВИЯ С ПОДТВЕРЖДЕНИЕМ ====================
 async def action_pause(context):
     if bot_state.paused: return "⏸ Уже на паузе."
     orders = list(paper.orders)
@@ -246,7 +242,6 @@ async def confirm_handler(update, context):
         except Exception as e:
             logger.exception(f"confirm action error: {e}")
 
-# ==================== Команды Telegram ====================
 @restricted
 async def cmd_start(update, context):
     bot_state.fresh_start()
@@ -283,7 +278,7 @@ async def cmd_learn(update, context):
     regime, _ = await get_regime()
     lines = ["🧠 <b>Обучение бота (ИИ)</b>", ""]
     lines.append("📌 <b>Текущие параметры</b>")
-    lines.append(f"🎯 Winrate: <b>{wr:.0%}</b> <i>(за {n} сдел.)</i> · строгость: <b>{learner.threshold_adj:+.1f}</b> · порог: <b>{threshold(regime):g}</b>")
+    lines.append(f"🎯 Winrate: <b>{wr:.0%}</b> <i>(за {n} сдел.)</i> · строгость: <b>{learner.threshold_adj:+.1f}</b>")
     lines.append(f"🛰 Сателлиты: лимит <b>{learner.satellite_limit():.0f}%</b> · размер <b>{learner.satellite_size_pct():.1f}%</b>")
     
     core_hist, sat_hist = learner.kind_stats.get("core") or [], learner.kind_stats.get("satellite") or []
@@ -370,11 +365,9 @@ async def cmd_status(update, context):
         prices = await market_data.get_tickers()
         eq = paper.equity(prices)
         
-        # === ИСПРАВЛЕНИЕ: Считаем доступный кэш с учетом заморозки в ордерах ===
         locked_usdt = sum(o["qty"] * o["price"] for o in paper.orders)
         available_usdt = paper.usdt - locked_usdt
         free_pct = available_usdt / eq * 100 if eq else 0
-        # ======================================================================
         
         metrics_all = paper.get_metrics(prices)
         metrics_24h = paper.get_metrics(prices, hours=24)
@@ -445,10 +438,9 @@ async def cmd_status(update, context):
         msg.append(f"🛰 Сателлиты: <b>{sat_exposure / eq * 100 if eq else 0:.1f}%</b> / {learner.satellite_limit():.0f}%")
         msg.append(f"⏱ PnL за 24 часа: {pnl_emoji(metrics_24h['total_pnl'])} <b>{usd(metrics_24h['total_pnl'])}</b>\n")
 
-        # === ФИКС РАССИНХРОНА ПОРОГОВ ===
-        # Берем режим и порог напрямую из кэша последнего сканирования
+        # === ФИКС РАССИНХРОНА И ВЫВОД МАТРИЦЫ ПОРОГОВ ===
         regime = bot_state.current_regime
-        current_thr = SCAN_SUMMARY.get("thr") or threshold(regime)
+        thrs = SCAN_SUMMARY.get("thrs") or get_thresholds(regime)
         
         from bot.strategy.fundamental import get_fear_and_greed
         fng = get_fear_and_greed()
@@ -457,8 +449,10 @@ async def cmd_status(update, context):
         regime_str = {'bull': '🟢 BULL', 'neutral': '🟡 NEUTRAL', 'bear': '🔴 BEAR'}.get(regime, '⚪')
         btc_price = prices.get('BTCUSDT', {}).get('last', 0)
         
-        msg.append(f"₿ <b>${fmt_price(btc_price)}</b> · {regime_str} · {fng_emoji} F&G: {fng} · 🎯 порог {current_thr:g}")
+        msg.append(f"₿ <b>${fmt_price(btc_price)}</b> · {regime_str} · {fng_emoji} F&G: {fng}")
+        msg.append(f"🎯 Пороги: 🚀 <b>{thrs['rocket']:.2f}</b> | 🏹 <b>{thrs['sniper']:.2f}</b> | 🧲 <b>{thrs['reversal']:.2f}</b>")
         # ================================
+        
         if SCAN_SUMMARY.get("text"): msg.append(f"🔎 {SCAN_SUMMARY['text']}")
         wr, n = learner.winrate()
         top_txt = " · ".join(f"{k} {v:.2f}" for k, v in sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True)[:3])
