@@ -126,7 +126,8 @@ class PositionManagerWorker:
                     bot_state.set_cooldown(sym, 1800)
 
                 ex = paper._sell(sym, last, reason, regime_now=regime)
-                paper.log_event(sym, "sell", last, reason)
+                ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"
+                paper.log_event(sym, ev_type, last, reason)
                 if ex["pnl"] > 0: shadow.mark_success(sym)
                 self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · {reason}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                 continue
@@ -146,7 +147,8 @@ class PositionManagerWorker:
             else:
                 bot_state.set_cooldown(ex["symbol"], 300)
 
-            paper.log_event(ex["symbol"], "sell", ex["price"], ex["reason"])
+            ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"
+            paper.log_event(ex["symbol"], ev_type, ex["price"], ex["reason"])
             if ex["pnl"] > 0: shadow.mark_success(ex["symbol"])
 
             runner_txt = f"\n🏃 пробежка +{ex['runner_bonus']:.1f}% выше TP1" if ex.get("runner_bonus", 0) > 5 else ""
