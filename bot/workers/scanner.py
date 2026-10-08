@@ -25,6 +25,12 @@ class ScannerWorker:
                 if tickers:
                     regime, info = await get_regime()
                     
+                    # ⚡ Уведомление о смене рынка
+                    if getattr(bot_state, "last_notified_regime", None) != regime:
+                        bot_state.last_notified_regime = regime
+                        reg_icon = "🟢" if regime == "bull" else "🔴" if regime == "bear" else "🟡"
+                        self.bus.publish("NOTIFY", {"text": f"🧭 <b>Макро-тренд сменился:</b> {reg_icon} {regime.upper()}", "urgent": False})
+                    
                     # ⚡ Кэшируем глобально, чтобы /status в Телеге отвечал моментально
                     bot_state.current_regime = regime 
                     self.bus.publish("REGIME_UPDATED", {"regime": regime, "info": info})
