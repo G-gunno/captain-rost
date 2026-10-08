@@ -340,10 +340,48 @@ async def cmd_chart(update, context):
 
     if not arg:
         cutoff = int(time.time()) - 86400
-        symbols = set(paper.positions.keys()) | {o["symbol"] for o in paper.orders} | {t["symbol"] for t in paper.trades if t.get("time", 0) >= cutoff}
-        if not symbols: return await reply(update, "⚠️ За последние 24 часа активности не было.")
-        links = [f"<a href='{public_url}/chart?symbol={s}'><b>{s[:-4] if s.endswith('USDT') else s}</b></a>" for s in sorted(symbols)]
-        return await reply(update, f"📈 <b>Графики торгов за 24 часа</b>\n\n{', '.join(links)}")
+        active_syms = {sym: p for sym, p in paper.positions.items()}
+        for o in paper.orders:
+            if o["symbol"] not in active_syms:
+                active_syms[o["symbol"]] = o
+                
+        closed_trades = [t for t in paper.realized if t.get("time", 0) >= cutoff]
+        
+        if not active_syms and not closed_trades:
+            return await reply(update, "⚠️ За последние 24 часа активности не было.")
+            
+        lines = ["📈 <b>Графики торгов (24ч)</b>\n"]
+        
+        if active_syms:
+            lines.append("📦 <b>В работе:</b>")
+            links = []
+            for sym, data in sorted(active_syms.items()):
+                mode = "🚀" if data.get('entry_mode') == 'rocket' else "🧲" if data.get('entry_mode') == 'reversal' else "🏹"
+                links.append(f"{mode} <a href='{public_url}/chart?symbol={sym}'><b>{sym[:-4]}</b></a>")
+            lines.append(" · ".join(links) + "\n")
+            
+        wins = [t for t in closed_trades if t["pnl"] > 0]
+        if wins:
+            lines.append("🟢 <b>Профит:</b>")
+            links = []
+            for t in wins:
+                sym = t['symbol'][:-4]
+                mode = "🚀" if t.get('entry_mode') == 'rocket' else "🧲" if t.get('entry_mode') == 'reversal' else "🏹"
+                links.append(f"{mode} <a href='{public_url}/chart?symbol={t['symbol']}'><b>{sym}</b></a> ({t['pnl_pct']:+.1f}%)")
+            lines.append(" · ".join(links) + "\n")
+            
+        losses = [t for t in closed_trades if t["pnl"] <= 0]
+        if losses:
+            lines.append("🔴 <b>Убыток / БУ:</b>")
+            links = []
+            for t in losses:
+                sym = t['symbol'][:-4]
+                mode = "🚀" if t.get('entry_mode') == 'rocket' else "🧲" if t.get('entry_mode') == 'reversal' else "🏹"
+                exit_reason = "EARLY" if t.get("exit_type") == "EARLY" else "SL"
+                links.append(f"{mode} <a href='{public_url}/chart?symbol={t['symbol']}'><b>{sym}</b></a> ({exit_reason})")
+            lines.append(" · ".join(links))
+
+        return await reply(update, "\n".join(lines))
         
     sym = arg.upper() + ("USDT" if not arg.upper().endswith("USDT") else "")
     await reply(update, f"📈 <b>График торгов {sym}</b>\n\n🌐 <a href='{public_url}/chart?symbol={sym}'>Открыть интерактивный график</a>")
