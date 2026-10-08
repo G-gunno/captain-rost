@@ -205,14 +205,16 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         score -= 3.0
         reasons.append("отвержение (длинная тень сверху)")
 
+    # 🛑 ЗАЩИТА ОТ FOMO (Эффект натянутой резинки)
     if not is_open_pos:
         a15 = atr(candles_15m)
         if a15 > 0 and e21 > 0:
             dist_from_ema = last - e21
-            if dist_from_ema > 2.5 * a15:
+            # Ужесточаем фильтр: отрыв больше 1.8 ATR или 2.0% - это верный откат. Пропускаем.
+            if dist_from_ema > 1.8 * a15:
                 score -= 4.0  
                 reasons.append(f"FOMO-перегрев (+{dist_from_ema/a15:.1f} ATR от EMA21)")
-            elif (dist_from_ema / e21 * 100) > 3.5:
+            elif (dist_from_ema / e21 * 100) > 2.0:
                 score -= 3.0
                 reasons.append(f"отрыв от EMA21 на {(dist_from_ema / e21 * 100):.1f}%")
 
