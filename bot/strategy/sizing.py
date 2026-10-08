@@ -59,10 +59,10 @@ def entry_offset(score, thr, regime, atr_pct, entry_mode="sniper"):
     from bot.strategy.shadow import shadow 
     hunt = shadow.hunt() 
 
-    # 🔥 ИСПРАВЛЕНИЕ ДЛЯ TREE И MINA
     if entry_mode == "rocket":
-        # Бьем прямо в Ask, переплачивая 0.05%, чтобы гарантированно заскочить в ракету
-        return 0.0005 
+        # Больше никаких покупок "по маркету" на хаях! 
+        # Ракета обязана дать микро-откат (четверть ATR), чтобы подтвердить, что это не пик.
+        return -atr_pct / 100 * 0.25
         
     elif entry_mode == "reversal":
         return max(0.0, atr_pct / 100 * 0.15)
