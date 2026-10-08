@@ -202,7 +202,8 @@ class PaperExchange:
             "sector": self._resolve_sector(sym, pos.get("sector")),
             "tier": pos.get("tier"), "kind": pos.get("kind", "core"),
             "is_momentum": pos.get("is_momentum", False),
-            "entry_mode": pos.get("entry_mode", "sniper")
+            "entry_mode": pos.get("entry_mode", "sniper"),
+            "regime": pos.get("regime_entry", "neutral")  # <--- ДОБАВИЛИ ЭТО
         })
         self.trades.append({
             "side": "Sell(part)", "symbol": sym, "qty": qty_part,
@@ -297,11 +298,13 @@ class PaperExchange:
                 self.funding += transferred
 
         self.realized.append({
-            "symbol": sym, "pnl": round(total_pnl, 4), "pnl_pct": round(total_pnl_pct, 2),
-            "reason": reason, "time": int(time.time()), "exit_type": exit_type,
-            "sector": sector, "tier": tier, "kind": kind,
+            "symbol": sym, "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 2),
+            "reason": reason, "time": int(time.time()), "partial": True,
+            "sector": self._resolve_sector(sym, pos.get("sector")),
+            "tier": pos.get("tier"), "kind": pos.get("kind", "core"),
             "is_momentum": pos.get("is_momentum", False),
-            "entry_mode": entry_mode
+            "entry_mode": pos.get("entry_mode", "sniper"),
+            "regime": pos.get("regime_entry", "neutral")  # <--- ДОБАВИЛИ ЭТО
         })
         self.trades.append({
             "side": "Sell", "symbol": sym, "qty": pos["qty"],
