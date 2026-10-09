@@ -167,22 +167,7 @@ class PositionManagerWorker:
                     paper.save()
                     self._notify(f"🎯 <b>TP поднят</b> (раннер) · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])}")
 
-        # 3. Проверка ВЫХОДОВ по лимиткам (TP/SL)
-        for ex in paper.check_exits(tickers, regime_now=regime):
-            if ex["exit_type"] in ("SL", "TP1_SL"):
-                bot_state.set_cooldown(ex["symbol"], 420)
-            else:
-                bot_state.set_cooldown(ex["symbol"], 180)
-
-            ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"
-            paper.log_event(ex["symbol"], ev_type, ex["price"], ex["reason"])
-            if ex["pnl"] > 0: shadow.mark_success(ex["symbol"])
-
-            runner_txt = f"\n🏃 пробежка +{ex['runner_bonus']:.1f}% выше TP1" if ex.get("runner_bonus", 0) > 5 else ""
-            ind = "🔥" if ex.get("exit_type") == "TP1_RUN" else pnl_emoji(ex["pnl_pct"])
-            self._notify(f"💸 <b>Продажа</b> · {pair_html(ex['symbol'], ex)} · {ex['reason']}\n{ind} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])} · 📊 {fmt_price(ex['price'])}{corr_txt(ex)}{runner_txt}{funding_line(ex.get('transferred', 0))}")
-
-        # 4. Проверка ОРДЕРОВ (реквоты и отмены)
+        # 2. Проверка ОРДЕРОВ (реквоты и отмены)
         for order in list(paper.orders):
             sym = order["symbol"]
             t = tickers.get(sym)
