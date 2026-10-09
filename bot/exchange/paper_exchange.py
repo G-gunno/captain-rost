@@ -366,11 +366,6 @@ class PaperExchange:
         eq = self.usdt + self.funding
         for sym, pos in self.positions.items():
             eq += pos["qty"] * prices.get(sym, {}).get("last", 0)
-            
-        # Добавляем плавающую стоимость крипты на Аккаунте Финансирования
-        for sym, qty in getattr(self, "funding_coins", {}).items():
-            eq += qty * prices.get(sym, {}).get("last", 0)
-            
         return eq
 
     def get_metrics(self, prices=None, hours=None):
