@@ -7,6 +7,7 @@ from bot.exchange.paper_exchange import paper
 from bot.strategy.sizing import buy_size, portfolio_limits, tier_limits, entry_offset
 from bot.strategy.scanner import get_thresholds
 from bot.strategy.learner import learner
+from bot.strategy.shadow import shadow
 from bot.utils.format import pair_html, corr_txt, funding_line, usd, fmt_price, fmt_pct
 from bot.core.state import bot_state
 
@@ -33,7 +34,7 @@ TIER_MAX_SL = {
 
 class OrderManagerWorker:
     """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров."""
-    
+
     def __init__(self, bus: EventBus):
         self.bus = bus
         self.signal_queue = self.bus.subscribe("SIGNALS_READY", maxsize=2)
@@ -57,13 +58,13 @@ class OrderManagerWorker:
         candidates = payload["candidates"]
         tickers = payload["tickers"]
         regime = payload["regime"]
-        
+
         equity = paper.equity(tickers)
         thrs = get_thresholds(regime)
         sec_lim, other_lim = portfolio_limits(equity)
         sat_limit = learner.satellite_limit()
         base_min, _ = tier_limits(equity)
-        
+
         for cand in candidates:
             sym = cand["symbol"]
 
@@ -71,7 +72,7 @@ class OrderManagerWorker:
             is_accum = "accumulation" in cand.get("reason_keys", [])
             if bot_state.is_on_cooldown(sym) and not is_accum:
                 continue
-                
+
             if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
                 continue
 
@@ -80,16 +81,15 @@ class OrderManagerWorker:
             tier = cand.get("tier") or "SMALL"
             entry_mode = cand.get("entry_mode", "rocket" if cand.get("is_momentum") else "sniper")
             is_mom = cand.get("is_momentum", False)
-            
+
             thr = thrs.get(entry_mode, 6.0)
-            # ⚡ Умный расчет отступа с учетом паттерна накопления и тира монеты
             off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], entry_mode, tier=tier, is_accumulation=is_accum)
 
             t_data = tickers.get(sym, {})
             bid1 = t_data.get("bid1", cand["last"])
             ideal_entry = cand["last"] * (1 + off)
             entry = ideal_entry if is_mom else min(ideal_entry, bid1)
-            
+
             a = cand["atr"]
             if a <= 0: continue
 
@@ -97,10 +97,14 @@ class OrderManagerWorker:
             tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.030)
             max_sl_allowed = TIER_MAX_SL.get(tier, 3.5)
 
+            # ⚡ Интеграция реальных множителей стопа и тейка из Shadow
+            sl_tuning_mult = shadow.sl_mult()
+            tp_tuning_mult = shadow.tp_mult()
+
             if kind == "satellite":
                 base_sl_mult = 0.75 if is_mom else (2.0 if entry_mode == "reversal" else 1.5)
-                sl_dist_pct = max(min(base_sl_mult * a / entry * 100 * learner.weight("sl_mult"), 5.0), sl_floor_pct * 100)
-                tp_dist_pct = max(min(2.5 * a / entry * 100 * learner.weight("tp_mult"), 12.0), sl_dist_pct * 2.0, tp_floor_pct * 100)
+                sl_dist_pct = max(min(base_sl_mult * a / entry * 100 * sl_tuning_mult, 5.0), sl_floor_pct * 100)
+                tp_dist_pct = max(min(2.5 * a / entry * 100 * tp_tuning_mult, 12.0), sl_dist_pct * 2.0, tp_floor_pct * 100)
                 sl = entry * (1 - sl_dist_pct / 100)
                 tp = entry * (1 + tp_dist_pct / 100)
                 min_rr = 2.0
@@ -108,21 +112,21 @@ class OrderManagerWorker:
                 if is_mom: sl_dist_atr = 1.0 * a
                 elif entry_mode == "reversal": sl_dist_atr = 2.0 * a
                 else: sl_dist_atr = 1.2 * a
-                
-                sl_dist_raw = sl_dist_atr * learner.weight("sl_mult")
-                
+
+                sl_dist_raw = sl_dist_atr * sl_tuning_mult
+
                 # Защита стоп-лосса с учетом тира актива
                 if entry_mode == "sniper":
                     sl_dist_raw = max(sl_dist_raw, entry * sl_floor_pct)
                 elif is_mom:
                     sl_dist_raw = max(sl_dist_raw, entry * sl_floor_pct * 0.8)
-                
-                tp_dist_raw = max(2.0 * a * learner.weight("tp_mult"), sl_dist_raw * 1.5, entry * tp_floor_pct)
+
+                tp_dist_raw = max(2.0 * a * tp_tuning_mult, sl_dist_raw * 1.5, entry * tp_floor_pct)
                 sl = entry - sl_dist_raw
                 tp = max(entry + tp_dist_raw, entry * (1 + tp_floor_pct))
                 sl = min(sl, entry * 0.9965)
                 min_rr = 1.5
-                
+
                 if (entry - sl) / entry * 100 > max_sl_allowed:
                     continue
 
@@ -190,7 +194,7 @@ class OrderManagerWorker:
             for w_o in planned_cancels:
                 paper.cancel_order(w_o["id"])
                 self._notify(f"🔄 <b>Ротация ордера</b> · <b>{w_o['symbol'][:-4]}</b> снят\nМесто для <b>{sym[:-4]}</b>")
-                
+
             for w_sym, w_pos, last, pnl, reason in planned_sells:
                 ex = paper._sell(w_sym, last, reason, regime_now=regime)
                 self._notify(f"🔄 <b>{reason}</b> · <b>{w_sym[:-4]}</b> → <b>{sym[:-4]}</b>\n💵 Освобождено {usd(ex['pnl'])}")
@@ -199,14 +203,14 @@ class OrderManagerWorker:
             order = paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl, score=cand["score"], reason_keys=cand.get("reason_keys", []))
             order.update({"kind": kind, "sector": sector, "tier": tier, "corr": cand.get("corr"), "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode})
             paper.save()
-            
+
             reasons_html = "<br>".join([f"• {r}" for r in cand.get("reasons", [])])
             paper.log_event(sym, "order_placed", entry, text=reasons_html, mode=entry_mode)
 
             tp_pct = (tp - entry) / entry * 100
             sl_pct = (sl - entry) / entry * 100
             new_tag = "· 🆕 " if cand.get("is_new") else ""
-            
+
             self._notify(
                 f"📋 <b>Ордер</b> {new_tag}· {pair_html(sym[:-4], order)}\n"
                 f"💵 {usd(size)} · 📥 {fmt_price(entry)} ({off * 100:+.2f}%){corr_txt(cand)}\n"
