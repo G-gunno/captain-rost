@@ -46,8 +46,9 @@ class OrderManagerWorker:
         for cand in candidates:
             sym = cand["symbol"]
 
-            # ГЛОБАЛЬНАЯ ПРОВЕРКА КУЛДАУНА
-            if bot_state.is_on_cooldown(sym):
+            # ГЛОБАЛЬНАЯ ПРОВЕРКА КУЛДАУНА (Накопление не блокируется обычным кулдауном)
+            is_accum = "accumulation" in cand.get("reason_keys", [])
+            if bot_state.is_on_cooldown(sym) and not is_accum:
                 continue
                 
             if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
@@ -83,24 +84,23 @@ class OrderManagerWorker:
                 
                 sl_dist_raw = sl_dist_atr * learner.weight("sl_mult")
                 
-                # === ЗАЩИТА СНАЙПЕРА ===
+                # === ЗАЩИТА СНАЙПЕРА (Запас от стоп-ханта 2.2%) ===
                 if entry_mode == "sniper":
-                    sl_dist_raw = max(sl_dist_raw, entry * 0.018)
-                # =======================
+                    sl_dist_raw = max(sl_dist_raw, entry * 0.022)
+                # ==================================================
                 
                 tp_dist_raw = max(2.0 * a * learner.weight("tp_mult"), sl_dist_raw * 1.5)
                 sl = entry - sl_dist_raw
                 tp = max(entry + tp_dist_raw, entry * 1.006)
                 sl = min(sl, entry * 0.9965)
                 min_rr = 1.5
-                if (entry - sl) / entry * 100 > 3.0:
+                if (entry - sl) / entry * 100 > 3.5:
                     continue
 
             rr = (tp - entry) / (entry - sl) if entry > sl else 0
             if tp <= entry or sl >= entry or round(rr, 2) < min_rr:
                 continue
 
-            # Удалили size_multiplier
             size = buy_size(equity, cand["score"], thr, cand["liquidity"], paper.usdt,
                             kind=kind, entry_mode=entry_mode)
 
