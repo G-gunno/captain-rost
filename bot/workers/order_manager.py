@@ -82,7 +82,8 @@ class OrderManagerWorker:
             is_mom = cand.get("is_momentum", False)
             
             thr = thrs.get(entry_mode, 6.0)
-            off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], entry_mode, tier=tier)
+            # ⚡ Умный расчет отступа с учетом паттерна накопления и тира монеты
+            off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], entry_mode, tier=tier, is_accumulation=is_accum)
 
             t_data = tickers.get(sym, {})
             bid1 = t_data.get("bid1", cand["last"])
