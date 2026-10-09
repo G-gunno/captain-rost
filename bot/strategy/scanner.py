@@ -210,7 +210,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         a15 = atr(candles_15m)
         if a15 > 0 and e21 > 0:
             dist_from_ema = last - e21
-            # Ужесточаем фильтр: отрыв больше 1.8 ATR или 2.0% - это верный откат. Пропускаем.
             if dist_from_ema > 1.8 * a15:
                 score -= 4.0  
                 reasons.append(f"FOMO-перегрев (+{dist_from_ema/a15:.1f} ATR от EMA21)")
@@ -228,7 +227,8 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     no_recent_pump = t["change_pct"] < 4.0      
     trend_ok = e21 >= (e50 * 0.998)             
     
-    if is_flat and is_quiet and rsi_cool and no_recent_pump and trend_ok and regime in ("bull", "neutral"):
+    # Накопление работает в любых фазах рынка!
+    if is_flat and is_quiet and rsi_cool and no_recent_pump and trend_ok:
         score += 3.5  
         reasons.append("тихая консолидация на EMA50 (накопление)")
         keys.append("accumulation")
@@ -313,7 +313,11 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
     
     _, _, keys_live, sv_live = score_symbol(candles_15m, candles_1h, t, regime, is_open_pos)
     is_reversal = "reversal" in keys_live
-    is_momentum = ("impulse" in keys_live and sv_live.get("rsi", 0) >= 60 and (sv_live.get("volume", 0) >= 1.5 or sv_live.get("chg24h", 0) >= 6.0))
+    
+    rsi_live = sv_live.get("rsi", 0)
+    chg_live = sv_live.get("chg24h", 0)
+    vol_live = sv_live.get("volume", 0)
+    is_momentum = ("impulse" in keys_live and 55 <= rsi_live <= 68 and 1.5 <= chg_live <= 12.0 and vol_live >= 1.4)
     
     if is_reversal: entry_mode_live = "reversal"
     elif is_momentum: entry_mode_live = "rocket"
@@ -467,7 +471,10 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             score10 = (score / raw_max * SCORE_MAX) if raw_max > 0 else 0.0
 
             is_reversal = "reversal" in keys
-            is_momentum = ("impulse" in keys and signal_values.get("rsi", 0) >= 60 and (signal_values.get("volume", 0) >= 1.5 or signal_values.get("chg24h", 0) >= 6.0))
+            rsi_val = signal_values.get("rsi", 0)
+            chg_val = signal_values.get("chg24h", 0)
+            vol_val = signal_values.get("volume", 0)
+            is_momentum = ("impulse" in keys and 55 <= rsi_val <= 68 and 1.5 <= chg_val <= 12.0 and vol_val >= 1.4)
 
             if is_reversal: entry_mode = "reversal"
             elif is_momentum: entry_mode = "rocket"
