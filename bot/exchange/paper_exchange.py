@@ -356,7 +356,7 @@ class PaperExchange:
         self.orders.clear()
         self.chart_events.clear()
         if hasattr(self, 'funding_coins'):
-            self.funding_coins.clear()  # ⚡ Очищаем накопленные монеты китов
+            self.funding_coins.clear()
         self.usdt = self.start_usdt 
         self.funding = 0.0           
         self.save()
