@@ -85,7 +85,8 @@ class ExecutionRiskWorker:
             # SL
             if last <= pos["sl"]:
                 ex = paper._sell(sym, last, "SL 🛡", regime_now=bot_state.current_regime)
-                paper.log_event(sym, "sell_loss", last, "SL 🛡")
+                ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"  # ✅ Ставим цвет по фактическому PnL
+                paper.log_event(sym, ev_type, last, "SL 🛡")
                 bot_state.set_cooldown(sym, 420)  # ⚡ 7 минут кулдауна после стопа
                 self.bus.publish("NOTIFY", {
                     "text": f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · SL 🛡\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}",
