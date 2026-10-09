@@ -354,11 +354,13 @@ class PaperExchange:
         self.market_history.clear()
         self.positions.clear()
         self.orders.clear()
-        self.chart_events.clear()  
+        self.chart_events.clear()
+        if hasattr(self, 'funding_coins'):
+            self.funding_coins.clear()  # ⚡ Очищаем накопленные монеты китов
         self.usdt = self.start_usdt 
         self.funding = 0.0           
         self.save()
-        logger.info("paper: торговая статистика, позиции и балансы сброшены")
+        logger.info("paper: торговая статистика, позиции, балансы и накопления сброшены")
 
     def equity(self, prices):
         eq = self.usdt + self.funding
