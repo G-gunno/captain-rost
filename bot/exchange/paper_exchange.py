@@ -195,27 +195,47 @@ class PaperExchange:
         self.usdt += proceeds - fee_sell
         transferred = 0.0
 
+        sector = self._resolve_sector(sym, pos.get("sector"))
+        tier = pos.get("tier")
+        kind = pos.get("kind", "core")
+        entry_mode = pos.get("entry_mode", "rocket" if pos.get("is_momentum") else "sniper")
+
         pos["qty"] -= qty_part
         self.realized.append({
-            "symbol": sym, "pnl": round(total_pnl, 4), "pnl_pct": round(total_pnl_pct, 2),
-            "reason": reason, "time": int(time.time()), "exit_type": exit_type,
-            "sector": sector, "tier": tier, "kind": kind,
+            "symbol": sym,
+            "pnl": round(pnl, 4),
+            "pnl_pct": round(pnl_pct, 2),
+            "reason": reason,
+            "time": int(time.time()),
+            "exit_type": "TP1",
+            "sector": sector,
+            "tier": tier,
+            "kind": kind,
             "is_momentum": pos.get("is_momentum", False),
             "entry_mode": entry_mode,
-            "regime": pos.get("regime_entry", "neutral")  # <--- ДОБАВИЛИ ЭТО
+            "regime": pos.get("regime_entry", "neutral"),
+            "partial": True,
         })
         self.trades.append({
-            "side": "Sell(part)", "symbol": sym, "qty": qty_part,
-            "price": price, "time": int(time.time()),
+            "side": "Sell(part)",
+            "symbol": sym,
+            "qty": qty_part,
+            "price": price,
+            "time": int(time.time()),
         })
         self.save()
         return {
-            "symbol": sym, "price": price, "pnl": pnl,
-            "pnl_pct": pnl_pct, "reason": reason, "transferred": transferred,
-            "sector": self._resolve_sector(sym, pos.get("sector")),
-            "tier": pos.get("tier"), "kind": pos.get("kind", "core"),
+            "symbol": sym,
+            "price": price,
+            "pnl": pnl,
+            "pnl_pct": pnl_pct,
+            "reason": reason,
+            "transferred": transferred,
+            "sector": sector,
+            "tier": tier,
+            "kind": kind,
             "is_momentum": pos.get("is_momentum", False),
-            "entry_mode": pos.get("entry_mode", "sniper")
+            "entry_mode": entry_mode,
         }
 
     def _sell(self, sym, price, reason, regime_now=None):
