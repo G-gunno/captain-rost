@@ -129,38 +129,47 @@ class ExecutionRiskWorker:
             paper.save()
 
     def _update_trailing_stop(self, sym: str, pos: dict, max_p: float) -> bool:
-        # === ДИНАМИЧЕСКИЙ ТРЕЙЛИНГ (С ВОЗДУХОМ) ===
-        tp_dist_pct = (pos["tp"] - pos["avg"]) / pos["avg"]
-        
-        # Дистанция старта (когда бот начинает готовиться к трейлингу)
-        start_trail_pct = min(max(tp_dist_pct * 0.5, 0.008), tp_dist_pct * 0.8) 
-        
-        # Воздух для стопа (минимум 1.2%, чтобы тень свечи не выбила позицию)
-        trail_air_pct = max(start_trail_pct, 0.012)
-        
-        breakeven = pos["avg"] * 1.0025 # Уверенный безубыток с учетом комиссий
-        
-        new_sl = pos["sl"]
-        
-        # 1. Основной трал: Даем монете пространство. Начинаем тянуть стоп только тогда, 
-        # когда цена ушла на дистанцию x2.5 от старта.
-        if max_p >= pos["avg"] * (1 + start_trail_pct * 2.5):
-            new_sl = max(new_sl, max_p * (1 - trail_air_pct))
-            
-        # 2. Агрессивный трал: если ракета улетела в космос (X3.5 от старта)
-        if max_p >= pos["avg"] * (1 + start_trail_pct * 3.5):
-            new_sl = max(new_sl, max_p * (1 - trail_air_pct * 0.5))
+        avg_p = pos["avg"]
+        if avg_p <= 0:
+            return False
 
-        # === ФИКС СПАМА ТРЕЙЛИНГ-СТОПА ===
-        if new_sl > pos["sl"]:
-            old_sl_str = fmt_price(pos["sl"])
+        current_sl = pos["sl"]
+        new_sl = current_sl
+        breakeven = avg_p * 1.0025  # Безубыток с запасом на двойную комиссию Bybit (0.25%)
+        profit_pct = (max_p - avg_p) / avg_p * 100
+
+        # 1. РАННИЙ БЕЗУБЫТОК: как только монета дала +1.0%, риск обнуляется
+        if max_p >= avg_p * 1.01:
+            if new_sl < breakeven:
+                new_sl = breakeven
+
+        # 2. ТРЕЙЛИНГ ПОСЛЕ TP1 (Полноценный Раннер):
+        # 50% прибыли уже в кармане. Остаток тянем за ценой на дистанции 1.5% от пика
+        if pos.get("tp1_done"):
+            runner_trail = max_p * 0.985  # Люфт 1.5% от локального максимума
+            # Стоп раннера не может быть ниже уверенного безубытка (+0.5%)
+            min_runner_sl = avg_p * 1.005
+            new_sl = max(new_sl, runner_trail, min_runner_sl)
+        else:
+            # 3. ТРЕЙЛИНГ ДО TP1 (если ракета летит без отката):
+            # Если цена ушла выше +2.0%, подтягиваем стоп на 1.2% ниже пика
+            if profit_pct >= 2.0:
+                new_sl = max(new_sl, max_p * 0.988)
+
+        # Проверяем, сдвинулся ли стоп
+        if new_sl > current_sl:
+            old_sl_str = fmt_price(current_sl)
             new_sl_str = fmt_price(new_sl)
-            
+
             if new_sl_str != old_sl_str:
                 pos["sl"] = round(new_sl, 8)
                 pos["max_sl"] = pos["sl"]
-                paper.log_event(sym, "sl_moved", pos["sl"], "Трейлинг SL")
-                self.bus.publish("NOTIFY", {"text": f"🛡 SL поднят по <b>{sym[:-4]}</b> до {new_sl_str}", "urgent": False})
+                tag = "🔒 БУ" if (current_sl < breakeven and new_sl >= breakeven and not pos.get("tp1_done")) else "Трейлинг SL"
+                paper.log_event(sym, "sl_moved", pos["sl"], tag)
+                self.bus.publish("NOTIFY", {
+                    "text": f"🛡 SL поднят по <b>{sym[:-4]}</b> до {new_sl_str} ({tag})", 
+                    "urgent": False
+                })
                 return True
-                
+
         return False
