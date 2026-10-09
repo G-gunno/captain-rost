@@ -10,6 +10,27 @@ from bot.strategy.learner import learner
 from bot.utils.format import pair_html, corr_txt, funding_line, usd, fmt_price, fmt_pct
 from bot.core.state import bot_state
 
+TIER_SL_FLOOR = {
+    "TOP20": 0.010,  # 1.0%
+    "MID":   0.015,  # 1.5%
+    "SMALL": 0.020,  # 2.0%
+    "MICRO": 0.025,  # 2.5%
+}
+
+TIER_TP_FLOOR = {
+    "TOP20": 0.012,  # 1.2%
+    "MID":   0.020,  # 2.0%
+    "SMALL": 0.030,  # 3.0%
+    "MICRO": 0.045,  # 4.5%
+}
+
+TIER_MAX_SL = {
+    "TOP20": 2.0,   # Макс стоп 2.0%
+    "MID":   2.8,   # Макс стоп 2.8%
+    "SMALL": 3.5,   # Макс стоп 3.5%
+    "MICRO": 4.5,   # Макс стоп 4.5%
+}
+
 class OrderManagerWorker:
     """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров."""
     
@@ -56,11 +77,12 @@ class OrderManagerWorker:
 
             kind = cand.get("kind", "core")
             sector = cand.get("sector", "Other")
+            tier = cand.get("tier") or "SMALL"
             entry_mode = cand.get("entry_mode", "rocket" if cand.get("is_momentum") else "sniper")
             is_mom = cand.get("is_momentum", False)
             
             thr = thrs.get(entry_mode, 6.0)
-            off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], entry_mode)
+            off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], entry_mode, tier=tier)
 
             t_data = tickers.get(sym, {})
             bid1 = t_data.get("bid1", cand["last"])
@@ -70,31 +92,37 @@ class OrderManagerWorker:
             a = cand["atr"]
             if a <= 0: continue
 
+            sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.020)
+            tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.030)
+            max_sl_allowed = TIER_MAX_SL.get(tier, 3.5)
+
             if kind == "satellite":
                 base_sl_mult = 0.75 if is_mom else (2.0 if entry_mode == "reversal" else 1.5)
-                sl_dist_pct = max(min(base_sl_mult * a / entry * 100 * learner.weight("sl_mult"), 5.0), 2.0)
-                tp_dist_pct = max(min(2.5 * a / entry * 100 * learner.weight("tp_mult"), 12.0), sl_dist_pct * 2.0)
+                sl_dist_pct = max(min(base_sl_mult * a / entry * 100 * learner.weight("sl_mult"), 5.0), sl_floor_pct * 100)
+                tp_dist_pct = max(min(2.5 * a / entry * 100 * learner.weight("tp_mult"), 12.0), sl_dist_pct * 2.0, tp_floor_pct * 100)
                 sl = entry * (1 - sl_dist_pct / 100)
                 tp = entry * (1 + tp_dist_pct / 100)
                 min_rr = 2.0
             else:
-                if is_mom: sl_dist_atr = 1.2 * a  
+                if is_mom: sl_dist_atr = 1.0 * a
                 elif entry_mode == "reversal": sl_dist_atr = 2.0 * a
                 else: sl_dist_atr = 1.2 * a
                 
                 sl_dist_raw = sl_dist_atr * learner.weight("sl_mult")
                 
-                # === ЗАЩИТА СНАЙПЕРА (Запас от стоп-ханта 2.2%) ===
+                # Защита стоп-лосса с учетом тира актива
                 if entry_mode == "sniper":
-                    sl_dist_raw = max(sl_dist_raw, entry * 0.022)
-                # ==================================================
+                    sl_dist_raw = max(sl_dist_raw, entry * sl_floor_pct)
+                elif is_mom:
+                    sl_dist_raw = max(sl_dist_raw, entry * sl_floor_pct * 0.8)
                 
-                tp_dist_raw = max(2.0 * a * learner.weight("tp_mult"), sl_dist_raw * 1.5)
+                tp_dist_raw = max(2.0 * a * learner.weight("tp_mult"), sl_dist_raw * 1.5, entry * tp_floor_pct)
                 sl = entry - sl_dist_raw
-                tp = max(entry + tp_dist_raw, entry * 1.006)
+                tp = max(entry + tp_dist_raw, entry * (1 + tp_floor_pct))
                 sl = min(sl, entry * 0.9965)
                 min_rr = 1.5
-                if (entry - sl) / entry * 100 > 3.5:
+                
+                if (entry - sl) / entry * 100 > max_sl_allowed:
                     continue
 
             rr = (tp - entry) / (entry - sl) if entry > sl else 0
@@ -168,7 +196,7 @@ class OrderManagerWorker:
 
             qty = size / entry
             order = paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl, score=cand["score"], reason_keys=cand.get("reason_keys", []))
-            order.update({"kind": kind, "sector": sector, "tier": cand.get("tier"), "corr": cand.get("corr"), "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode})
+            order.update({"kind": kind, "sector": sector, "tier": tier, "corr": cand.get("corr"), "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode})
             paper.save()
             
             reasons_html = "<br>".join([f"• {r}" for r in cand.get("reasons", [])])
