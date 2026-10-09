@@ -309,6 +309,35 @@ async def cmd_learn(update, context):
     await reply(update, "\n".join(lines))
 
 @restricted
+async def cmd_funding(update, context):
+    try:
+        prices = await market_data.get_tickers()
+        coins = getattr(paper, "funding_coins", {})
+        usdt_fund = paper.funding
+        
+        lines = ["🏦 <b>Накопительный фонд (Funding Vault)</b>", ""]
+        lines.append(f"💵 <b>Стейблкоины (USDT):</b> <b>{usd(usdt_fund)}</b>")
+        lines.append("<i>Резерв 30% с профита альткоинов. Доступен для ручного вывода или экстренных нужд.</i>\n")
+        
+        active_coins = {s: q for s, q in coins.items() if q > 0.000001}
+        if active_coins:
+            coins_val = sum(qty * prices.get(s, {}).get("last", 0) for s, qty in active_coins.items())
+            lines.append(f"🐋 <b>HODL-портфель китов (TOP20): ~{usd(coins_val)}</b>")
+            for sym, qty in sorted(active_coins.items(), key=lambda kv: kv[1] * prices.get(kv[0], {}).get("last", 0), reverse=True):
+                last = prices.get(sym, {}).get("last", 0)
+                val = qty * last
+                coin_name = sym[:-4] if sym.endswith("USDT") else sym
+                lines.append(f"• <b>{coin_name}</b>: {qty:.6f} (~{usd(val)}) · по ${fmt_price(last)}")
+            lines.append("\n<i>Эти монеты не участвуют в торговле и накапливаются как чистый крипто-актив.</i>")
+        else:
+            lines.append("🐋 <b>HODL-портфель китов:</b> монет пока нет")
+            
+        await reply(update, "\n".join(lines))
+    except Exception as e:
+        logger.exception("Ошибка в /funding")
+        await reply(update, f"⚠️ Ошибка: {e}")
+
+@restricted
 async def cmd_news(update, context):
     from bot.news.cmc import get_stats as cmc_stats
     from bot.news.rss_news import get_stats as rss_stats
@@ -429,8 +458,15 @@ async def cmd_status(update, context):
         msg.append(f"💰 Доступно: <b>{usd(available_usdt)}</b> ({free_pct:.0f}%)")
         if locked_usdt > 0:
             msg.append(f"🔒 В ордерах: <b>{usd(locked_usdt)}</b>")
-        msg.append(f"🏦 Накопления: <b>{usd(paper.funding)}</b>")
-        msg.append(f"📈 Капитал: <b>{usd(eq)}</b>")
+        msg.append(f"🏦 Накопления USDT: <b>{usd(paper.funding)}</b>")
+
+        # Оценка HODL-монет отдельной строкой (без суммирования с фиатом)
+        active_coins = {s: q for s, q in getattr(paper, "funding_coins", {}).items() if q > 0.000001}
+        if active_coins:
+            coins_val = sum(q * prices.get(s, {}).get("last", 0) for s, q in active_coins.items())
+            msg.append(f"🐋 HODL (монеты): <b>~{usd(coins_val)}</b> ({len(active_coins)} шт · /funding)")
+
+        msg.append(f"📈 Торговый капитал: <b>{usd(eq)}</b>")
         msg.append(f"💵 PnL (за всё время): {pnl_emoji(metrics_all['total_pnl'])} <b>{usd(metrics_all['total_pnl'])}</b>")
         msg.append("")
 
@@ -540,6 +576,7 @@ async def run_all(application):
         BotCommand("pause", "⏸ Пауза"),
         BotCommand("resume", "▶️ Возобновить"),
         BotCommand("status", "📊 Статус"),
+        BotCommand("funding", "🏦 Накопительный фонд"),
         BotCommand("chart", "📈 График"),
         BotCommand("learn", "🧠 Обучение"),
         BotCommand("news", "📰 Новости"),
@@ -621,6 +658,7 @@ def main():
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("funding", cmd_funding))
     app.add_handler(CommandHandler("learn", cmd_learn))
     app.add_handler(CommandHandler("news", cmd_news))
     app.add_handler(CommandHandler("exitall", cmd_exitall))
