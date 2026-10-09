@@ -133,30 +133,38 @@ class ExecutionRiskWorker:
         if avg_p <= 0:
             return False
 
+        tier = pos.get("tier") or "SMALL"
+
+        # Параметры трейлинга по весовым категориям
+        TIER_TRAIL_CONFIG = {
+            "TOP20": {"be_trigger": 0.007, "runner_dist": 0.008, "pre_tp_trigger": 1.5, "pre_tp_dist": 0.006},
+            "MID":   {"be_trigger": 0.010, "runner_dist": 0.013, "pre_tp_trigger": 2.0, "pre_tp_dist": 0.010},
+            "SMALL": {"be_trigger": 0.014, "runner_dist": 0.018, "pre_tp_trigger": 2.5, "pre_tp_dist": 0.014},
+            "MICRO": {"be_trigger": 0.022, "runner_dist": 0.028, "pre_tp_trigger": 3.5, "pre_tp_dist": 0.020},
+        }
+        cfg = TIER_TRAIL_CONFIG.get(tier, TIER_TRAIL_CONFIG["SMALL"])
+
         current_sl = pos["sl"]
         new_sl = current_sl
-        breakeven = avg_p * 1.0025  # Безубыток с запасом на двойную комиссию Bybit (0.25%)
+        breakeven = avg_p * 1.0025  # Комиссия в обе стороны + минимальный буфер
         profit_pct = (max_p - avg_p) / avg_p * 100
 
-        # 1. РАННИЙ БЕЗУБЫТОК: как только монета дала +1.0%, риск обнуляется
-        if max_p >= avg_p * 1.01:
+        # 1. РАННИЙ БЕЗУБЫТОК: адаптирован под волатильность актива
+        if max_p >= avg_p * (1 + cfg["be_trigger"]):
             if new_sl < breakeven:
                 new_sl = breakeven
 
-        # 2. ТРЕЙЛИНГ ПОСЛЕ TP1 (Полноценный Раннер):
-        # 50% прибыли уже в кармане. Остаток тянем за ценой на дистанции 1.5% от пика
+        # 2. ТРЕЙЛИНГ РАННЕРА (после взятия TP1):
         if pos.get("tp1_done"):
-            runner_trail = max_p * 0.985  # Люфт 1.5% от локального максимума
-            # Стоп раннера не может быть ниже уверенного безубытка (+0.5%)
-            min_runner_sl = avg_p * 1.005
+            runner_trail = max_p * (1 - cfg["runner_dist"])
+            min_runner_sl = avg_p * 1.005  # Фиксация как минимум +0.5% чистыми
             new_sl = max(new_sl, runner_trail, min_runner_sl)
         else:
-            # 3. ТРЕЙЛИНГ ДО TP1 (если ракета летит без отката):
-            # Если цена ушла выше +2.0%, подтягиваем стоп на 1.2% ниже пика
-            if profit_pct >= 2.0:
-                new_sl = max(new_sl, max_p * 0.988)
+            # 3. ТРЕЙЛИНГ ДО TP1 (вертикальный безоткатный импульс):
+            if profit_pct >= cfg["pre_tp_trigger"]:
+                new_sl = max(new_sl, max_p * (1 - cfg["pre_tp_dist"]))
 
-        # Проверяем, сдвинулся ли стоп
+        # Проверка фактического смещения стопа
         if new_sl > current_sl:
             old_sl_str = fmt_price(current_sl)
             new_sl_str = fmt_price(new_sl)
@@ -164,7 +172,7 @@ class ExecutionRiskWorker:
             if new_sl_str != old_sl_str:
                 pos["sl"] = round(new_sl, 8)
                 pos["max_sl"] = pos["sl"]
-                tag = "🔒 БУ" if (current_sl < breakeven and new_sl >= breakeven and not pos.get("tp1_done")) else "Трейлинг SL"
+                tag = "🔒 БУ" if (current_sl < breakeven and new_sl >= breakeven and not pos.get("tp1_done")) else f"Трейлинг SL ({tier})"
                 paper.log_event(sym, "sl_moved", pos["sl"], tag)
                 self.bus.publish("NOTIFY", {
                     "text": f"🛡 SL поднят по <b>{sym[:-4]}</b> до {new_sl_str} ({tag})", 
