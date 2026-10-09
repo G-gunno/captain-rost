@@ -195,6 +195,7 @@ class PositionManagerWorker:
             order_age = current_time - order["created"]
             entry_mode = order.get("entry_mode", "sniper")
             tier = order.get("tier") or "SMALL"
+            is_accum = "accumulation" in order.get("reason_keys", [])
             is_sniper = entry_mode == "sniper"
             thr = thrs.get(entry_mode, 6.0)
             
@@ -245,8 +246,8 @@ class PositionManagerWorker:
                     self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🔪 Водопад (защита от ножа)")
                     continue
 
-            # Расчет отступа с учетом ликвидности актива
-            off = entry_offset(score_now, thr, regime, atr_pct, entry_mode, tier=tier)
+            # ⚡ Умный расчет идеальной цены с учетом Накопления и Тира
+            off = entry_offset(score_now, thr, regime, atr_pct, entry_mode, tier=tier, is_accumulation=is_accum)
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
             dev_pct = abs(ideal_price - old_price) / old_price * 100
@@ -269,17 +270,24 @@ class PositionManagerWorker:
             else:
                 ideal_price = min(ideal_price, t.get("bid1", t["last"]))
                 
-                if t["last"] > old_price + 4.0 * a: 
+                # Если цена улетела далеко без нас
+                if t["last"] > old_price + 3.0 * a: 
                     paper.cancel_order(order["id"])
                     paper.log_event(sym, "cancel", t["last"], "Улетела без нас")
                     bot_state.set_cooldown(sym, 420)
                     self._notify(f"⚠ Снят · {pair_html(sym, order)} · 🚀 (⏸️ 7м)")
                     continue
                 
+                # Стандартный сдвиг вниз (при сползании цены)
                 if ideal_price < old_price and dev_pct >= 0.2:
                     order["price"] = ideal_price
                     action_type = "correct"
                     price_icon = "⬇️"
+                # ⚡ Умный сдвиг вверх ТОЛЬКО внутри накопления (если монета всё еще у EMA50 и не улетела в памп)
+                elif is_accum and ideal_price > old_price and dev_pct >= 0.2 and t["last"] <= (e50 * 1.012):
+                    order["price"] = ideal_price
+                    action_type = "hunt"
+                    price_icon = "⬆️"
 
             # Реквот TP/SL по тировым планкам
             sl_floor = TIER_SL_FLOOR.get(tier, 0.020)
@@ -294,8 +302,7 @@ class PositionManagerWorker:
                 order["created"] = current_time  
                 paper.save()
                 paper.log_event(sym, "order_moved", ideal_price, f"Сдвиг: {action_type}")
-                h_cnt = order.get('hunt_count', 0)
-                msg_desc = f"попытка {h_cnt}" if action_type == "hunt" else f"сдвиг на {dev_pct:.2f}%"
+                msg_desc = f"подтяжка к сжатию" if action_type == "hunt" else f"сдвиг на {dev_pct:.2f}%"
                 self._notify(f"📐 <b>Сдвиг {price_icon}</b> · {pair_html(sym, order)}\n📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · {msg_desc}")
             else:
                 paper.save()
