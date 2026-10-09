@@ -350,45 +350,58 @@ async def cmd_chart(update, context):
         if not active_syms and not closed_trades:
             return await reply(update, "⚠️ За последние 24 часа активности не было.")
             
-        reg_map = {"bull": "🟢", "neutral": "🟡", "bear": "🔴"}
         lines = ["📈 <b>Графики торгов (24ч)</b>\n"]
         
+        # 1. Текущие открытые позиции и ордера
         if active_syms:
-            lines.append("📦 <b>В работе:</b>")
+            curr_reg = bot_state.current_regime.upper()
+            curr_icon = "🟢" if curr_reg == "BULL" else "🔴" if curr_reg == "BEAR" else "🟡"
+            lines.append(f"📦 <b>В работе ({curr_icon} {curr_reg}):</b>")
             links = []
             for sym, data in sorted(active_syms.items()):
                 mode = "🚀" if data.get('entry_mode') == 'rocket' else "🧲" if data.get('entry_mode') == 'reversal' else "🏹"
-                reg = data.get("regime_entry", "neutral")
-                em = reg_map.get(reg, "⚪")
-                links.append(f"{mode} <a href='{public_url}/chart?symbol={sym}'><b>{sym[:-4]}</b></a> {em}")
+                links.append(f"{mode} <a href='{public_url}/chart?symbol={sym}'><b>{sym[:-4]}</b></a>")
             lines.append(" · ".join(links) + "\n")
             
-        wins = [t for t in closed_trades if t["pnl"] > 0]
-        if wins:
-            lines.append("✅ <b>Профит:</b>")
-            links = []
-            for t in sorted(wins, key=lambda x: x["pnl_pct"], reverse=True):
-                sym = t['symbol'][:-4]
-                mode = "🚀" if t.get('entry_mode') == 'rocket' else "🧲" if t.get('entry_mode') == 'reversal' else "🏹"
-                reg = t.get("regime", "unknown")
-                em = reg_map.get(reg, "⚪")
-                links.append(f"{mode} <a href='{public_url}/chart?symbol={t['symbol']}'><b>{sym}</b></a> (+{t['pnl_pct']:.1f}%) {em}")
-            lines.append(" · ".join(links) + "\n")
+        # 2. Блочная группировка закрытых сделок по режимам рынка
+        regimes_order = [
+            ("bull", "🟢 <b>Бычий рынок (BULL)</b>"),
+            ("neutral", "🟡 <b>Нейтральный рынок (NEUTRAL)</b>"),
+            ("bear", "🔴 <b>Медвежий рынок (BEAR)</b>"),
+            ("unknown", "⚪ <b>Архивные сделки (до обновления)</b>")
+        ]
+        
+        for reg_key, reg_title in regimes_order:
+            trades_in_reg = [t for t in closed_trades if t.get("regime", "unknown") == reg_key]
+            if not trades_in_reg:
+                continue
+                
+            lines.append(reg_title)
             
-        losses = [t for t in closed_trades if t["pnl"] <= 0]
-        if losses:
-            lines.append("❌ <b>Убыток / БУ:</b>")
-            links = []
-            for t in sorted(losses, key=lambda x: x["pnl_pct"]):
-                sym = t['symbol'][:-4]
-                mode = "🚀" if t.get('entry_mode') == 'rocket' else "🧲" if t.get('entry_mode') == 'reversal' else "🏹"
-                reg = t.get("regime", "unknown")
-                em = reg_map.get(reg, "⚪")
-                exit_reason = "EARLY" if t.get("exit_type") == "EARLY" else "SL"
-                links.append(f"{mode} <a href='{public_url}/chart?symbol={t['symbol']}'><b>{sym}</b></a> ({exit_reason}) {em}")
-            lines.append(" · ".join(links))
+            # Профитные сделки
+            wins = [t for t in trades_in_reg if t["pnl"] > 0]
+            if wins:
+                win_links = []
+                for t in sorted(wins, key=lambda x: x["pnl_pct"], reverse=True):
+                    sym = t['symbol'][:-4]
+                    mode = "🚀" if t.get('entry_mode') == 'rocket' else "🧲" if t.get('entry_mode') == 'reversal' else "🏹"
+                    win_links.append(f"{mode} <a href='{public_url}/chart?symbol={t['symbol']}'><b>{sym}</b></a> ({t['pnl_pct']:+.1f}%)")
+                lines.append("✅ " + " · ".join(win_links))
+                
+            # Убыточные сделки
+            losses = [t for t in trades_in_reg if t["pnl"] <= 0]
+            if losses:
+                loss_links = []
+                for t in sorted(losses, key=lambda x: x["pnl_pct"]):
+                    sym = t['symbol'][:-4]
+                    mode = "🚀" if t.get('entry_mode') == 'rocket' else "🧲" if t.get('entry_mode') == 'reversal' else "🏹"
+                    reason = "EARLY" if t.get("exit_type") == "EARLY" else "SL"
+                    loss_links.append(f"{mode} <a href='{public_url}/chart?symbol={t['symbol']}'><b>{sym}</b></a> ({reason})")
+                lines.append("❌ " + " · ".join(loss_links))
+                
+            lines.append("") # Отступ между рыночными блоками
 
-        return await reply(update, "\n".join(lines))
+        return await reply(update, "\n".join(lines).strip())
         
     sym = arg.upper() + ("USDT" if not arg.upper().endswith("USDT") else "")
     await reply(update, f"📈 <b>График торгов {sym}</b>\n\n🌐 <a href='{public_url}/chart?symbol={sym}'>Открыть интерактивный график</a>")
