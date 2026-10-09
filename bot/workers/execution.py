@@ -1,6 +1,7 @@
 import asyncio
 from loguru import logger
 from bot.core.event_bus import EventBus
+from bot.core.state import bot_state
 from bot.exchange.paper_exchange import paper
 from bot.utils.format import pair_html, usd, fmt_price, fmt_pct, pnl_emoji, funding_line
 from bot.strategy.shadow import shadow
@@ -40,6 +41,7 @@ class ExecutionRiskWorker:
                 results = paper.sell_all(tickers)
                 
                 for ex in results:
+                    bot_state.set_cooldown(ex['symbol'], 900)  # ⚡ 15 минут паузы при панике рынка
                     self.bus.publish("NOTIFY", {"text": f"🚨 <b>Экстренный выход</b> · {ex['symbol']} · {ex['pnl_pct']:.2f}%", "urgent": True})
                 
                 self.emergency_queue.task_done()
@@ -82,8 +84,9 @@ class ExecutionRiskWorker:
             
             # SL
             if last <= pos["sl"]:
-                ex = paper._sell(sym, last, "SL 🛡")
+                ex = paper._sell(sym, last, "SL 🛡", regime_now=bot_state.current_regime)
                 paper.log_event(sym, "sell_loss", last, "SL 🛡")
+                bot_state.set_cooldown(sym, 420)  # ⚡ 7 минут кулдауна после стопа
                 self.bus.publish("NOTIFY", {
                     "text": f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · SL 🛡\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}",
                     "urgent": False
@@ -110,9 +113,10 @@ class ExecutionRiskWorker:
                         "urgent": False
                     })
                 else:
-                    ex = paper._sell(sym, last, "TP ✅")
+                    ex = paper._sell(sym, last, "TP ✅", regime_now=bot_state.current_regime)
                     paper.log_event(sym, "sell_profit", last, "TP ✅")
                     shadow.mark_success(sym)
+                    bot_state.set_cooldown(sym, 180)  # ⚡ 3 минуты кулдауна после фиксации полного TP
                     self.bus.publish("NOTIFY", {
                         "text": f"🎯 <b>TP RUNNER</b> · {pair_html(sym, ex)} · ✅\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}",
                         "urgent": False
