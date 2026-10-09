@@ -9,6 +9,13 @@ TIERS = [
     (10000, 200, 1000),
 ]
 
+TIER_OFFSET_BOUNDS = {
+    "TOP20": (-0.0040, -0.0015),  # -0.40% ... -0.15% (в стакане)
+    "MID":   (-0.0080, -0.0030),  # -0.80% ... -0.30%
+    "SMALL": (-0.0140, -0.0050),  # -1.40% ... -0.50%
+    "MICRO": (-0.0250, -0.0100),  # -2.50% ... -1.00% (ловля сквизов)
+}
+
 def tier_limits(equity):
     for bound, mn, mx in TIERS:
         if equity <= bound:
@@ -52,17 +59,16 @@ def buy_size(equity, score, thr, liquidity, free_usdt, kind="core", entry_mode="
     
     return round(size, 2)
 
-# Добавь этот импорт в начало sizing.py, если его нет:
-# from bot.strategy.shadow import shadow
-
-def entry_offset(score, thr, regime, atr_pct, entry_mode="sniper"):
+def entry_offset(score, thr, regime, atr_pct, entry_mode="sniper", tier="SMALL"):
     from bot.strategy.shadow import shadow 
     hunt = shadow.hunt() 
+    tier = tier or "SMALL"
 
     if entry_mode == "rocket":
-        # Больше никаких покупок "по маркету" на хаях! 
-        # Ракета обязана дать микро-откат (четверть ATR), чтобы подтвердить, что это не пик.
-        return -atr_pct / 100 * 0.25
+        raw_rocket = -atr_pct / 100 * 0.25
+        if tier == "TOP20":
+            return max(-0.0025, raw_rocket)
+        return max(-0.0080, raw_rocket)
         
     elif entry_mode == "reversal":
         return max(0.0, atr_pct / 100 * 0.15)
@@ -70,14 +76,28 @@ def entry_offset(score, thr, regime, atr_pct, entry_mode="sniper"):
     base_pullback = -atr_pct / 100 * 0.5
     surplus = score - thr
     
+    # 🐋 Киты (TOP20): лимитка всегда рядом с текущей ценой
+    if tier == "TOP20":
+        mult = 1.2 if regime == "bear" else (0.8 if surplus >= 1.5 else 1.0)
+        return max(-0.0040, min(-0.0015, base_pullback * mult))
+
+    # 🐘 Слоны (MID): умеренное расстояние
+    if tier == "MID":
+        mult = 1.3 if regime == "bear" else (0.8 if surplus >= 1.5 else 1.0)
+        return max(-0.0080, min(-0.0030, base_pullback * mult))
+
+    # 🐅 Тигры (SMALL) и 🐭 Мыши (MICRO)
     if regime == "bear":
-        return min(hunt * 1.5, base_pullback * 1.5)  
+        target = min(hunt * 1.5, base_pullback * 1.5)  
     elif regime == "neutral":
-        return min(hunt * 1.2, base_pullback * 1.2)  
+        target = min(hunt * 1.2, base_pullback * 1.2)  
+    else:
+        if surplus >= 3.0:
+            target = min(shadow.near(), base_pullback * 0.5)  
+        elif surplus >= 1.5:
+            target = min(hunt * 0.5, base_pullback * 0.8)
+        else:
+            target = min(hunt, base_pullback)
 
-    if surplus >= 3.0:
-        return min(shadow.near(), base_pullback * 0.5)  
-    if surplus >= 1.5:
-        return min(hunt * 0.5, base_pullback * 0.8)
-
-    return min(hunt, base_pullback)
+    bounds = TIER_OFFSET_BOUNDS.get(tier, TIER_OFFSET_BOUNDS["SMALL"])
+    return max(bounds[0], min(bounds[1], target))
