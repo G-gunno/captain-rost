@@ -34,6 +34,12 @@ BASE_THRESHOLDS = {
     "bear": {"rocket": 7.0, "sniper": 6.5, "reversal": 5.5},
 }
 
+TIER_CORR_LIMITS = {
+    "TOP20": 0.92,
+    "MID":   0.88,
+    "SMALL": 0.82,
+    "MICRO": 0.75,
+}
 
 def get_thresholds(regime):
     base = BASE_THRESHOLDS.get(regime, BASE_THRESHOLDS["neutral"])
@@ -46,7 +52,6 @@ def get_thresholds(regime):
         "reversal": round(max(0.0, min(SCORE_MAX - 0.5, base["reversal"] + adj + t.get("nudge_reversal", 0.0))), 2),
     }
 
-
 def is_tradable(symbol):
     if not symbol.endswith("USDT"):
         return False
@@ -57,7 +62,6 @@ def is_tradable(symbol):
         return False
     return True
 
-
 def raw_max_score(regime):
     m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
     m += learner.weight("indep")
@@ -66,10 +70,8 @@ def raw_max_score(regime):
     m += 0.5   
     return m
 
-
 def _returns(closes):
     return [(b - a) / a for a, b in zip(closes, closes[1:]) if a]
-
 
 def _corr(a, b):
     n = min(len(a), len(b))
@@ -83,7 +85,6 @@ def _corr(a, b):
     if va <= 0 or vb <= 0:
         return 0.0
     return cov / (va * vb) ** 0.5
-
 
 async def get_regime():
     candles = await market_data.get_kline("BTCUSDT", "60", 250)
@@ -127,7 +128,6 @@ async def get_regime():
 
     return regime, {"btc": last, "ema50": e50, "ema200": e200}
 
-
 async def fetch_new_listings():
     now = time.time()
     if _instruments_cache["data"] is not None and now - _instruments_cache["ts"] < 3600:
@@ -170,7 +170,6 @@ async def fetch_new_listings():
         if launch > 0:
             out.append((sym, (now_ms - launch) / 3600000))
     return out
-
 
 def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     closes = [c["close"] for c in candles_15m]
@@ -271,12 +270,10 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     signal_values = {"rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio}
     return score, reasons, keys, signal_values
 
-
 def normalize(raw, regime):
     rm = raw_max_score(regime)
     if rm <= 0: return 0.0
     return round(max(0.0, min(SCORE_MAX, raw / rm * SCORE_MAX)), 2)
-
 
 async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_open_pos=False):
     candles_15m = await market_data.get_kline(sym, "15", 120)
@@ -287,18 +284,23 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
         
     raw, _, _, _ = score_symbol(candles_15m, candles_1h, t, regime, is_open_pos)
 
+    base = sym[:-4]
+    sectors_map = await get_sectors_for_pool([base])
+    ranks_map = await get_ranks_for_pool([base])
+    tier = tier_of(ranks_map.get(base))
+
+    # Корреляция с BTC с учетом тира монеты
     corr = _corr(_returns([c["close"] for c in candles_15m]), btc_ret)
-    if corr > 0.85 and regime == "neutral":
+    tier_corr_limit = TIER_CORR_LIMITS.get(tier, 0.82)
+
+    if corr > tier_corr_limit and regime == "neutral":
         raw -= 1
     elif corr < 0.45:
         raw += learner.weight("indep")
 
-    base = sym[:-4]
-    sectors_map = await get_sectors_for_pool([base])
-    ranks_map = await get_ranks_for_pool([base])
     sb = learner.sector_bias(sectors_map.get(base, "Other"))
     if sb: raw += sb
-    tb = learner.tier_bias(tier_of(ranks_map.get(base)))
+    tb = learner.tier_bias(tier)
     if tb: raw += tb
 
     if news_items is not None:
@@ -335,7 +337,6 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
             
     score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)    
     return score10, candles_15m
-
 
 async def scan(regime, tickers, deriv_tickers, limit=20):
     tradable = [s for s, t in tickers.items() if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
@@ -413,19 +414,23 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 
             score, reasons, keys, signal_values = score_symbol(candles_15m, candles_1h, tickers[sym], regime)
 
+            base = sym[:-4]
+            sector = sectors_map.get(base, "Other")
+            tier = tier_of(ranks_map.get(base))
+
+            # Порог корреляции с BTC с учетом тира
             corr = _corr(_returns([c["close"] for c in candles_15m]), btc_ret)
-            if corr > 0.85 and regime == "neutral":
+            tier_corr_limit = TIER_CORR_LIMITS.get(tier, 0.82)
+
+            if corr > tier_corr_limit and regime == "neutral":
                 score -= 1
-                reasons.append(f"зеркало BTC (corr {corr:.2f})")
+                reasons.append(f"зеркало BTC ({tier}: corr {corr:.2f})")
             elif corr < 0.45:
                 score += learner.weight("indep")
                 reasons.append(f"независима от BTC (corr {corr:.2f})")
                 keys.append("indep")
 
             kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
-            base = sym[:-4]
-            sector = sectors_map.get(base, "Other")
-            tier = tier_of(ranks_map.get(base))
 
             if fng >= 80:  
                 score -= 0.5
