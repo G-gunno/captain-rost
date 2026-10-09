@@ -15,6 +15,20 @@ from bot.strategy.sizing import entry_offset
 from bot.utils.format import pair_html, usd, fmt_price, fmt_pct, corr_txt, funding_line, pnl_emoji
 from bot.core.state import bot_state
 
+TIER_SL_FLOOR = {
+    "TOP20": 0.010,
+    "MID":   0.015,
+    "SMALL": 0.020,
+    "MICRO": 0.025,
+}
+
+TIER_TP_FLOOR = {
+    "TOP20": 0.012,
+    "MID":   0.020,
+    "SMALL": 0.030,
+    "MICRO": 0.045,
+}
+
 class PositionManagerWorker:
     """Медленный I/O воркер: проверяет новости, инвалидацию скора, двигает ордера-снайперы за ценой."""
     
@@ -62,7 +76,15 @@ class PositionManagerWorker:
         btc_ret = _returns([c["close"] for c in btc_candles])
 
         metrics_24h = paper.get_metrics(tickers, hours=24)
+        
+        # Уведомление о смене режима риска (ИИ)
+        old_mode = getattr(learner, "current_risk_mode", "NORMAL")
         learner.update_threshold(metrics_24h["profit_factor"], metrics_24h["max_drawdown_pct"], metrics_24h["total_trades"])
+        new_mode = getattr(learner, "current_risk_mode", "NORMAL")
+        
+        if old_mode != new_mode and metrics_24h["total_trades"] > 0:
+            mode_icons = {"NORMAL": "🟢", "CAUTIOUS": "🟡", "STRICT": "🔴", "AGGRESSIVE": "🚀"}
+            self._notify(f"🎚 <b>Режим риска (ИИ) изменен:</b> {mode_icons.get(new_mode, '⚪')} {new_mode}\n<i>(строгость {learner.threshold_adj:+.2f})</i>")
 
         news_items = await fetch_news_cache()
         regime = self.current_regime
@@ -148,7 +170,7 @@ class PositionManagerWorker:
         # 3. Проверка ВЫХОДОВ по лимиткам (TP/SL)
         for ex in paper.check_exits(tickers, regime_now=regime):
             if ex["exit_type"] in ("SL", "TP1_SL"):
-                bot_state.set_cooldown(ex["symbol"], 420)  # Стало 7 минут вместо 30!
+                bot_state.set_cooldown(ex["symbol"], 420)
             else:
                 bot_state.set_cooldown(ex["symbol"], 180)
 
@@ -187,6 +209,7 @@ class PositionManagerWorker:
             # === ИММУНИТЕТ ДЛЯ ОРДЕРОВ В СТАКАНЕ ===
             order_age = current_time - order["created"]
             entry_mode = order.get("entry_mode", "sniper")
+            tier = order.get("tier") or "SMALL"
             is_sniper = entry_mode == "sniper"
             thr = thrs.get(entry_mode, 6.0)
             
@@ -223,7 +246,7 @@ class PositionManagerWorker:
             
             atr_pct = a / t["last"] * 100
 
-            # === 1. ДЕТЕКТОР ПАДАЮЩЕГО НОЖА (Защита от сливов CLOUD/BASED) ===
+            # 1. ДЕТЕКТОР ПАДАЮЩЕГО НОЖА
             last_c = candles[-1] if candles else None
             if last_c and a > 0:
                 c_body = last_c["open"] - last_c["close"]
@@ -236,21 +259,20 @@ class PositionManagerWorker:
                     bot_state.set_cooldown(sym, 300)
                     self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🔪 Водопад (защита от ножа)")
                     continue
-            # =================================================================
 
-            off = entry_offset(score_now, thr, regime, atr_pct, entry_mode)
+            # Расчет отступа с учетом ликвидности актива
+            off = entry_offset(score_now, thr, regime, atr_pct, entry_mode, tier=tier)
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
             dev_pct = abs(ideal_price - old_price) / old_price * 100
 
-            # === 2. ЗАПРЕТ ПОГОНИ ЗА РАКЕТАМИ НА ХАЯХ (Защита от покупок на хаях PARTI) ===
+            # 2. ЗАПРЕТ ПОГОНИ ЗА РАКЕТАМИ НА ХАЯХ
             if entry_mode == "rocket" and ideal_price > old_price:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Ракета улетела (не берем на хаях)")
                 bot_state.set_cooldown(sym, 300)
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🚀💨 Улетела (не берем на хаях)")
                 continue
-            # ==============================================================================
             
             action_type = None
 
@@ -274,8 +296,14 @@ class PositionManagerWorker:
                     action_type = "correct"
                     price_icon = "⬇️"
 
-            order["tp"] = max(order["price"] + 2.0 * a, order["price"] * (1 + self.MIN_TP_PCT / 100))
-            order["sl"] = min(order["price"] - 1.2 * a, order["price"] * (1 - self.MIN_SL_PCT / 100))
+            # Реквот TP/SL по тировым планкам
+            sl_floor = TIER_SL_FLOOR.get(tier, 0.020)
+            tp_floor = TIER_TP_FLOOR.get(tier, 0.030)
+            
+            sl_dist = max(1.2 * a, order["price"] * sl_floor)
+            tp_dist = max(2.0 * a, sl_dist * 1.5, order["price"] * tp_floor)
+            order["tp"] = order["price"] + tp_dist
+            order["sl"] = order["price"] - sl_dist
             
             if action_type:
                 order["created"] = current_time  
