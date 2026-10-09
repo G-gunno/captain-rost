@@ -99,17 +99,22 @@ class PositionManagerWorker:
                     self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · {reason} {neg}/{mentions}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                     continue
 
-            # === АЛМАЗНЫЕ РУКИ ДЛЯ СНАЙПЕРОВ ===
+            # === АЛМАЗНЫЕ РУКИ И ИММУНИТЕТ 15 МИНУТ ===
             entry_mode = pos.get("entry_mode", "sniper")
             is_sniper = entry_mode == "sniper" or "accumulation" in pos.get("reason_keys", [])
             trend_broken = (last < e50 and e21 < (e50 * 0.998))
             thr = thrs.get(entry_mode, 6.0)
-            
-            if is_sniper:
+            pos_age = current_time - pos.get("entry_time", current_time)
+
+            if pos_age < 900 and not is_toxic:
+                signal_weak = False  # Иммунитет первых 15 минут от рыночного шума!
+            elif entry_mode == "reversal":
+                signal_weak = False  # Ловца дна защищает жесткий SL/TP, не режем досрочно
+            elif is_sniper:
                 signal_weak = trend_broken
             else:
-                signal_weak = score_pos <= (thr - 1.5)
-            # ======================================================
+                signal_weak = score_pos <= (thr - 1.8)
+            # ==========================================
 
             pos_corr = pos.get("corr", 0.5)
             regime_danger = (pos.get("regime_entry") == "bull" and pos_corr >= 0.45 and (regime == "bear" or (regime == "neutral" and score_pos < thr)))
@@ -117,13 +122,13 @@ class PositionManagerWorker:
             if signal_weak or regime_danger:
                 if regime_danger and not signal_weak:
                     reason = "🔐📉"
-                    bot_state.set_cooldown(sym, 1800)
+                    bot_state.set_cooldown(sym, 420)
                 elif pnl_pct > 0:
                     reason = "🪫"
-                    bot_state.set_cooldown(sym, 300)
+                    bot_state.set_cooldown(sym, 180)
                 else:
                     reason = "✂️📉"
-                    bot_state.set_cooldown(sym, 1800)
+                    bot_state.set_cooldown(sym, 420)
 
                 ex = paper._sell(sym, last, reason, regime_now=regime)
                 ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"
@@ -143,9 +148,9 @@ class PositionManagerWorker:
         # 3. Проверка ВЫХОДОВ по лимиткам (TP/SL)
         for ex in paper.check_exits(tickers, regime_now=regime):
             if ex["exit_type"] in ("SL", "TP1_SL"):
-                bot_state.set_cooldown(ex["symbol"], 1800)
+                bot_state.set_cooldown(ex["symbol"], 420)  # Стало 7 минут вместо 30!
             else:
-                bot_state.set_cooldown(ex["symbol"], 300)
+                bot_state.set_cooldown(ex["symbol"], 180)
 
             ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"
             paper.log_event(ex["symbol"], ev_type, ex["price"], ex["reason"])
@@ -194,23 +199,23 @@ class PositionManagerWorker:
                 if score_now <= thr - 1.5:
                     paper.cancel_order(order["id"])
                     paper.log_event(sym, "cancel", t["last"], "Сигнал умер (Слом тренда/Дамп)")
-                    bot_state.set_cooldown(sym, 900)
-                    self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️ (⏸️ 15м)")
+                    bot_state.set_cooldown(sym, 420)
+                    self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️ (⏸️ 7м)")
                     continue
                     
                 if score_now < thr - 0.5:
                     paper.cancel_order(order["id"])
                     paper.log_event(sym, "cancel", t["last"], "Сигнал ослаб")
-                    bot_state.set_cooldown(sym, 300)
-                    self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🪫 (⏸️ 5м)")
+                    bot_state.set_cooldown(sym, 180)
+                    self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🪫 (⏸️ 3м)")
                     continue
             # =======================================
 
             if (current_time - order["created"]) > 7200:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Тайм-аут 2ч")
-                bot_state.set_cooldown(sym, 900)
-                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ⏳ (⏸️ 15м)")
+                bot_state.set_cooldown(sym, 420)
+                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ⏳ (⏸️ 7м)")
                 continue
 
             a = atr(candles)
@@ -218,28 +223,39 @@ class PositionManagerWorker:
             
             atr_pct = a / t["last"] * 100
 
+            # === 1. ДЕТЕКТОР ПАДАЮЩЕГО НОЖА (Защита от сливов CLOUD/BASED) ===
+            last_c = candles[-1] if candles else None
+            if last_c and a > 0:
+                c_body = last_c["open"] - last_c["close"]
+                vols_past = [c["volume"] for c in candles[-21:-1]]
+                avg_vol_past = (sum(vols_past) / len(vols_past)) if vols_past else 1.0
+                vol_ratio_now = last_c["volume"] / avg_vol_past if avg_vol_past else 1.0
+                if last_c["close"] < last_c["open"] and c_body >= 1.2 * a and vol_ratio_now >= 1.2:
+                    paper.cancel_order(order["id"])
+                    paper.log_event(sym, "cancel", t["last"], "Падающий нож (дамп-свеча)")
+                    bot_state.set_cooldown(sym, 300)
+                    self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🔪 Водопад (защита от ножа)")
+                    continue
+            # =================================================================
+
             off = entry_offset(score_now, thr, regime, atr_pct, entry_mode)
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
             dev_pct = abs(ideal_price - old_price) / old_price * 100
+
+            # === 2. ЗАПРЕТ ПОГОНИ ЗА РАКЕТАМИ НА ХАЯХ (Защита от покупок на хаях PARTI) ===
+            if entry_mode == "rocket" and ideal_price > old_price:
+                paper.cancel_order(order["id"])
+                paper.log_event(sym, "cancel", t["last"], "Ракета улетела (не берем на хаях)")
+                bot_state.set_cooldown(sym, 300)
+                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🚀💨 Улетела (не берем на хаях)")
+                continue
+            # ==============================================================================
             
             action_type = None
 
             if entry_mode in ("rocket", "reversal"):
-                if ideal_price > old_price and dev_pct >= 0.2:
-                    max_hunts = 5 if score_now >= thr + 1.0 else 3
-                    
-                    if order.get("hunt_count", 0) >= max_hunts:
-                        paper.cancel_order(order["id"])
-                        paper.log_event(sym, "cancel", t["last"], "Не догнали ракету")
-                        bot_state.set_cooldown(sym, 900)
-                        self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🏃‍♂️💨 (⏸️ 15м)")
-                        continue
-                    order["price"] = ideal_price
-                    order["hunt_count"] = order.get("hunt_count", 0) + 1
-                    action_type = "hunt"
-                    price_icon = "⬆️"
-                elif ideal_price < old_price and dev_pct >= 0.2:
+                if ideal_price < old_price and dev_pct >= 0.2:
                     order["price"] = ideal_price
                     action_type = "correct"
                     price_icon = "⬇️"
@@ -249,8 +265,8 @@ class PositionManagerWorker:
                 if t["last"] > old_price + 4.0 * a: 
                     paper.cancel_order(order["id"])
                     paper.log_event(sym, "cancel", t["last"], "Улетела без нас")
-                    bot_state.set_cooldown(sym, 900)
-                    self._notify(f"⚠ Снят · {pair_html(sym, order)} · 🚀 (⏸️ 15м)")
+                    bot_state.set_cooldown(sym, 420)
+                    self._notify(f"⚠ Снят · {pair_html(sym, order)} · 🚀 (⏸️ 7м)")
                     continue
                 
                 if ideal_price < old_price and dev_pct >= 0.2:
