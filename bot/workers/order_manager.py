@@ -21,8 +21,8 @@ TIER_SL_FLOOR = {
 TIER_TP_FLOOR = {
     "TOP20": 0.012,  # 1.2%
     "MID":   0.020,  # 2.0%
-    "SMALL": 0.030,  # 3.0%
-    "MICRO": 0.045,  # 4.5%
+    "SMALL": 0.025,  # 2.5%
+    "MICRO": 0.028,  # 2.8% (было 4.5% — устраняет зависание MERL)
 }
 
 TIER_MAX_SL = {
@@ -68,7 +68,6 @@ class OrderManagerWorker:
         for cand in candidates:
             sym = cand["symbol"]
 
-            # ГЛОБАЛЬНАЯ ПРОВЕРКА КУЛДАУНА (Накопление не блокируется обычным кулдауном)
             is_accum = "accumulation" in cand.get("reason_keys", [])
             if bot_state.is_on_cooldown(sym) and not is_accum:
                 continue
@@ -94,10 +93,9 @@ class OrderManagerWorker:
             if a <= 0: continue
 
             sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.020)
-            tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.030)
+            tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.028)
             max_sl_allowed = TIER_MAX_SL.get(tier, 3.5)
 
-            # ⚡ Интеграция реальных множителей стопа и тейка из Shadow
             sl_tuning_mult = shadow.sl_mult()
             tp_tuning_mult = shadow.tp_mult()
 
@@ -115,7 +113,6 @@ class OrderManagerWorker:
 
                 sl_dist_raw = sl_dist_atr * sl_tuning_mult
 
-                # Защита стоп-лосса с учетом тира актива
                 if entry_mode == "sniper":
                     sl_dist_raw = max(sl_dist_raw, entry * sl_floor_pct)
                 elif is_mom:
