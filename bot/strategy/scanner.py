@@ -45,7 +45,7 @@ def get_thresholds(regime):
     base = BASE_THRESHOLDS.get(regime, BASE_THRESHOLDS["neutral"])
     adj = learner.threshold_adj 
     t = shadow.tuning
-    
+
     return {
         "rocket": round(max(0.0, min(SCORE_MAX - 0.5, base["rocket"] + adj + t.get("nudge_rocket", 0.0))), 2),
         "sniper": round(max(0.0, min(SCORE_MAX - 0.5, base["sniper"] + adj + t.get("nudge_sniper", 0.0))), 2),
@@ -93,7 +93,7 @@ async def get_regime():
     closes = [c["close"] for c in candles]
     e21, e50, e200 = ema(closes, 21)[-1], ema(closes, 50)[-1], ema(closes, 200)[-1]
     last = closes[-1]
-    
+
     if e21 > e50 > e200:
         regime = "bull"
     elif e21 < e50 < e200:
@@ -108,14 +108,14 @@ async def get_regime():
             if tradable:
                 green_alts = sum(1 for s in tradable if tickers[s]["change_pct"] > 3.0)
                 breadth_pct = (green_alts / len(tradable)) * 100
-                
+
                 if breadth_pct >= 40.0:
                     regime = "bull"
                     logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые. Режим принудительно переведен в 'bull'.")
 
     stable_trend = get_macro_trend()
     fng = get_fear_and_greed()
-    
+
     if stable_trend == "bull" and regime == "neutral":
         regime = "bull"
     elif stable_trend == "bear" and regime == "bull":
@@ -177,34 +177,39 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
     e12, e26 = ema(closes, 12)[-1], ema(closes, 26)[-1]
     r = rsi(closes)
-    
+
     vols = [c["volume"] for c in candles_15m]
     base_vol = sum(vols[-21:-1]) / 20 if len(vols) > 21 else (sum(vols) / max(1, len(vols)))
     vol_ratio = vols[-1] / base_vol if base_vol else 1.0
 
     w = shadow.signal_windows()
     score, reasons, keys = 0.0, [], []
-    
+
     if last > e50: score += learner.weight("ema50"); reasons.append("цена выше EMA50"); keys.append("ema50")
     if e21 > e50: score += learner.weight("ema21"); reasons.append("EMA21>EMA50"); keys.append("ema21")
     if e12 > e26: score += learner.weight("impulse"); reasons.append("импульс роста"); keys.append("impulse")
-    
+
     if 40 <= r <= w["rsi_hi"]: 
         score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
     elif r > w["rsi_hi"]: 
         score -= 1.5; reasons.append(f"перегрев RSI {r:.0f}") 
 
     if vol_ratio > w["vol_lo"]: score += learner.weight("volume"); reasons.append(f"объём x{vol_ratio:.1f}"); keys.append("volume")
-    
-    last_candle = candles_15m[-1]
-    candle_range = last_candle["high"] - last_candle["low"]
-    wick_up = last_candle["high"] - max(last_candle["close"], last_candle["open"])
-    
-    if candle_range > 0 and (wick_up / candle_range) > 0.5 and vol_ratio > 1.5:
-        score -= 3.0
-        reasons.append("отвержение (длинная тень сверху)")
 
-    # 🛑 ЗАЩИТА ОТ FOMO (Эффект натянутой резинки)
+    # 🛑 1. ЗАЩИТА ОТ ШПИЛЕК И ОТВЕРЖЕНИЯ (проверка последних 3 свечей на сброс объема на хаях)
+    recent_rejection = False
+    for c in candles_15m[-3:]:
+        c_rng = c["high"] - c["low"]
+        c_wick = c["high"] - max(c["close"], c["open"])
+        if c_rng > 0 and (c_wick / c_rng) > 0.45:
+            recent_rejection = True
+            break
+            
+    if recent_rejection and not is_open_pos:
+        score -= 3.0
+        reasons.append("отвержение на хаях (шпилька продаж)")
+
+    # 🛑 2. ЗАЩИТА ОТ FOMO (Эффект натянутой резинки)
     if not is_open_pos:
         a15 = atr(candles_15m)
         if a15 > 0 and e21 > 0:
@@ -225,13 +230,17 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     rsi_cool = 42 <= r <= 55
     no_recent_pump = t["change_pct"] < 4.0      
     trend_ok = e21 >= (e50 * 0.998)             
-    
-    # Накопление работает в любых фазах рынка!
-    if is_flat and is_quiet and rsi_cool and no_recent_pump and trend_ok:
+
+    # 🛑 3. ЗАЩИТА ОТ ПАДАЮЩЕЙ EMA50: Наклон скользящей должен быть нейтральным или восходящим
+    e50_past = ema(closes[:-5], 50)[-1] if len(closes) > 55 else e50
+    ema50_flat_or_rising = e50 >= (e50_past * 0.999)
+
+    # Накопление разрешено ТОЛЬКО если скользящая не валится вниз!
+    if is_flat and is_quiet and rsi_cool and no_recent_pump and trend_ok and ema50_flat_or_rising:
         score += 3.5  
         reasons.append("тихая консолидация на EMA50 (накопление)")
         keys.append("accumulation")
-    
+
     if t["change_pct"] <= -7.0 and r <= 35 and vol_ratio >= 2.5:
         score += 2.0
         reasons.append(f"ОТКУП ДНА (vol x{vol_ratio:.1f})")
@@ -245,7 +254,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score += learner.weight("chg24h"); reasons.append(f"24ч +{t['change_pct']:.1f}%"); keys.append("chg24h")
         elif t["change_pct"] >= w["chg_hi"]: 
             score -= 1.0; reasons.append(f"памп +{t['change_pct']:.1f}% (уже поздно)") 
-            
+
     if t["quote_volume"] < 500_000: score -= 1
 
     if candles_1h and len(candles_1h) >= 50:
@@ -254,11 +263,11 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         e50_1h = ema(closes_1h, 50)[-1]
         e_trend_1h = ema(closes_1h, 200)[-1] if len(closes_1h) >= 200 else e50_1h
         r_1h = rsi(closes_1h)
-        
+
         global_uptrend = last_1h > e_trend_1h
         local_dip = r_1h < 45 
         micro_turn = e12 > e26 
-        
+
         if global_uptrend and local_dip and micro_turn:
             score += 1.5
             reasons.append("MTF: выкуп отката по тренду")
@@ -278,10 +287,10 @@ def normalize(raw, regime):
 async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_open_pos=False):
     candles_15m = await market_data.get_kline(sym, "15", 120)
     candles_1h = await market_data.get_kline(sym, "60", 250)
-    
+
     if len(candles_15m) < 60 or len(candles_1h) < 60:
         return None, candles_15m
-        
+
     raw, _, _, _ = score_symbol(candles_15m, candles_1h, t, regime, is_open_pos)
 
     base = sym[:-4]
@@ -289,7 +298,6 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
     ranks_map = await get_ranks_for_pool([base])
     tier = tier_of(ranks_map.get(base))
 
-    # Корреляция с BTC с учетом тира монеты
     corr = _corr(_returns([c["close"] for c in candles_15m]), btc_ret)
     tier_corr_limit = TIER_CORR_LIMITS.get(tier, 0.82)
 
@@ -312,29 +320,29 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
             raw += learner.weight("hype")
 
     score10 = normalize(raw, regime)
-    
+
     _, _, keys_live, sv_live = score_symbol(candles_15m, candles_1h, t, regime, is_open_pos)
     is_reversal = "reversal" in keys_live
-    
+
     rsi_live = sv_live.get("rsi", 0)
     chg_live = sv_live.get("chg24h", 0)
     vol_live = sv_live.get("volume", 0)
     is_momentum = ("impulse" in keys_live and 55 <= rsi_live <= 68 and 1.5 <= chg_live <= 12.0 and vol_live >= 1.4)
-    
+
     if is_reversal: entry_mode_live = "reversal"
     elif is_momentum: entry_mode_live = "rocket"
     else: entry_mode_live = "sniper"
-        
+
     if deriv_t:
         funding = deriv_t.get("funding", 0)
         if funding > 0.05 and entry_mode_live == "rocket":
             score10 -= 0.5
         elif funding < -0.01:
             score10 += 0.5
-            
+
     is_sqz = await check_coinglass_liquidation_threat(sym)
     if is_sqz: score10 -= 1.5 
-            
+
     score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)    
     return score10, candles_15m
 
@@ -391,7 +399,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
     await fetch_missing_names(pool_bases)
 
     news_items = await fetch_news_cache()
-    
+
     btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
     btc_ret = _returns([c["close"] for c in btc_candles])
 
@@ -404,21 +412,20 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
         async with sem:
             candles_15m = await market_data.get_kline(sym, "15", 120)
             candles_1h = await market_data.get_kline(sym, "60", 250)
-            
+
             if len(candles_15m) < 60 or len(candles_1h) < 60: return None
-                
+
             a = atr(candles_15m)
             last_price = tickers[sym]["last"]
             atr_pct = (a / last_price) * 100 if last_price else 0
             if a <= 0 or atr_pct < 0.25: return None
-                
+
             score, reasons, keys, signal_values = score_symbol(candles_15m, candles_1h, tickers[sym], regime)
 
             base = sym[:-4]
             sector = sectors_map.get(base, "Other")
             tier = tier_of(ranks_map.get(base))
 
-            # Порог корреляции с BTC с учетом тира
             corr = _corr(_returns([c["close"] for c in candles_15m]), btc_ret)
             tier_corr_limit = TIER_CORR_LIMITS.get(tier, 0.82)
 
@@ -444,7 +451,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             if sb:
                 score += sb
                 reasons.append(f"сектор {sector}: {sb:+.2f}")
-                
+
             if is_sector_hot(sector):
                 score += 0.5
                 reasons.append(f"TVL приток (DefiLlama): +0.5")
@@ -463,7 +470,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 FILTERED_BY_NEWS.append({"symbol": sym, "neg_count": f"{neg}/{mentions}", "time": int(time.time())})
                 FILTERED_BY_NEWS[:] = FILTERED_BY_NEWS[-10:]
                 return None
-                
+
             if pos_news > neg:
                 score += learner.weight("news_pos")
                 reasons.append(f"позитивный новостной фон ({pos_news})")
@@ -479,12 +486,12 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             rsi_val = signal_values.get("rsi", 0)
             chg_val = signal_values.get("chg24h", 0)
             vol_val = signal_values.get("volume", 0)
-            is_momentum = ("impulse" in keys and 55 <= rsi_val <= 68 and 1.5 <= chg_val <= 12.0 and vol_val >= 1.4)
+            is_momentum = ("impulse" in keys and 55 <= rsi_live <= 68 and 1.5 <= chg_val <= 12.0 and vol_live >= 1.4)
 
             if is_reversal: entry_mode = "reversal"
             elif is_momentum: entry_mode = "rocket"
             else: entry_mode = "sniper"
-                
+
             deriv_t = deriv_tickers.get(sym)
             if deriv_t:
                 funding = deriv_t.get("funding", 0)
@@ -516,7 +523,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
     tasks = [_analyze_sym(sym) for sym in pool]
     results = await asyncio.gather(*tasks)
-    
+
     scored = [r for r in results if r is not None]
     scored.sort(key=lambda c: c["score"], reverse=True)
 
@@ -536,10 +543,10 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
         mode = c.get("entry_mode", "sniper")
         thr = thrs.get(mode, 6.0)
         mode_icon = "🚀" if mode == "rocket" else "🧲" if mode == "reversal" else "🏹"
-        
+
         parts_html.append(f"{mode_icon} <a href='{chart_url}'><b>{c['symbol'][:-4]}</b></a> {TIER_EMOJI.get(c['tier'], '🐭')} · <i>{c['sector']}</i> · {c['score']:.1f}/{thr:g} · ₿ {c['corr']:.2f}")
         parts_plain.append(f"{c['symbol']} {c['score']:.1f}/{thr:g} [{'+'.join(c['reason_keys'][:5])}] btc{c['corr']:.2f}")
-        
+
     SCAN_SUMMARY["text"] = " | ".join(parts_html) or "сигналов нет"
     SCAN_SUMMARY["thrs"] = thrs
     SCAN_SUMMARY["ts"] = time.time()
