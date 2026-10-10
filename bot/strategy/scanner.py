@@ -196,7 +196,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
 
     if vol_ratio > w["vol_lo"]: score += learner.weight("volume"); reasons.append(f"объём x{vol_ratio:.1f}"); keys.append("volume")
 
-    # 🛑 1. ЗАЩИТА ОТ ШПИЛЕК И ОТВЕРЖЕНИЯ (проверка последних 3 свечей на сброс объема на хаях)
+    # 🛑 1. ЗАЩИТА ОТ ШПИЛЕК И ОТВЕРЖЕНИЯ
     recent_rejection = False
     for c in candles_15m[-3:]:
         c_rng = c["high"] - c["low"]
@@ -209,7 +209,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         score -= 3.0
         reasons.append("отвержение на хаях (шпилька продаж)")
 
-    # 🛑 2. ЗАЩИТА ОТ FOMO (Эффект натянутой резинки)
+    # 🛑 2. ЗАЩИТА ОТ FOMO
     if not is_open_pos:
         a15 = atr(candles_15m)
         if a15 > 0 and e21 > 0:
@@ -231,11 +231,10 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     no_recent_pump = t["change_pct"] < 4.0      
     trend_ok = e21 >= (e50 * 0.998)             
 
-    # 🛑 3. ЗАЩИТА ОТ ПАДАЮЩЕЙ EMA50: Наклон скользящей должен быть нейтральным или восходящим
+    # 🛑 3. ЗАЩИТА ОТ ПАДАЮЩЕЙ EMA50
     e50_past = ema(closes[:-5], 50)[-1] if len(closes) > 55 else e50
     ema50_flat_or_rising = e50 >= (e50_past * 0.999)
 
-    # Накопление разрешено ТОЛЬКО если скользящая не валится вниз!
     if is_flat and is_quiet and rsi_cool and no_recent_pump and trend_ok and ema50_flat_or_rising:
         score += 3.5  
         reasons.append("тихая консолидация на EMA50 (накопление)")
@@ -486,7 +485,9 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             rsi_val = signal_values.get("rsi", 0)
             chg_val = signal_values.get("chg24h", 0)
             vol_val = signal_values.get("volume", 0)
-            is_momentum = ("impulse" in keys and 55 <= rsi_live <= 68 and 1.5 <= chg_val <= 12.0 and vol_live >= 1.4)
+            
+            # ⚡ ИСПРАВЛЕНО: используются корректные переменные rsi_val и vol_val
+            is_momentum = ("impulse" in keys and 55 <= rsi_val <= 68 and 1.5 <= chg_val <= 12.0 and vol_val >= 1.4)
 
             if is_reversal: entry_mode = "reversal"
             elif is_momentum: entry_mode = "rocket"
