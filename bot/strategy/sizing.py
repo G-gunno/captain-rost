@@ -56,7 +56,6 @@ def buy_size(equity, score, thr, liquidity, free_usdt, kind="core", entry_mode="
     strength = 0.0 if score_range <= 0 else max(0.0, min(1.0, (score - thr) / score_range))
 
     if kind == "satellite":
-        # ⚡ Динамический сайзинг сателлитов от Learner (масштабируется по исторической отдаче)
         sat_base = max(base_min, equity * (learner.satellite_size_pct() / 100.0))
         sat_max = sat_base * 1.5
         size = sat_base + (sat_max - sat_base) * strength
@@ -68,15 +67,16 @@ def buy_size(equity, score, thr, liquidity, free_usdt, kind="core", entry_mode="
     if liquidity < 500_000:
         size = base_min
 
-    # ⚡ Половинный критерий Келли по стратегиям (Half-Kelly)
+    # Половинный критерий Келли по стратегиям (Half-Kelly)
     kelly = learner.kelly_multiplier(entry_mode)
     if kelly is not None:
-        # При низком или отрицательном edge размер плавно ужимается до 0.5x, при высоком — полный объем 1.0x
         size *= (0.5 + 0.5 * kelly)
 
     min_allowed = 10.0 if (kelly is not None and kelly < 0.3) else base_min
     size = max(min_allowed, min(size, max_allowed))
-    size = min(size, free_usdt * 0.95, equity * 0.20)
+    
+    # ⚡ Жесткий лимит концентрации: не более 10% от депо в одну сделку (было 0.20)
+    size = min(size, free_usdt * 0.95, equity * 0.10)
 
     return round(size, 2)
 
