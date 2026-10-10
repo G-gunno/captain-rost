@@ -8,7 +8,7 @@ from bot.strategy.shadow import shadow
 
 class ExecutionRiskWorker:
     """Критический воркер ведения открытых позиций (Трейлинг-стопы, TP/SL, Риск-менеджмент). Zero-delay."""
-    
+
     def __init__(self, bus: EventBus):
         self.bus = bus
         self.price_queue = self.bus.subscribe("PRICE_UPDATED", maxsize=5)
@@ -39,11 +39,11 @@ class ExecutionRiskWorker:
                 tickers = event.payload
                 logger.critical("🚨 Execution Worker: ЭКСТРЕННЫЙ ВЫХОД! Дамп рынка.")
                 results = paper.sell_all(tickers)
-                
+
                 for ex in results:
-                    bot_state.set_cooldown(ex['symbol'], 900)  # ⚡ 15 минут паузы при панике рынка
+                    bot_state.set_cooldown(ex['symbol'], 900)
                     self.bus.publish("NOTIFY", {"text": f"🚨 <b>Экстренный выход</b> · {ex['symbol']} · {ex['pnl_pct']:.2f}%", "urgent": True})
-                
+
                 self.emergency_queue.task_done()
             except Exception as e:
                 logger.error(f"Execution _emergency_loop error: {e}")
@@ -68,7 +68,7 @@ class ExecutionRiskWorker:
             emode = f.get("entry_mode", "")
             ev_mode_str = "Ловец дна" if emode == "reversal" else ("Ракета" if emode == "rocket" else "Снайпер")
             paper.log_event(f["symbol"], "buy", f["price"], mode=ev_mode_str)
-            
+
             self.bus.publish("NOTIFY", {
                 "text": f"🛒 <b>Покупка</b> · {pair_html(f['symbol'], f)}\n💵 {usd(f['qty'] * f['price'])} · 📥 {fmt_price(f['price'])}\n🎯 TP {fmt_pct(tp_pct)} · 🛡 SL {fmt_pct(sl_pct)}",
                 "urgent": False
@@ -76,25 +76,25 @@ class ExecutionRiskWorker:
 
         # 3. Быстрый проход по открытым позициям (TP/SL/Трейлинг)
         state_changed = False
-        
+
         for sym, pos in list(paper.positions.items()):
             t = tickers.get(sym)
             if not t: continue
             last = t["last"]
-            
+
             # SL
             if last <= pos["sl"]:
                 ex = paper._sell(sym, last, "SL 🛡", regime_now=bot_state.current_regime)
-                ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"  # ✅ Ставим цвет по фактическому PnL
+                ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"
                 paper.log_event(sym, ev_type, last, "SL 🛡")
-                bot_state.set_cooldown(sym, 420)  # ⚡ 7 минут кулдауна после стопа
+                bot_state.set_cooldown(sym, 420)
                 self.bus.publish("NOTIFY", {
                     "text": f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · SL 🛡\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}",
                     "urgent": False
                 })
                 continue
-            
-            # TP (Если TP1 не было - продаем половину, иначе кроем всё)
+
+            # TP
             if last >= pos["tp"]:
                 if not pos.get("tp1_done"):
                     half = pos["qty"] / 2
@@ -102,13 +102,12 @@ class ExecutionRiskWorker:
                     pos["tp1_done"] = True
                     paper.log_event(sym, "sell_profit", last, "TP1 🎯")
                     shadow.mark_success(sym)
-                    
+
                     breakeven_price = pos["avg"] * 1.002
                     pos["sl"] = max(pos["sl"], breakeven_price)
-                    # Сдвигаем новый TP (динамический сдвиг на основе текущей цены)
                     pos["tp"] = round(pos["tp"] * 1.03, 10) 
                     state_changed = True
-                    
+
                     self.bus.publish("NOTIFY", {
                         "text": f"🎯 <b>TP1</b> · {pair_html(sym, ex)} · 50%\n🔥 {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}\nостаток бежит · 🎯 {fmt_price(pos['tp'])} · 🔒 БУ",
                         "urgent": False
@@ -117,7 +116,7 @@ class ExecutionRiskWorker:
                     ex = paper._sell(sym, last, "TP ✅", regime_now=bot_state.current_regime)
                     paper.log_event(sym, "sell_profit", last, "TP ✅")
                     shadow.mark_success(sym)
-                    bot_state.set_cooldown(sym, 180)  # ⚡ 3 минуты кулдауна после фиксации полного TP
+                    bot_state.set_cooldown(sym, 180)
                     self.bus.publish("NOTIFY", {
                         "text": f"🎯 <b>TP RUNNER</b> · {pair_html(sym, ex)} · ✅\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}",
                         "urgent": False
@@ -140,36 +139,35 @@ class ExecutionRiskWorker:
 
         tier = pos.get("tier") or "SMALL"
 
-        # Параметры трейлинга по весовым категориям
+        # ⚡ Обновленные пороги безубытка и раннеров
         TIER_TRAIL_CONFIG = {
             "TOP20": {"be_trigger": 0.007, "runner_dist": 0.008, "pre_tp_trigger": 1.5, "pre_tp_dist": 0.006},
             "MID":   {"be_trigger": 0.010, "runner_dist": 0.013, "pre_tp_trigger": 2.0, "pre_tp_dist": 0.010},
-            "SMALL": {"be_trigger": 0.014, "runner_dist": 0.018, "pre_tp_trigger": 2.5, "pre_tp_dist": 0.014},
-            "MICRO": {"be_trigger": 0.022, "runner_dist": 0.028, "pre_tp_trigger": 3.5, "pre_tp_dist": 0.020},
+            "SMALL": {"be_trigger": 0.012, "runner_dist": 0.016, "pre_tp_trigger": 2.2, "pre_tp_dist": 0.012},
+            "MICRO": {"be_trigger": 0.014, "runner_dist": 0.022, "pre_tp_trigger": 2.5, "pre_tp_dist": 0.018},  # ⚡ Ровно 0.014 (+1.4%)!
         }
         cfg = TIER_TRAIL_CONFIG.get(tier, TIER_TRAIL_CONFIG["SMALL"])
 
         current_sl = pos["sl"]
         new_sl = current_sl
-        breakeven = avg_p * 1.0025  # Комиссия в обе стороны + минимальный буфер
+        breakeven = avg_p * 1.0025
         profit_pct = (max_p - avg_p) / avg_p * 100
 
-        # 1. РАННИЙ БЕЗУБЫТОК: адаптирован под волатильность актива
+        # 1. РАННИЙ БЕЗУБЫТОК
         if max_p >= avg_p * (1 + cfg["be_trigger"]):
             if new_sl < breakeven:
                 new_sl = breakeven
 
-        # 2. ТРЕЙЛИНГ РАННЕРА (после взятия TP1):
+        # 2. ТРЕЙЛИНГ РАННЕРА
         if pos.get("tp1_done"):
             runner_trail = max_p * (1 - cfg["runner_dist"])
-            min_runner_sl = avg_p * 1.005  # Фиксация как минимум +0.5% чистыми
+            min_runner_sl = avg_p * 1.005
             new_sl = max(new_sl, runner_trail, min_runner_sl)
         else:
-            # 3. ТРЕЙЛИНГ ДО TP1 (вертикальный безоткатный импульс):
+            # 3. ТРЕЙЛИНГ ДО TP1
             if profit_pct >= cfg["pre_tp_trigger"]:
                 new_sl = max(new_sl, max_p * (1 - cfg["pre_tp_dist"]))
 
-        # Проверка фактического смещения стопа
         if new_sl > current_sl:
             old_sl_str = fmt_price(current_sl)
             new_sl_str = fmt_price(new_sl)
