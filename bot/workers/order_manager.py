@@ -33,7 +33,7 @@ TIER_MAX_SL = {
 }
 
 class OrderManagerWorker:
-    """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров."""
+    """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров с защитой от потолка сопротивления."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -137,19 +137,21 @@ class OrderManagerWorker:
             if (sl_dist / entry * 100) > max_sl_allowed:
                 continue
 
-            # Базовый расчет тейка
+            # ⚡ 3. ПРОВЕРКА СОПРОТИВЛЕНИЯ ПЕРЕД РАСЧЕТОМ ТЕЙКА
+            res = cand.get("nearest_res")
+            res_touches = cand.get("res_touches", 0)
+
+            # Если прямо над нами стена — покупка блокируется при малом запасе хода
+            if res and res > entry:
+                res_dist = res - entry
+                if res_dist < sl_dist * 1.35 or (res_dist / entry * 100) < 0.8:
+                    continue  # Запрет покупки в потолок
+
             tp_dist_raw = max(2.0 * a * tp_tuning_mult, sl_dist * 1.5, entry * tp_floor_pct)
             tp = entry + tp_dist_raw
             min_rr = 1.5
 
-            # ⚡ 3. АДАПТИВНЫЙ ТЕЙК ПОД ПОДТВЕРЖДЕННОЕ СОПРОТИВЛЕНИЕ (стены >= 2 касаний)
-            res = cand.get("nearest_res")
-            res_touches = cand.get("res_touches", 0)
-
-            if res and res_touches >= 2 and res > entry:
-                res_dist = res - entry
-                if res_dist < sl_dist * 1.35:
-                    continue
+            if res and res > entry:
                 res_cap_tp = res * 0.997
                 if res_cap_tp < tp:
                     if (res_cap_tp - entry) / sl_dist >= 1.35:
@@ -233,13 +235,13 @@ class OrderManagerWorker:
             order.update({
                 "kind": kind, "sector": sector, "tier": tier, "corr": cand.get("corr"),
                 "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode,
-                "nearest_res": res if (res and res_touches >= 2) else None,
-                "nearest_sup": sup if (sup and sup_touches >= 2) else None,
+                "nearest_res": res,
+                "nearest_sup": sup,
             })
             paper.save()
 
             reasons_html = "<br>".join([f"• {r}" for r in cand.get("reasons", [])])
-            paper.log_event(sym, "order_placed", entry, text=reasons_html, mode=entry_mode, tp=tp, sl=sl)
+            paper.log_event(sym, "order_placed", entry, text=reasons_html, mode=entry_mode, tp=tp, sl=sl, sup=sup, res=res)
 
             tp_pct = (tp - entry) / entry * 100
             sl_pct = (sl - entry) / entry * 100
