@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 from bot.utils.format import fmt_price
+from bot.strategy.indicators import find_sr_levels
 
 LOG_TIMEZONE = "Europe/Moscow" 
 
@@ -99,6 +100,28 @@ class TradeVisualizer:
         fig.add_trace(go.Scatter(x=df_kline['datetime'], y=df_kline['EMA21'], mode='lines', name='EMA 21', line=dict(color='rgba(255, 235, 59, 0.8)', width=1.5)), row=1, col=1)
         fig.add_trace(go.Scatter(x=df_kline['datetime'], y=df_kline['EMA50'], mode='lines', name='EMA 50', line=dict(color='rgba(255, 152, 0, 0.8)', width=1.5)), row=1, col=1)
 
+        # ⚡ РАСЧЕТ И ОТРИСОВКА УРОВНЕЙ ПОДДЕРЖКИ И СОПРОТИВЛЕНИЯ (S/R)
+        candles_list = df_kline.to_dict('records')
+        nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_list, window=60)
+        
+        if nearest_res:
+            fig.add_trace(go.Scatter(
+                x=[min_time, max_time], y=[nearest_res, nearest_res],
+                mode="lines+text", name=f"Сопротивление ({res_touches}x)",
+                line=dict(color="rgba(233, 30, 99, 0.85)", width=1.5, dash="dot"),
+                text=["", f" 🧱 Сопротивление ${fmt_price(nearest_res)} ({res_touches}x)"],
+                textposition="middle left", textfont=dict(color="rgba(233, 30, 99, 0.9)", size=11)
+            ), row=1, col=1)
+
+        if nearest_sup:
+            fig.add_trace(go.Scatter(
+                x=[min_time, max_time], y=[nearest_sup, nearest_sup],
+                mode="lines+text", name=f"Поддержка ({sup_touches}x)",
+                line=dict(color="rgba(33, 150, 243, 0.85)", width=1.5, dash="dot"),
+                text=["", f" 🛡 Поддержка ${fmt_price(nearest_sup)} ({sup_touches}x)"],
+                textposition="middle left", textfont=dict(color="rgba(33, 150, 243, 0.9)", size=11)
+            ), row=1, col=1)
+
         # === 2 СЛОЙ: Объем ===
         fig.add_trace(go.Bar(x=df_kline['datetime'], y=df_kline['volume'], name='Объем', marker_color=colors_vol), row=2, col=1)
 
@@ -107,7 +130,7 @@ class TradeVisualizer:
         fig.add_hline(y=70, line_dash="dash", line_color="rgba(239, 83, 80, 0.5)", row=3, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="rgba(38, 166, 154, 0.5)", row=3, col=1)
 
-        # === Фоновая заливка графиков по режимам рынка (BULL / NEUTRAL / BEAR) ===
+        # Фоновая заливка графиков по режимам рынка
         market_hist = data.get("market_history", [])
         if market_hist:
             reg_colors = {
@@ -134,7 +157,7 @@ class TradeVisualizer:
                     c = reg_colors.get(reg, reg_colors["neutral"])
                     fig.add_vrect(x0=v_x0, x1=v_x1, fillcolor=c, line_width=0, layer="below")
 
-        # === Отрисовка TP1 и SL уровней для АКТИВНОЙ ПОЗИЦИИ ===
+        # Отрисовка TP1 и SL уровней для активной позиции
         pos = data.get("positions", {}).get(self.symbol)
         if pos:
             entry_ts = pos.get("entry_time", start_ts)
@@ -166,7 +189,7 @@ class TradeVisualizer:
                     textposition="middle right", textfont=dict(color=sl_col, size=11)
                 ), row=1, col=1)
 
-        # === Отрисовка исторических уровней TP1 / SL закрытых сделок ===
+        # Отрисовка исторических уровней TP1 / SL
         buys = df_ev[df_ev['type'] == 'buy']
         for _, b_row in buys.iterrows():
             t_b = b_row['datetime']
@@ -190,7 +213,6 @@ class TradeVisualizer:
                     hoverinfo="skip", showlegend=False
                 ), row=1, col=1)
 
-        # Выставляем маркеры событий
         colors = {
             "order_placed": ("cyan", "line-ew", "Ордер"),
             "order_moved": ("blue", "diamond-open", "Сдвиг"),
