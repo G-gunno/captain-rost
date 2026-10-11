@@ -246,14 +246,13 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     elif r > w["rsi_hi"]: 
         score -= 1.5; reasons.append(f"перегрев RSI {r:.0f}") 
 
-    # ⚡ ПРОВЕРКА НАПРАВЛЕНИЯ ОБЪЕМА
+    # ⚡ Проверка направления объема
     last_candle = candles_15m[-1]
     is_green_candle = last_candle["close"] >= last_candle["open"]
     candle_range = last_candle["high"] - last_candle["low"]
 
     if vol_ratio > w["vol_lo"]:
         has_bottom_wick_buy = candle_range > 0 and (last_candle["close"] >= last_candle["low"] + 0.6 * candle_range)
-        
         if is_green_candle or has_bottom_wick_buy:
             score += learner.weight("volume")
             reasons.append(f"объём покупок x{vol_ratio:.1f}")
@@ -262,7 +261,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 2.0
             reasons.append(f"сливной объём x{vol_ratio:.1f} (давление продаж)")
 
-    # 🛑 1. ЗАЩИТА ОТ ШПИЛЕК И ОТВЕРЖЕНИЯ
+    # Защита от шпилек и отвержения
     recent_rejection = False
     for c in candles_15m[-3:]:
         c_rng = c["high"] - c["low"]
@@ -304,19 +303,20 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         reasons.append("тихая консолидация на EMA50 (накопление)")
         keys.append("accumulation")
 
-    nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_15m, window=48)
+    # ⚡ Институциональный мультитаймфрейм S/R (1H + 15m)
+    nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_15m, candles_1h)
     
     if nearest_res and res_touches >= 2 and a15 > 0 and not is_open_pos:
         dist_to_res = nearest_res - last
         if dist_to_res < 1.0 * a15 or (dist_to_res / last * 100) < 0.8:
             score -= 3.5
-            reasons.append(f"в упор к стене ${fmt_price(nearest_res)} ({res_touches} касания)")
+            reasons.append(f"в упор к стене ${fmt_price(nearest_res)} ({res_touches}x)")
 
     if nearest_sup and sup_touches >= 2 and a15 > 0 and not is_open_pos:
         dist_to_sup = last - nearest_sup
-        if dist_to_sup < 0.8 * a15 and last > closes[-2]:
+        if dist_to_sup < 1.2 * a15 and last >= nearest_sup and last > closes[-2]:
             score += 1.5
-            reasons.append(f"отскок от поддержки ${fmt_price(nearest_sup)} ({sup_touches} касания)")
+            reasons.append(f"отскок от поддержки ${fmt_price(nearest_sup)} ({sup_touches}x)")
             keys.append("support_bounce")
 
     if t["change_pct"] <= -7.0 and r <= 35 and vol_ratio >= 2.5:
@@ -373,7 +373,7 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
     if len(candles_15m) < 60 or len(candles_1h) < 60:
         return None, candles_15m
 
-    raw, _, _, _ = score_symbol(candles_15m, candles_1h, t, regime, is_open_pos)
+    raw, _, _, sv_live = score_symbol(candles_15m, candles_1h, t, regime, is_open_pos)
 
     base = sym[:-4]
     sectors_map = await get_sectors_for_pool([base])
@@ -403,7 +403,7 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
 
     score10 = normalize(raw, regime)
 
-    _, _, keys_live, sv_live = score_symbol(candles_15m, candles_1h, t, regime, is_open_pos)
+    _, _, keys_live, _ = score_symbol(candles_15m, candles_1h, t, regime, is_open_pos)
     is_reversal = "reversal" in keys_live
 
     rsi_live = sv_live.get("rsi", 0)
@@ -578,7 +578,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             chg_val = signal_values.get("chg24h", 0)
             vol_val = signal_values.get("volume", 0)
             
-            is_momentum = ("impulse" in keys and 55 <= rsi_val <= 68 and 1.5 <= chg_val <= 12.0 and vol_val >= 1.4)
+            is_momentum = ("impulse" in keys and 55 <= rsi_live <= 68 and 1.5 <= chg_val <= 12.0 and vol_val >= 1.4)
 
             if is_reversal: entry_mode = "reversal"
             elif is_momentum: entry_mode = "rocket"
