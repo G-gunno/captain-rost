@@ -33,14 +33,14 @@ TIER_MAX_SL = {
 }
 
 class OrderManagerWorker:
-    """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров."""
+    """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров с учетом S/R."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
         self.signal_queue = self.bus.subscribe("SIGNALS_READY", maxsize=2)
 
     async def run(self):
-        logger.info("💼 Order Manager запущен: контроль портфеля и ротация...")
+        logger.info("💼 Order Manager запущен: контроль портфеля, S/R структуры и ротация...")
         while True:
             try:
                 event = await self.signal_queue.get()
@@ -89,6 +89,15 @@ class OrderManagerWorker:
             ideal_entry = cand["last"] * (1 + off)
             entry = ideal_entry if is_mom else min(ideal_entry, bid1)
 
+            # ⚡ 1. ПРИВЯЗКА ВХОДА К РЕТЕСТУ ПОДДЕРЖКИ (PRICE ACTION ENTRY)
+            sup = cand.get("nearest_sup")
+            sup_touches = cand.get("sup_touches", 0)
+            if sup and sup_touches >= 2 and not is_mom:
+                # Если сильная поддержка рядом — ставим лимитку прямо на ее ретест (+0.2% над плитой)
+                retest_target = sup * 1.002
+                if retest_target < cand["last"] and abs(retest_target - entry) / entry <= 0.012:
+                    entry = retest_target
+
             a = cand["atr"]
             if a <= 0: continue
 
@@ -99,47 +108,47 @@ class OrderManagerWorker:
             sl_tuning_mult = shadow.sl_mult()
             tp_tuning_mult = shadow.tp_mult()
 
+            # Базовый расчет стопа
             if kind == "satellite":
                 base_sl_mult = 0.75 if is_mom else (2.0 if entry_mode == "reversal" else 1.5)
-                sl_dist_pct = max(min(base_sl_mult * a / entry * 100 * sl_tuning_mult, 5.0), sl_floor_pct * 100)
-                tp_dist_pct = max(min(2.5 * a / entry * 100 * tp_tuning_mult, 12.0), sl_dist_pct * 2.0, tp_floor_pct * 100)
-                sl = entry * (1 - sl_dist_pct / 100)
-                tp = entry * (1 + tp_dist_pct / 100)
-                min_rr = 2.0
+                sl_dist_raw = max(base_sl_mult * a * sl_tuning_mult, entry * sl_floor_pct)
             else:
-                if is_mom: sl_dist_atr = 1.0 * a
-                elif entry_mode == "reversal": sl_dist_atr = 2.0 * a
-                else: sl_dist_atr = 1.2 * a
+                if is_mom: base_sl_atr = 1.0 * a
+                elif entry_mode == "reversal": base_sl_atr = 2.0 * a
+                else: base_sl_atr = 1.2 * a
 
-                sl_dist_raw = sl_dist_atr * sl_tuning_mult
+                sl_dist_raw = max(base_sl_atr * sl_tuning_mult, entry * sl_floor_pct)
 
-                if entry_mode == "sniper":
-                    sl_dist_raw = max(sl_dist_raw, entry * sl_floor_pct)
-                elif is_mom:
-                    sl_dist_raw = max(sl_dist_raw, entry * sl_floor_pct * 0.8)
+            sl = entry - sl_dist_raw
 
-                tp_dist_raw = max(2.0 * a * tp_tuning_mult, sl_dist_raw * 1.5, entry * tp_floor_pct)
-                sl = entry - sl_dist_raw
-                tp = max(entry + tp_dist_raw, entry * (1 + tp_floor_pct))
-                sl = min(sl, entry * 0.9965)
-                min_rr = 1.5
+            # ⚡ 2. СТРУКТУРНЫЙ СТОП-ЛОСС ЗА ПОДДЕРЖКУ (STRUCTURAL INVALIDATION)
+            if sup and sup_touches >= 2 and sup < entry:
+                struct_sl = sup * 0.997  # Прячем стоп на 0.3% под подтвержденную поддержку
+                struct_dist_pct = (entry - struct_sl) / entry * 100
+                if sl_floor_pct * 100 <= struct_dist_pct <= max_sl_allowed:
+                    sl = struct_sl
 
-                if (entry - sl) / entry * 100 > max_sl_allowed:
-                    continue
-
-            # Универсальная дистанция стопа в валюте котировки (для core и satellite)
             sl_dist = entry - sl
-            if sl_dist <= 0:
+            if sl_dist <= 0: continue
+
+            if (sl_dist / entry * 100) > max_sl_allowed:
                 continue
 
-            # Интеллектуальный учет сопротивления (для подтвержденных стен >= 2 касаний)
+            # Базовый расчет тейка
+            tp_dist_raw = max(2.0 * a * tp_tuning_mult, sl_dist * 1.5, entry * tp_floor_pct)
+            tp = entry + tp_dist_raw
+            min_rr = 1.5
+
+            # ⚡ 3. АДАПТИВНЫЙ ТЕЙК ПОД СОПРОТИВЛЕНИЕ (RESISTANCE CEILING)
             res = cand.get("nearest_res")
             res_touches = cand.get("res_touches", 0)
 
             if res and res_touches >= 2 and res > entry:
                 res_dist = res - entry
+                # Если стена слишком близко и не дает забрать даже 1.35x RR — блокируем покупку в потолок!
                 if res_dist < sl_dist * 1.35:
                     continue
+                # Запас есть — прижимаем TP1 на 0.3% под стену сопротивления
                 res_cap_tp = res * 0.997
                 if res_cap_tp < tp:
                     if (res_cap_tp - entry) / sl_dist >= 1.35:
@@ -219,7 +228,14 @@ class OrderManagerWorker:
 
             qty = size / entry
             order = paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl, score=cand["score"], reason_keys=cand.get("reason_keys", []))
-            order.update({"kind": kind, "sector": sector, "tier": tier, "corr": cand.get("corr"), "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode})
+            
+            # Сохраняем информацию об уровнях в сам ордер, чтобы реквоты не ломали привязку
+            order.update({
+                "kind": kind, "sector": sector, "tier": tier, "corr": cand.get("corr"),
+                "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode,
+                "nearest_res": res if (res and res_touches >= 2) else None,
+                "nearest_sup": sup if (sup and sup_touches >= 2) else None
+            })
             paper.save()
 
             reasons_html = "<br>".join([f"• {r}" for r in cand.get("reasons", [])])
