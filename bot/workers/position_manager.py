@@ -6,7 +6,7 @@ from bot.core.event_bus import EventBus
 from bot.exchange.market_data import market_data
 from bot.exchange.paper_exchange import paper
 from bot.strategy.scanner import live_score, get_thresholds, _returns
-from bot.strategy.indicators import atr, ema, rsi
+from bot.strategy.indicators import atr, ema, rsi, find_sr_levels
 from bot.strategy.learner import learner
 from bot.strategy.shadow import shadow
 from bot.news.cmc import get_coin_name
@@ -252,11 +252,15 @@ class PositionManagerWorker:
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
 
-            order_sup = order.get("nearest_sup")
-            if order_sup and order_sup < t["last"] and is_sniper:
-                retest_target = order_sup * 1.002
-                if abs(retest_target - ideal_price) / ideal_price <= 0.012:
-                    ideal_price = retest_target
+            # ⚡ ДИНАМИЧЕСКИЙ РАСЧЕТ УРОВНЕЙ ДЛЯ РЕКВОТА
+            nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles)
+            live_sup = nearest_sup if (nearest_sup and sup_touches >= 2) else order.get("nearest_sup")
+            live_res = nearest_res if (nearest_res and res_touches >= 2) else order.get("nearest_res")
+
+            # ⚡ ПРАВИЛО «ПОЛА ПОДДЕРЖКИ»: Лимитка не должна сползать под поддержку!
+            if live_sup and is_sniper and t["last"] >= live_sup:
+                retest_floor = live_sup * 1.0015
+                ideal_price = max(ideal_price, retest_floor)
 
             dev_pct = abs(ideal_price - old_price) / old_price * 100
 
@@ -292,19 +296,26 @@ class PositionManagerWorker:
                     order["price"] = ideal_price
                     action_type = "hunt"
                     price_icon = "⬆️"
+                elif live_sup and ideal_price > old_price and dev_pct >= 0.2 and t["last"] >= live_sup:
+                    # Подтяжка вверх к ретесту поддержки, если старая цена была слишком глубоко под полом
+                    order["price"] = ideal_price
+                    action_type = "support_floor"
+                    price_icon = "⬆️"
 
-            # ⚡ РАСЧЕТ СТОПА И ТЕЙКА С СОХРАНЕНИЕМ ПОТОЛКА
+            # ⚡ РАСЧЕТ СТОПА И ТЕЙКА С СОХРАНЕНИЕМ СТРУКТУРЫ
             sl_floor = TIER_SL_FLOOR.get(tier, 0.020)
             tp_floor = TIER_TP_FLOOR.get(tier, 0.028)
             max_sl_dist = order["price"] * (TIER_MAX_SL.get(tier, 3.5) / 100.0)
 
             sl_dist = max(1.2 * a, order["price"] * sl_floor)
 
-            if order_sup and order_sup < order["price"]:
-                struct_sl = order_sup * 0.997
-                struct_dist = order["price"] - struct_sl
-                if order["price"] * sl_floor <= struct_dist <= max_sl_dist:
-                    sl_dist = struct_dist
+            if live_sup and live_sup < order["price"]:
+                struct_sl = live_sup * 0.997
+                min_safe_sl = order["price"] * (1 - sl_floor)
+                candidate_sl = min(struct_sl, min_safe_sl)
+                candidate_dist = order["price"] - candidate_sl
+                if candidate_dist <= max_sl_dist:
+                    sl_dist = candidate_dist
 
             order["sl"] = order["price"] - sl_dist
 
@@ -318,9 +329,8 @@ class PositionManagerWorker:
                 if rec_cap < calc_tp and (rec_cap - order["price"]) >= sl_dist * 1.35:
                     calc_tp = round(rec_cap, 8)
 
-            order_res = order.get("nearest_res")
-            if order_res and order_res > order["price"]:
-                res_cap = order_res * 0.997
+            if live_res and live_res > order["price"]:
+                res_cap = live_res * 0.997
                 if res_cap < calc_tp and (res_cap - order["price"]) >= sl_dist * 1.35:
                     calc_tp = round(res_cap, 8)
 
@@ -330,7 +340,7 @@ class PositionManagerWorker:
                 order["created"] = current_time  
                 paper.save()
                 paper.log_event(sym, "order_moved", ideal_price, f"Сдвиг: {action_type}", tp=order["tp"], sl=order["sl"])
-                msg_desc = f"подтяжка к сжатию" if action_type == "hunt" else f"сдвиг на {dev_pct:.2f}%"
+                msg_desc = "подтяжка к поддержке" if action_type == "support_floor" else ("подтяжка к сжатию" if action_type == "hunt" else f"сдвиг на {dev_pct:.2f}%")
                 self._notify(f"📐 <b>Сдвиг {price_icon}</b> · {pair_html(sym, order)}\n📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · {msg_desc}")
             else:
                 paper.save()
