@@ -74,7 +74,6 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72)
         if all(l <= recent_15m[i-j]["low"] for j in (1, 2, 3)) and l <= recent_15m[i+1]["low"]:
             swing_lows.append(l)
 
-    # Кластеризация сопротивлений
     clusters_res = []
     for h in set(swing_highs):
         touches = sum(1 for x in swing_highs if abs(x - h) / h <= 0.005)
@@ -82,7 +81,6 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72)
     confirmed_res = [c for c in clusters_res if c[1] >= 2]
     confirmed_res.sort(key=lambda x: x[0])
 
-    # Кластеризация поддержек
     clusters_sup = []
     for l in set(swing_lows):
         touches = sum(1 for x in swing_lows if abs(x - l) / l <= 0.005)
@@ -95,7 +93,9 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72)
 
 def find_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72, window=None):
     """
-    Поиск ближайших уровней S/R с защитой от слепых зон при тесте в упор.
+    Поиск ближайших уровней S/R:
+    - Сопротивление: СТРОГО выше текущей цены (потолок)
+    - Поддержка: СТРОГО ниже текущей цены (опора)
     """
     if window is not None:
         window_15m = window
@@ -106,16 +106,16 @@ def find_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72, wi
     last_price = candles_15m[-1]["close"]
     confirmed_res, confirmed_sup = get_all_sr_levels(candles_15m, candles_1h, window_15m, window_1h)
 
-    # Сопротивление: ищем уровни, которые выше или вплотную к цене (>= -0.1%)
-    res_above = [c for c in confirmed_res if c[0] >= last_price * 0.999]
+    # Уровень сопротивления обязан быть выше цены (+0.15%)
+    res_above = [c for c in confirmed_res if c[0] > last_price * 1.0015]
     nearest_res = None
     res_touches = 0
     if res_above:
         res_above.sort(key=lambda x: x[0])
         nearest_res, res_touches = res_above[0]
 
-    # Поддержка: ищем уровни, которые ниже или вплотную к цене (<= +0.1%)
-    sup_below = [c for c in confirmed_sup if c[0] <= last_price * 1.001]
+    # Уровень поддержки обязан быть ниже цены (-0.15%)
+    sup_below = [c for c in confirmed_sup if c[0] < last_price * 0.9985]
     nearest_sup = None
     sup_touches = 0
     if sup_below:
