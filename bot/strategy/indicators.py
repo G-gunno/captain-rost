@@ -40,10 +40,25 @@ def atr(candles, period=14):
     return a
 
 
+def _dedup_levels(levels):
+    """Объединяет близкие уровни в пределах 0.5%, оставляя уровень с максимальным числом касаний."""
+    if not levels:
+        return []
+    deduped = []
+    for lvl in levels:
+        match = next((d for d in deduped if abs(d[0] - lvl[0]) / lvl[0] <= 0.005), None)
+        if match:
+            if lvl[1] > match[1]:
+                deduped.remove(match)
+                deduped.append(lvl)
+        else:
+            deduped.append(lvl)
+    return deduped
+
+
 def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72):
     """
-    Возвращает все подтвержденные уровни поддержки и сопротивления
-    в виде списков кортежей (цена, количество_касаний).
+    Возвращает все подтвержденные уровни S/R с дедупликацией шума.
     """
     if not candles_15m or len(candles_15m) < 15:
         return [], []
@@ -76,6 +91,7 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72)
 
     clusters_res = []
     for h in set(swing_highs):
+        if h <= 0: continue
         touches = sum(1 for x in swing_highs if abs(x - h) / h <= 0.005)
         clusters_res.append((h, touches))
     confirmed_res = [c for c in clusters_res if c[1] >= 2]
@@ -83,19 +99,20 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72)
 
     clusters_sup = []
     for l in set(swing_lows):
+        if l <= 0: continue
         touches = sum(1 for x in swing_lows if abs(x - l) / l <= 0.005)
         clusters_sup.append((l, touches))
     confirmed_sup = [c for c in clusters_sup if c[1] >= 2]
     confirmed_sup.sort(key=lambda x: x[0], reverse=True)
 
-    return confirmed_res, confirmed_sup
+    return _dedup_levels(confirmed_res), _dedup_levels(confirmed_sup)
 
 
 def find_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72, window=None):
     """
-    Поиск ближайших уровней S/R:
-    - Сопротивление: СТРОГО выше текущей цены (потолок)
-    - Поддержка: СТРОГО ниже текущей цены (опора)
+    Поиск ближайших подтвержденных уровней:
+    - Сопротивление: строго выше текущей цены (> +0.15%)
+    - Поддержка: строго ниже текущей цены (< -0.15%)
     """
     if window is not None:
         window_15m = window
@@ -106,7 +123,6 @@ def find_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72, wi
     last_price = candles_15m[-1]["close"]
     confirmed_res, confirmed_sup = get_all_sr_levels(candles_15m, candles_1h, window_15m, window_1h)
 
-    # Уровень сопротивления обязан быть выше цены (+0.15%)
     res_above = [c for c in confirmed_res if c[0] > last_price * 1.0015]
     nearest_res = None
     res_touches = 0
@@ -114,7 +130,6 @@ def find_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72, wi
         res_above.sort(key=lambda x: x[0])
         nearest_res, res_touches = res_above[0]
 
-    # Уровень поддержки обязан быть ниже цены (-0.15%)
     sup_below = [c for c in confirmed_sup if c[0] < last_price * 0.9985]
     nearest_sup = None
     sup_touches = 0
