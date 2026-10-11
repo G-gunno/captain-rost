@@ -33,7 +33,7 @@ TIER_MAX_SL = {
 }
 
 class OrderManagerWorker:
-    """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров с защитой от потолка сопротивления."""
+    """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров с прозрачной диагностикой."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -65,14 +65,18 @@ class OrderManagerWorker:
         sat_limit = learner.satellite_limit()
         base_min, _ = tier_limits(equity)
 
+        logger.info(f"💼 OrderManager: получено кандидатов: {len(candidates)} {[c['symbol'] for c in candidates]}")
+
         for cand in candidates:
             sym = cand["symbol"]
 
             is_accum = "accumulation" in cand.get("reason_keys", [])
             if bot_state.is_on_cooldown(sym) and not is_accum:
+                logger.debug(f"OrderManager: {sym} пропущен (кулдаун)")
                 continue
 
             if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
+                logger.debug(f"OrderManager: {sym} уже в работе")
                 continue
 
             kind = cand.get("kind", "core")
@@ -100,7 +104,9 @@ class OrderManagerWorker:
                     entry = min(entry, bid1)
 
             a = cand["atr"]
-            if a <= 0: continue
+            if a <= 0:
+                logger.debug(f"OrderManager: {sym} пропущен (ATR <= 0)")
+                continue
 
             sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.020)
             tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.028)
@@ -122,7 +128,7 @@ class OrderManagerWorker:
 
             sl = entry - sl_dist_raw
 
-            # ⚡ 2. СТРУКТУРНЫЙ СТОП-ЛОСС ЗА ПОДДЕРЖКУ
+            # Структурный стоп-лосс за поддержку
             if sup and sup_touches >= 2 and sup < entry:
                 struct_sl = sup * 0.997
                 min_safe_sl = entry * (1 - sl_floor_pct)
@@ -135,44 +141,51 @@ class OrderManagerWorker:
             if sl_dist <= 0: continue
 
             if (sl_dist / entry * 100) > max_sl_allowed:
+                logger.debug(f"OrderManager: {sym} пропущен (стоп {sl_dist/entry*100:.2f}% > {max_sl_allowed}%)")
                 continue
 
-            # ⚡ 3. ПРОВЕРКА СОПРОТИВЛЕНИЯ ПЕРЕД РАСЧЕТОМ ТЕЙКА
+            # ⚡ 2. ПРОВЕРКА СОПРОТИВЛЕНИЯ
             res = cand.get("nearest_res")
             res_touches = cand.get("res_touches", 0)
 
-            # Если прямо над нами стена — покупка блокируется при малом запасе хода
-            if res and res > entry:
-                res_dist = res - entry
-                if res_dist < sl_dist * 1.35 or (res_dist / entry * 100) < 0.8:
-                    continue  # Запрет покупки в потолок
-
             tp_dist_raw = max(2.0 * a * tp_tuning_mult, sl_dist * 1.5, entry * tp_floor_pct)
             tp = entry + tp_dist_raw
-            min_rr = 1.5
+            min_rr = 1.4
 
             if res and res > entry:
+                res_dist_pct = (res - entry) / entry * 100
+                # Защита от покупки в упор: если до стены меньше 0.8% хода — отменяем вход
+                if res_dist_pct < 0.8:
+                    logger.info(f"OrderManager: {sym} отклонён -> стена сопротивления ${fmt_price(res)} в упор ({res_dist_pct:.2f}% < 0.8%)")
+                    continue
+
+                # Поджимаем TP под подтвержденную стену продавца
                 res_cap_tp = res * 0.997
                 if res_cap_tp < tp:
-                    if (res_cap_tp - entry) / sl_dist >= 1.35:
+                    if (res_cap_tp - entry) / sl_dist >= 1.0:
                         tp = round(res_cap_tp, 8)
-                        min_rr = 1.35
+                        min_rr = 1.0
                     else:
+                        logger.info(f"OrderManager: {sym} отклонён -> стена ${fmt_price(res)} не дает забрать даже 1.0x RR")
                         continue
 
             rr = (tp - entry) / sl_dist
             if tp <= entry or round(rr, 2) < min_rr:
+                logger.debug(f"OrderManager: {sym} пропущен (RR {round(rr, 2)} < {min_rr})")
                 continue
 
             size = buy_size(equity, cand["score"], thr, cand["liquidity"], paper.usdt,
                             kind=kind, entry_mode=entry_mode)
 
-            if size < 10: continue
+            if size < 10:
+                logger.debug(f"OrderManager: {sym} пропущен (размер {size} < 10 USDT)")
+                continue
 
             if kind == "satellite":
                 sat_exp = sum(p["qty"] * tickers.get(s, {}).get("last", 0) for s, p in paper.positions.items() if p.get("kind") == "satellite")
                 sat_exp += sum(o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite")
                 if sat_exp >= equity * sat_limit / 100:
+                    logger.debug(f"OrderManager: {sym} пропущен (лимит сателлитов {sat_limit}%)")
                     continue
 
             planned_sells, planned_cancels = [], []
@@ -193,6 +206,7 @@ class OrderManagerWorker:
                             else:
                                 continue
                 else:
+                    logger.debug(f"OrderManager: {sym} пропущен (лимит сектора {sector})")
                     continue
 
             proj_pending = sum(o["qty"] * o["price"] for o in paper.orders)
@@ -219,6 +233,7 @@ class OrderManagerWorker:
                                 proj_usdt += w_p["qty"] * t_w["last"]
 
             if proj_pending + size > proj_usdt:
+                logger.debug(f"OrderManager: {sym} пропущен (недостаточно свободных USDT)")
                 continue 
 
             for w_o in planned_cancels:
@@ -246,6 +261,8 @@ class OrderManagerWorker:
             tp_pct = (tp - entry) / entry * 100
             sl_pct = (sl - entry) / entry * 100
             new_tag = "· 🆕 " if cand.get("is_new") else ""
+
+            logger.info(f"OrderManager: 🎯 {sym} ВЫСТАВЛЕН ОРДЕР {entry_mode}: entry=${fmt_price(entry)}, TP=${fmt_price(tp)}, SL=${fmt_price(sl)}")
 
             self._notify(
                 f"📋 <b>Ордер</b> {new_tag}· {pair_html(sym, order)}\n"
