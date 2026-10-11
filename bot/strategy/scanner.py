@@ -206,7 +206,7 @@ async def fetch_new_listings():
                     if not cursor:
                         break
             _instruments_cache["data"], _instruments_cache["ts"] = raw, now
-        except Exception:
+        except Exception as e:
             raw = []
 
     now_ms = int(now * 1000)
@@ -246,7 +246,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     elif r > w["rsi_hi"]: 
         score -= 1.5; reasons.append(f"перегрев RSI {r:.0f}") 
 
-    # ⚡ Проверка направления объема
+    # Проверка направления объема (не начисляем за дамп)
     last_candle = candles_15m[-1]
     is_green_candle = last_candle["close"] >= last_candle["open"]
     candle_range = last_candle["high"] - last_candle["low"]
@@ -288,20 +288,29 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         score -= 3.5
         reasons.append("истощение тренда (поздний вход в лесенку)")
 
-    is_flat = (0.995 <= (last / e50) <= 1.008)
-    is_quiet = vol_ratio < 1.1
-    rsi_cool = 42 <= r <= 55
-    no_recent_pump = t["change_pct"] < 4.0      
-    trend_ok = e21 >= (e50 * 0.998)             
+    # 🛑 1. ЗАЩИТА НАКОПЛЕНИЯ ОТ СЛИВА СВЕРХУ ВНИЗ
+    is_near_ema50 = (0.998 <= (last / e50) <= 1.012)
+    is_quiet_vol = vol_ratio < 1.15
+    rsi_cool = 42 <= r <= 56
+    no_recent_pump = t["change_pct"] < 5.0      
+    trend_ok = e21 >= e50             
 
     e50_past = ema(closes[:-5], 50)[-1] if len(closes) > 55 else e50
     ema50_flat_or_rising = e50 >= (e50_past * 0.999)
 
-    if is_flat and is_quiet and rsi_cool and no_recent_pump and trend_ok and ema50_flat_or_rising:
+    # Проверка, что цена не валится серией красных свечей
+    not_falling_streak = not (len(closes) >= 3 and closes[-1] < closes[-2] < closes[-3])
+    recent_range = (max(c["high"] for c in candles_15m[-4:]) - min(c["low"] for c in candles_15m[-4:])) / last if last > 0 else 1.0
+    is_tight_box = recent_range <= 0.025
+    not_dump_candle = not (last_candle["close"] < last_candle["open"] and (last_candle["open"] - last_candle["close"]) > 0.5 * a15)
+
+    if (is_near_ema50 and is_quiet_vol and rsi_cool and no_recent_pump and 
+        trend_ok and ema50_flat_or_rising and not_falling_streak and is_tight_box and not_dump_candle):
         score += 3.5  
         reasons.append("тихая консолидация на EMA50 (накопление)")
         keys.append("accumulation")
 
+    # Мультитаймфрейм S/R
     nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_15m, candles_1h)
     
     if nearest_res and res_touches >= 2 and a15 > 0 and not is_open_pos:
@@ -333,9 +342,11 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
 
     if t["quote_volume"] < 500_000: score -= 1
 
-    if candles_1h and len(candles_1h) >= 50:
+    # 🛑 2. ФИЛЬТР КОНТРТРЕНДА СТАРШЕГО ПОРЯДКА (1H EMA21)
+    if candles_1h and len(candles_1h) >= 25:
         closes_1h = [c["close"] for c in candles_1h]
         last_1h = closes_1h[-1]
+        e21_1h = ema(closes_1h, 21)[-1]
         e50_1h = ema(closes_1h, 50)[-1]
         e_trend_1h = ema(closes_1h, 200)[-1] if len(closes_1h) >= 200 else e50_1h
         r_1h = rsi(closes_1h)
@@ -352,10 +363,19 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 1.0
             reasons.append("MTF: ловушка (даунтренд)")
 
+        is_rev_candidate = (t["change_pct"] <= -7.0 and r <= 35 and vol_ratio >= 2.5) or (t["change_pct"] <= -15.0 and vol_ratio >= 3.0)
+        if last_1h < e21_1h and not is_open_pos and not is_rev_candidate:
+            score -= 3.5
+            reasons.append(f"1H даунтренд (цена < EMA21_1H ${fmt_price(e21_1h)})")
+
+    # Максимум за последние 6 часов (24 свечи по 15m) для ограничения TP1
+    recent_high = max(c["high"] for c in candles_15m[-24:]) if len(candles_15m) >= 24 else max(c["high"] for c in candles_15m)
+
     signal_values = {
         "rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio,
         "nearest_res": nearest_res, "res_touches": res_touches,
-        "nearest_sup": nearest_sup, "sup_touches": sup_touches
+        "nearest_sup": nearest_sup, "sup_touches": sup_touches,
+        "recent_high": recent_high
     }
     return score, reasons, keys, signal_values
 
@@ -576,7 +596,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             chg_val = signal_values.get("chg24h", 0)
             vol_val = signal_values.get("volume", 0)
             
-            # ⚡ ИСПРАВЛЕНИЕ: rsi_val вместо rsi_live
             is_momentum = ("impulse" in keys and 55 <= rsi_val <= 68 and 1.5 <= chg_val <= 12.0 and vol_val >= 1.4)
 
             if is_reversal: entry_mode = "reversal"
@@ -613,6 +632,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 "res_touches": signal_values.get("res_touches", 0),
                 "nearest_sup": signal_values.get("nearest_sup"),
                 "sup_touches": signal_values.get("sup_touches", 0),
+                "recent_high": signal_values.get("recent_high"),
                 "size_mult": 1.0
             }
 
