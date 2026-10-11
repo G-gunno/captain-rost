@@ -102,7 +102,7 @@ class TradeVisualizer:
 
         # ⚡ РАСЧЕТ И ОТРИСОВКА УРОВНЕЙ ПОДДЕРЖКИ И СОПРОТИВЛЕНИЯ (S/R)
         candles_list = df_kline.to_dict('records')
-        nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_list, window=60)
+        nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_list)
         
         if nearest_res:
             fig.add_trace(go.Scatter(
