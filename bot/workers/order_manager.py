@@ -33,7 +33,7 @@ TIER_MAX_SL = {
 }
 
 class OrderManagerWorker:
-    """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров с учетом S/R."""
+    """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров с учетом S/R и хаев."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -93,7 +93,6 @@ class OrderManagerWorker:
             sup = cand.get("nearest_sup")
             sup_touches = cand.get("sup_touches", 0)
             if sup and sup_touches >= 2 and not is_mom:
-                # Если сильная поддержка рядом — ставим лимитку прямо на ее ретест (+0.2% над плитой)
                 retest_target = sup * 1.002
                 if retest_target < cand["last"] and abs(retest_target - entry) / entry <= 0.012:
                     entry = retest_target
@@ -123,7 +122,7 @@ class OrderManagerWorker:
 
             # ⚡ 2. СТРУКТУРНЫЙ СТОП-ЛОСС ЗА ПОДДЕРЖКУ (STRUCTURAL INVALIDATION)
             if sup and sup_touches >= 2 and sup < entry:
-                struct_sl = sup * 0.997  # Прячем стоп на 0.3% под подтвержденную поддержку
+                struct_sl = sup * 0.997
                 struct_dist_pct = (entry - struct_sl) / entry * 100
                 if sl_floor_pct * 100 <= struct_dist_pct <= max_sl_allowed:
                     sl = struct_sl
@@ -139,16 +138,25 @@ class OrderManagerWorker:
             tp = entry + tp_dist_raw
             min_rr = 1.5
 
-            # ⚡ 3. АДАПТИВНЫЙ ТЕЙК ПОД СОПРОТИВЛЕНИЕ (RESISTANCE CEILING)
+            # ⚡ 3. ОГРАНИЧЕНИЕ ТЕЙКА ЛОКАЛЬНЫМ ХАЕМ 6 ЧАСОВ (RECENT HIGH CEILING)
+            rec_hi = cand.get("recent_high")
+            if rec_hi and rec_hi > entry:
+                rec_hi_cap = rec_hi * 0.998
+                if rec_hi_cap < tp:
+                    if (rec_hi_cap - entry) / sl_dist >= 1.35:
+                        tp = round(rec_hi_cap, 8)
+                        min_rr = 1.35
+                    else:
+                        continue
+
+            # ⚡ 4. АДАПТИВНЫЙ ТЕЙК ПОД СОПРОТИВЛЕНИЕ (RESISTANCE CEILING)
             res = cand.get("nearest_res")
             res_touches = cand.get("res_touches", 0)
 
             if res and res_touches >= 2 and res > entry:
                 res_dist = res - entry
-                # Если стена слишком близко и не дает забрать даже 1.35x RR — блокируем покупку в потолок!
                 if res_dist < sl_dist * 1.35:
                     continue
-                # Запас есть — прижимаем TP1 на 0.3% под стену сопротивления
                 res_cap_tp = res * 0.997
                 if res_cap_tp < tp:
                     if (res_cap_tp - entry) / sl_dist >= 1.35:
@@ -229,12 +237,12 @@ class OrderManagerWorker:
             qty = size / entry
             order = paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl, score=cand["score"], reason_keys=cand.get("reason_keys", []))
             
-            # Сохраняем информацию об уровнях в сам ордер, чтобы реквоты не ломали привязку
             order.update({
                 "kind": kind, "sector": sector, "tier": tier, "corr": cand.get("corr"),
                 "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode,
                 "nearest_res": res if (res and res_touches >= 2) else None,
-                "nearest_sup": sup if (sup and sup_touches >= 2) else None
+                "nearest_sup": sup if (sup and sup_touches >= 2) else None,
+                "recent_high": rec_hi
             })
             paper.save()
 
@@ -246,7 +254,7 @@ class OrderManagerWorker:
             new_tag = "· 🆕 " if cand.get("is_new") else ""
 
             self._notify(
-                f"📋 <b>Ордер</b> {new_tag}· {pair_html(sym[:-4], order)}\n"
+                f"📋 <b>Ордер</b> {new_tag}· {pair_html(sym, order)}\n"
                 f"💵 {usd(size)} · 📥 {fmt_price(entry)} ({off * 100:+.2f}%){corr_txt(cand)}\n"
                 f"🎯 {fmt_price(tp)} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
                 f"⭐ {cand['score']:.1f} · 🧠 {'; '.join(cand['reasons'][:3])}"
