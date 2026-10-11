@@ -12,24 +12,24 @@ from bot.utils.format import pair_html, corr_txt, funding_line, usd, fmt_price, 
 from bot.core.state import bot_state
 
 TIER_SL_FLOOR = {
-    "TOP20": 0.010,  # 1.0%
-    "MID":   0.015,  # 1.5%
-    "SMALL": 0.020,  # 2.0%
-    "MICRO": 0.025,  # 2.5%
+    "TOP20": 0.010,
+    "MID":   0.015,
+    "SMALL": 0.020,
+    "MICRO": 0.025,
 }
 
 TIER_TP_FLOOR = {
-    "TOP20": 0.012,  # 1.2%
-    "MID":   0.020,  # 2.0%
-    "SMALL": 0.025,  # 2.5%
-    "MICRO": 0.028,  # 2.8%
+    "TOP20": 0.012,
+    "MID":   0.020,
+    "SMALL": 0.025,
+    "MICRO": 0.028,
 }
 
 TIER_MAX_SL = {
-    "TOP20": 2.0,   # Макс стоп 2.0%
-    "MID":   2.8,   # Макс стоп 2.8%
-    "SMALL": 3.5,   # Макс стоп 3.5%
-    "MICRO": 4.5,   # Макс стоп 4.5%
+    "TOP20": 2.0,
+    "MID":   2.8,
+    "SMALL": 3.5,
+    "MICRO": 4.5,
 }
 
 class OrderManagerWorker:
@@ -93,7 +93,7 @@ class OrderManagerWorker:
             ideal_entry = cand["last"] * (1 + off)
             entry = ideal_entry if is_mom else min(ideal_entry, bid1)
 
-            # ⚡ 1. ПРАВИЛО «ПОЛА ПОДДЕРЖКИ»
+            # ⚡ 1. Правило пола поддержки
             sup = cand.get("nearest_sup")
             sup_touches = cand.get("sup_touches", 0)
 
@@ -144,7 +144,7 @@ class OrderManagerWorker:
                 logger.debug(f"OrderManager: {sym} пропущен (стоп {sl_dist/entry*100:.2f}% > {max_sl_allowed}%)")
                 continue
 
-            # ⚡ 2. ПРОВЕРКА СОПРОТИВЛЕНИЯ
+            # ⚡ 2. Проверка сопротивления
             res = cand.get("nearest_res")
             res_touches = cand.get("res_touches", 0)
 
@@ -154,12 +154,10 @@ class OrderManagerWorker:
 
             if res and res > entry:
                 res_dist_pct = (res - entry) / entry * 100
-                # Защита от покупки в упор: если до стены меньше 0.8% хода — отменяем вход
                 if res_dist_pct < 0.8:
                     logger.info(f"OrderManager: {sym} отклонён -> стена сопротивления ${fmt_price(res)} в упор ({res_dist_pct:.2f}% < 0.8%)")
                     continue
 
-                # Поджимаем TP под подтвержденную стену продавца
                 res_cap_tp = res * 0.997
                 if res_cap_tp < tp:
                     if (res_cap_tp - entry) / sl_dist >= 1.0:
