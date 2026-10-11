@@ -37,7 +37,7 @@ TIER_MAX_SL = {
 }
 
 class PositionManagerWorker:
-    """Медленный I/O воркер: проверяет новости, инвалидацию скора, реквотит ордера с сохранением S/R структуры."""
+    """Медленный I/O воркер: охрана позиций и реквоты ордеров с сохранением структуры S/R."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -127,7 +127,6 @@ class PositionManagerWorker:
                     self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · {reason} {neg}/{mentions}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                     continue
 
-            # Алмазные руки и иммунитет 15 минут
             entry_mode = pos.get("entry_mode", "sniper")
             is_sniper = entry_mode == "sniper" or "accumulation" in pos.get("reason_keys", [])
             trend_broken = (last < e50 and e21 < (e50 * 0.998))
@@ -173,7 +172,7 @@ class PositionManagerWorker:
                     paper.log_event(sym, "tp_runner_raised", pos["tp"], f"TP Runner поднят", mode="TP поднят 🎯", tp=pos["tp"], sl=pos["sl"])
                     self._notify(f"🎯 <b>TP поднят</b> (раннер) · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])}")
 
-        # 2. Проверка ордеров (реквоты и отмены с сохранением S/R структуры)
+        # 2. Проверка ордеров (реквоты и отмены)
         for order in list(paper.orders):
             sym = order["symbol"]
             t = tickers.get(sym)
@@ -253,7 +252,6 @@ class PositionManagerWorker:
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
 
-            # Учет ретеста поддержки при реквоте
             order_sup = order.get("nearest_sup")
             if order_sup and order_sup < t["last"] and is_sniper:
                 retest_target = order_sup * 1.002
@@ -295,14 +293,13 @@ class PositionManagerWorker:
                     action_type = "hunt"
                     price_icon = "⬆️"
 
-            # ⚡ РАСЧЕТ СТОПА И ТЕЙКА С СОХРАНЕНИЕМ СТРУКТУРЫ S/R
+            # ⚡ РАСЧЕТ СТОПА И ТЕЙКА С СОХРАНЕНИЕМ ПОТОЛКА
             sl_floor = TIER_SL_FLOOR.get(tier, 0.020)
             tp_floor = TIER_TP_FLOOR.get(tier, 0.028)
             max_sl_dist = order["price"] * (TIER_MAX_SL.get(tier, 3.5) / 100.0)
 
             sl_dist = max(1.2 * a, order["price"] * sl_floor)
 
-            # Сохраняем структурный стоп за поддержку
             if order_sup and order_sup < order["price"]:
                 struct_sl = order_sup * 0.997
                 struct_dist = order["price"] - struct_sl
@@ -311,18 +308,23 @@ class PositionManagerWorker:
 
             order["sl"] = order["price"] - sl_dist
 
-            # ⚡ СОХРАНЯЕМ ТЕЙК ПОД СОПРОТИВЛЕНИЕ (НЕ ЗАТИРАЕМ СТЕНУ!)
+            # ⚡ Жесткий контроль потолка тейка
             tp_dist = max(2.0 * a, sl_dist * 1.35, order["price"] * tp_floor)
-            order_res = order.get("nearest_res")
+            calc_tp = order["price"] + tp_dist
 
+            rec_hi = order.get("recent_high")
+            if rec_hi and rec_hi > order["price"]:
+                rec_cap = rec_hi * 0.998
+                if rec_cap < calc_tp and (rec_cap - order["price"]) >= sl_dist * 1.35:
+                    calc_tp = round(rec_cap, 8)
+
+            order_res = order.get("nearest_res")
             if order_res and order_res > order["price"]:
                 res_cap = order_res * 0.997
-                if res_cap < order["price"] + tp_dist and (res_cap - order["price"]) >= sl_dist * 1.35:
-                    order["tp"] = round(res_cap, 8)
-                else:
-                    order["tp"] = order["price"] + tp_dist
-            else:
-                order["tp"] = order["price"] + tp_dist
+                if res_cap < calc_tp and (res_cap - order["price"]) >= sl_dist * 1.35:
+                    calc_tp = round(res_cap, 8)
+
+            order["tp"] = calc_tp
 
             if action_type:
                 order["created"] = current_time  
