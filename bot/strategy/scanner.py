@@ -246,13 +246,12 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     elif r > w["rsi_hi"]: 
         score -= 1.5; reasons.append(f"перегрев RSI {r:.0f}") 
 
-    # ✅ СТАЛО:
+    # ⚡ ПРОВЕРКА НАПРАВЛЕНИЯ ОБЪЕМА
     last_candle = candles_15m[-1]
     is_green_candle = last_candle["close"] >= last_candle["open"]
     candle_range = last_candle["high"] - last_candle["low"]
-    
+
     if vol_ratio > w["vol_lo"]:
-        # Бонус дается только если свеча зеленая ИЛИ закрытие в верхней части свечи (выкуп тени снизу)
         has_bottom_wick_buy = candle_range > 0 and (last_candle["close"] >= last_candle["low"] + 0.6 * candle_range)
         
         if is_green_candle or has_bottom_wick_buy:
@@ -260,7 +259,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             reasons.append(f"объём покупок x{vol_ratio:.1f}")
             keys.append("volume")
         else:
-            # Если свеча красная и закрылась на лоях — это дамп/слив, штрафуем!
             score -= 2.0
             reasons.append(f"сливной объём x{vol_ratio:.1f} (давление продаж)")
 
@@ -306,10 +304,8 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         reasons.append("тихая консолидация на EMA50 (накопление)")
         keys.append("accumulation")
 
-    # Детектор сильных подтвержденных уровней
     nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_15m, window=48)
     
-    # Штраф ТОЛЬКО если это подтвержденное сопротивление (минимум 2 касания)
     if nearest_res and res_touches >= 2 and a15 > 0 and not is_open_pos:
         dist_to_res = nearest_res - last
         if dist_to_res < 1.0 * a15 or (dist_to_res / last * 100) < 0.8:
