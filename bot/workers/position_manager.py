@@ -37,7 +37,7 @@ TIER_MAX_SL = {
 }
 
 class PositionManagerWorker:
-    """Медленный I/O воркер: охрана позиций и реквоты без дребезга и сползания под минимум."""
+    """Медленный I/O воркер: охрана позиций и реквоты без дребезга и без блокировки хаев."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -172,7 +172,7 @@ class PositionManagerWorker:
                     paper.log_event(sym, "tp_runner_raised", pos["tp"], f"TP Runner поднят", mode="TP поднят 🎯", tp=pos["tp"], sl=pos["sl"])
                     self._notify(f"🎯 <b>TP поднят</b> (раннер) · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])}")
 
-        # 2. Проверка ордеров (реквоты без дребезга)
+        # 2. Проверка ордеров
         for order in list(paper.orders):
             sym = order["symbol"]
             t = tickers.get(sym)
@@ -257,17 +257,11 @@ class PositionManagerWorker:
             live_sup = nearest_sup if (nearest_sup and sup_touches >= 2) else order.get("nearest_sup")
             live_res = nearest_res if (nearest_res and res_touches >= 2) else order.get("nearest_res")
 
-            # 2-часовой минимум
-            rec_low = min(c["low"] for c in candles[-8:]) if len(candles) >= 8 else order.get("recent_low_2h")
-
-            # Буфер пробоя: поддержка сломана только при уходе глубже чем на 0.6%
+            # Буфер пробоя
             support_broken = live_sup and (t["last"] < live_sup * 0.994)
 
-            # Опорный пол: не позволяем лимитке проседать под поддержку или 2-часовой минимум
-            floor_anchor = live_sup if (live_sup and not support_broken) else (rec_low if (rec_low and rec_low < t["last"]) else None)
-
-            if floor_anchor and is_sniper:
-                retest_floor = floor_anchor * 1.0015
+            if live_sup and is_sniper and not support_broken:
+                retest_floor = live_sup * 1.0015
                 ideal_price = max(ideal_price, retest_floor)
                 ideal_price = min(ideal_price, t.get("bid1", t["last"]))
 
@@ -297,8 +291,7 @@ class PositionManagerWorker:
                     self._notify(f"⚠ Снят · {pair_html(sym, order)} · 🚀 (⏸️ 7м)")
                     continue
 
-                # Анти-дребезг: сдвиг вниз только при отсутствии активного пола и девиации от 0.5%
-                if ideal_price < old_price and dev_pct >= 0.5 and not floor_anchor:
+                if ideal_price < old_price and dev_pct >= 0.5 and (not live_sup or support_broken):
                     order["price"] = ideal_price
                     action_type = "correct"
                     price_icon = "⬇️"
@@ -306,7 +299,7 @@ class PositionManagerWorker:
                     order["price"] = ideal_price
                     action_type = "hunt"
                     price_icon = "⬆️"
-                elif floor_anchor and ideal_price > old_price and dev_pct >= 0.3:
+                elif live_sup and ideal_price > old_price and dev_pct >= 0.3 and not support_broken:
                     order["price"] = ideal_price
                     action_type = "support_floor"
                     price_icon = "⬆️"
@@ -318,9 +311,8 @@ class PositionManagerWorker:
 
             sl_dist = max(1.2 * a, order["price"] * sl_floor)
 
-            anchor_low = live_sup if (live_sup and not support_broken) else rec_low
-            if anchor_low and anchor_low < order["price"]:
-                struct_sl = anchor_low * 0.997
+            if live_sup and live_sup < order["price"] and not support_broken:
+                struct_sl = live_sup * 0.997
                 min_safe_sl = order["price"] * (1 - sl_floor)
                 candidate_sl = min(struct_sl, min_safe_sl)
                 candidate_dist = order["price"] - candidate_sl
@@ -329,15 +321,9 @@ class PositionManagerWorker:
 
             order["sl"] = order["price"] - sl_dist
 
-            # Контроль потолка тейка
+            # Тейк-профит прижимается только к подтвержденной стене продавца
             tp_dist = max(2.0 * a, sl_dist * 1.35, order["price"] * tp_floor)
             calc_tp = order["price"] + tp_dist
-
-            rec_hi = order.get("recent_high")
-            if rec_hi and rec_hi > order["price"]:
-                rec_cap = rec_hi * 0.998
-                if rec_cap < calc_tp and (rec_cap - order["price"]) >= sl_dist * 1.35:
-                    calc_tp = round(rec_cap, 8)
 
             if live_res and live_res > order["price"]:
                 res_cap = live_res * 0.997
@@ -350,7 +336,6 @@ class PositionManagerWorker:
                 order["created"] = current_time  
                 order["nearest_sup"] = live_sup
                 order["nearest_res"] = live_res
-                order["recent_low_2h"] = rec_low
                 paper.save()
                 paper.log_event(sym, "order_moved", ideal_price, f"Сдвиг: {action_type}", tp=order["tp"], sl=order["sl"])
                 msg_desc = "подтяжка к поддержке" if action_type == "support_floor" else ("подтяжка к сжатию" if action_type == "hunt" else f"сдвиг на {dev_pct:.2f}%")
