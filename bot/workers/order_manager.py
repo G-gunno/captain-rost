@@ -127,23 +127,29 @@ class OrderManagerWorker:
                 if (entry - sl) / entry * 100 > max_sl_allowed:
                     continue
 
-            # ⚡ Интеллектуальный учет сопротивления (ТОЛЬКО для подтвержденных стен >= 2 касаний)
+            # Универсальная дистанция стопа в валюте котировки (для core и satellite)
+            sl_dist = entry - sl
+            if sl_dist <= 0:
+                continue
+
+            # Интеллектуальный учет сопротивления (для подтвержденных стен >= 2 касаний)
             res = cand.get("nearest_res")
             res_touches = cand.get("res_touches", 0)
 
             if res and res_touches >= 2 and res > entry:
                 res_dist = res - entry
-                # Если стена слишком близко и не дает забрать даже 1.35x RR — блокируем вход в потолок!
-                if res_dist < sl_dist_raw * 1.35:
+                if res_dist < sl_dist * 1.35:
                     continue
-                # Если запас хода достаточный — аккуратно прижимаем TP под уровень стены
                 res_cap_tp = res * 0.997
                 if res_cap_tp < tp:
-                    tp = round(res_cap_tp, 8)
-                    min_rr = 1.35  # Адаптируем минимальный RR для сделок с прижатием к уровню
+                    if (res_cap_tp - entry) / sl_dist >= 1.35:
+                        tp = round(res_cap_tp, 8)
+                        min_rr = 1.35
+                    else:
+                        continue
 
-            rr = (tp - entry) / (entry - sl) if entry > sl else 0
-            if tp <= entry or sl >= entry or round(rr, 2) < min_rr:
+            rr = (tp - entry) / sl_dist
+            if tp <= entry or round(rr, 2) < min_rr:
                 continue
 
             size = buy_size(equity, cand["score"], thr, cand["liquidity"], paper.usdt,
