@@ -29,8 +29,15 @@ TIER_TP_FLOOR = {
     "MICRO": 0.028,
 }
 
+TIER_MAX_SL = {
+    "TOP20": 2.0,
+    "MID":   2.8,
+    "SMALL": 3.5,
+    "MICRO": 4.5,
+}
+
 class PositionManagerWorker:
-    """Медленный I/O воркер: проверяет новости, инвалидацию скора, двигает ордера-снайперы за ценой."""
+    """Медленный I/O воркер: проверяет новости, инвалидацию скора, реквотит ордера с сохранением S/R структуры."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -90,7 +97,7 @@ class PositionManagerWorker:
         thrs = get_thresholds(regime)
         current_time = int(time.time())
 
-        # 1. Проверка ОТКРЫТЫХ ПОЗИЦИЙ
+        # 1. Проверка открытых позиций
         for sym, pos in list(paper.positions.items()):
             t = tickers.get(sym)
             if not t: continue
@@ -120,7 +127,7 @@ class PositionManagerWorker:
                     self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · {reason} {neg}/{mentions}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                     continue
 
-            # === АЛМАЗНЫЕ РУКИ И ИММУНИТЕТ 15 МИНУТ ===
+            # Алмазные руки и иммунитет 15 минут
             entry_mode = pos.get("entry_mode", "sniper")
             is_sniper = entry_mode == "sniper" or "accumulation" in pos.get("reason_keys", [])
             trend_broken = (last < e50 and e21 < (e50 * 0.998))
@@ -166,7 +173,7 @@ class PositionManagerWorker:
                     paper.log_event(sym, "tp_runner_raised", pos["tp"], f"TP Runner поднят", mode="TP поднят 🎯", tp=pos["tp"], sl=pos["sl"])
                     self._notify(f"🎯 <b>TP поднят</b> (раннер) · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])}")
 
-        # 2. Проверка ОРДЕРОВ (реквоты и отмены)
+        # 2. Проверка ордеров (реквоты и отмены с сохранением S/R структуры)
         for order in list(paper.orders):
             sym = order["symbol"]
             t = tickers.get(sym)
@@ -245,6 +252,14 @@ class PositionManagerWorker:
             off = entry_offset(score_now, thr, regime, atr_pct, entry_mode, tier=tier, is_accumulation=is_accum)
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
+
+            # Учет ретеста поддержки при реквоте
+            order_sup = order.get("nearest_sup")
+            if order_sup and order_sup < t["last"] and is_sniper:
+                retest_target = order_sup * 1.002
+                if abs(retest_target - ideal_price) / ideal_price <= 0.012:
+                    ideal_price = retest_target
+
             dev_pct = abs(ideal_price - old_price) / old_price * 100
 
             if entry_mode == "rocket" and ideal_price > old_price:
@@ -280,13 +295,34 @@ class PositionManagerWorker:
                     action_type = "hunt"
                     price_icon = "⬆️"
 
+            # ⚡ РАСЧЕТ СТОПА И ТЕЙКА С СОХРАНЕНИЕМ СТРУКТУРЫ S/R
             sl_floor = TIER_SL_FLOOR.get(tier, 0.020)
             tp_floor = TIER_TP_FLOOR.get(tier, 0.028)
+            max_sl_dist = order["price"] * (TIER_MAX_SL.get(tier, 3.5) / 100.0)
 
             sl_dist = max(1.2 * a, order["price"] * sl_floor)
-            tp_dist = max(2.0 * a, sl_dist * 1.5, order["price"] * tp_floor)
-            order["tp"] = order["price"] + tp_dist
+
+            # Сохраняем структурный стоп за поддержку
+            if order_sup and order_sup < order["price"]:
+                struct_sl = order_sup * 0.997
+                struct_dist = order["price"] - struct_sl
+                if order["price"] * sl_floor <= struct_dist <= max_sl_dist:
+                    sl_dist = struct_dist
+
             order["sl"] = order["price"] - sl_dist
+
+            # ⚡ СОХРАНЯЕМ ТЕЙК ПОД СОПРОТИВЛЕНИЕ (НЕ ЗАТИРАЕМ СТЕНУ!)
+            tp_dist = max(2.0 * a, sl_dist * 1.35, order["price"] * tp_floor)
+            order_res = order.get("nearest_res")
+
+            if order_res and order_res > order["price"]:
+                res_cap = order_res * 0.997
+                if res_cap < order["price"] + tp_dist and (res_cap - order["price"]) >= sl_dist * 1.35:
+                    order["tp"] = round(res_cap, 8)
+                else:
+                    order["tp"] = order["price"] + tp_dist
+            else:
+                order["tp"] = order["price"] + tp_dist
 
             if action_type:
                 order["created"] = current_time  
