@@ -261,7 +261,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 2.0
             reasons.append(f"сливной объём x{vol_ratio:.1f} (давление продаж)")
 
-    # Защита от шпилек и отвержения
     recent_rejection = False
     for c in candles_15m[-3:]:
         c_rng = c["high"] - c["low"]
@@ -303,7 +302,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         reasons.append("тихая консолидация на EMA50 (накопление)")
         keys.append("accumulation")
 
-    # ⚡ Институциональный мультитаймфрейм S/R (1H + 15m)
     nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_15m, candles_1h)
     
     if nearest_res and res_touches >= 2 and a15 > 0 and not is_open_pos:
@@ -578,7 +576,8 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             chg_val = signal_values.get("chg24h", 0)
             vol_val = signal_values.get("volume", 0)
             
-            is_momentum = ("impulse" in keys and 55 <= rsi_live <= 68 and 1.5 <= chg_val <= 12.0 and vol_val >= 1.4)
+            # ⚡ ИСПРАВЛЕНИЕ: rsi_val вместо rsi_live
+            is_momentum = ("impulse" in keys and 55 <= rsi_val <= 68 and 1.5 <= chg_val <= 12.0 and vol_val >= 1.4)
 
             if is_reversal: entry_mode = "reversal"
             elif is_momentum: entry_mode = "rocket"
