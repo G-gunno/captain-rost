@@ -37,7 +37,7 @@ TIER_MAX_SL = {
 }
 
 class PositionManagerWorker:
-    """Медленный I/O воркер: охрана позиций и стабильные реквоты без эффекта качелей."""
+    """Медленный I/O воркер: охрана позиций и реквоты без дребезга и сползания под минимум."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -172,7 +172,7 @@ class PositionManagerWorker:
                     paper.log_event(sym, "tp_runner_raised", pos["tp"], f"TP Runner поднят", mode="TP поднят 🎯", tp=pos["tp"], sl=pos["sl"])
                     self._notify(f"🎯 <b>TP поднят</b> (раннер) · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])}")
 
-        # 2. Проверка ордеров (реквоты и отмены)
+        # 2. Проверка ордеров (реквоты без дребезга)
         for order in list(paper.orders):
             sym = order["symbol"]
             t = tickers.get(sym)
@@ -252,17 +252,22 @@ class PositionManagerWorker:
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
 
-            # ⚡ ДИНАМИЧЕСКИЙ РАСЧЕТ УРОВНЕЙ С ГИСТЕРЕЗИСОМ (ЗАЩИТА ОТ КАЧЕЛЕЙ)
+            # Динамический расчет уровней S/R
             nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles)
             live_sup = nearest_sup if (nearest_sup and sup_touches >= 2) else order.get("nearest_sup")
             live_res = nearest_res if (nearest_res and res_touches >= 2) else order.get("nearest_res")
 
-            # ⚡ БУФЕР ПРОБОЯ ПОДДЕРЖКИ: Поддержка считается сломанной только при уходе ниже 0.6%!
+            # 2-часовой минимум
+            rec_low = min(c["low"] for c in candles[-8:]) if len(candles) >= 8 else order.get("recent_low_2h")
+
+            # Буфер пробоя: поддержка сломана только при уходе глубже чем на 0.6%
             support_broken = live_sup and (t["last"] < live_sup * 0.994)
 
-            # ⚡ ЕСЛИ ПОДДЕРЖКА ЖИВА — ЛИМИТКА СТОИТ НА ПОЛУ И НЕ СЪЕЗЖАЕТ ВНИЗ!
-            if live_sup and is_sniper and not support_broken:
-                retest_floor = live_sup * 1.0015
+            # Опорный пол: не позволяем лимитке проседать под поддержку или 2-часовой минимум
+            floor_anchor = live_sup if (live_sup and not support_broken) else (rec_low if (rec_low and rec_low < t["last"]) else None)
+
+            if floor_anchor and is_sniper:
+                retest_floor = floor_anchor * 1.0015
                 ideal_price = max(ideal_price, retest_floor)
                 ideal_price = min(ideal_price, t.get("bid1", t["last"]))
 
@@ -292,9 +297,8 @@ class PositionManagerWorker:
                     self._notify(f"⚠ Снят · {pair_html(sym, order)} · 🚀 (⏸️ 7м)")
                     continue
 
-                # ⚡ АНТИ-ДРЕБЕЗГ: Сдвиг вниз разрешен только если нет активного пола поддержки
-                # и отклонение составляет минимум 0.5% (а не мизерные 0.2%)
-                if ideal_price < old_price and dev_pct >= 0.5 and (not live_sup or support_broken):
+                # Анти-дребезг: сдвиг вниз только при отсутствии активного пола и девиации от 0.5%
+                if ideal_price < old_price and dev_pct >= 0.5 and not floor_anchor:
                     order["price"] = ideal_price
                     action_type = "correct"
                     price_icon = "⬇️"
@@ -302,21 +306,21 @@ class PositionManagerWorker:
                     order["price"] = ideal_price
                     action_type = "hunt"
                     price_icon = "⬆️"
-                elif live_sup and ideal_price > old_price and dev_pct >= 0.3 and not support_broken:
-                    # Подтяжка вверх к поддержке фиксируется стабильно
+                elif floor_anchor and ideal_price > old_price and dev_pct >= 0.3:
                     order["price"] = ideal_price
                     action_type = "support_floor"
                     price_icon = "⬆️"
 
-            # ⚡ РАСЧЕТ СТОПА И ТЕЙКА С СОХРАНЕНИЕМ СТРУКТУРЫ
+            # Расчет стопа и тейка
             sl_floor = TIER_SL_FLOOR.get(tier, 0.020)
             tp_floor = TIER_TP_FLOOR.get(tier, 0.028)
             max_sl_dist = order["price"] * (TIER_MAX_SL.get(tier, 3.5) / 100.0)
 
             sl_dist = max(1.2 * a, order["price"] * sl_floor)
 
-            if live_sup and live_sup < order["price"] and not support_broken:
-                struct_sl = live_sup * 0.997
+            anchor_low = live_sup if (live_sup and not support_broken) else rec_low
+            if anchor_low and anchor_low < order["price"]:
+                struct_sl = anchor_low * 0.997
                 min_safe_sl = order["price"] * (1 - sl_floor)
                 candidate_sl = min(struct_sl, min_safe_sl)
                 candidate_dist = order["price"] - candidate_sl
@@ -325,7 +329,7 @@ class PositionManagerWorker:
 
             order["sl"] = order["price"] - sl_dist
 
-            # ⚡ Жесткий контроль потолка тейка
+            # Контроль потолка тейка
             tp_dist = max(2.0 * a, sl_dist * 1.35, order["price"] * tp_floor)
             calc_tp = order["price"] + tp_dist
 
@@ -344,9 +348,9 @@ class PositionManagerWorker:
 
             if action_type:
                 order["created"] = current_time  
-                # Сохраняем актуальный опорный уровень в сам ордер
                 order["nearest_sup"] = live_sup
                 order["nearest_res"] = live_res
+                order["recent_low_2h"] = rec_low
                 paper.save()
                 paper.log_event(sym, "order_moved", ideal_price, f"Сдвиг: {action_type}", tp=order["tp"], sl=order["sl"])
                 msg_desc = "подтяжка к поддержке" if action_type == "support_floor" else ("подтяжка к сжатию" if action_type == "hunt" else f"сдвиг на {dev_pct:.2f}%")
