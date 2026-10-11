@@ -33,7 +33,7 @@ TIER_MAX_SL = {
 }
 
 class OrderManagerWorker:
-    """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров с учетом правила Пола Поддержки."""
+    """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров с защитой от пустых зон."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -89,14 +89,20 @@ class OrderManagerWorker:
             ideal_entry = cand["last"] * (1 + off)
             entry = ideal_entry if is_mom else min(ideal_entry, bid1)
 
-            # ⚡ 1. ПРАВИЛО «ПОЛА ПОДДЕРЖКИ» (SUPPORT FLOOR)
+            # ⚡ 1. ПРАВИЛО «ПОЛА ПОДДЕРЖКИ» И 2-ЧАСОВОГО МИНИМУМА
             sup = cand.get("nearest_sup")
             sup_touches = cand.get("sup_touches", 0)
-            if sup and sup_touches >= 2 and not is_mom:
-                retest_floor = sup * 1.0015
-                if cand["last"] >= retest_floor:
-                    # Лимитка не должна падать под поддержку — прижимаем к полу ретеста
-                    entry = max(entry, retest_floor)
+            rec_low = cand.get("recent_low_2h")
+
+            floor_level = None
+            if sup and sup_touches >= 2:
+                floor_level = sup * 1.0015
+            elif rec_low and rec_low < cand["last"]:
+                floor_level = rec_low * 1.0015
+
+            if floor_level and not is_mom:
+                if cand["last"] >= floor_level:
+                    entry = max(entry, floor_level)
                     entry = min(entry, bid1)
 
             a = cand["atr"]
@@ -122,9 +128,10 @@ class OrderManagerWorker:
 
             sl = entry - sl_dist_raw
 
-            # ⚡ 2. СТРУКТУРНЫЙ СТОП-ЛОСС ЗА ПОДДЕРЖКУ
-            if sup and sup_touches >= 2 and sup < entry:
-                struct_sl = sup * 0.997
+            # ⚡ 2. СТРУКТУРНЫЙ СТОП-ЛОСС ЗА ОПОРНЫЙ МИНИМУМ
+            anchor_low = sup if (sup and sup_touches >= 2) else rec_low
+            if anchor_low and anchor_low < entry:
+                struct_sl = anchor_low * 0.997
                 min_safe_sl = entry * (1 - sl_floor_pct)
                 candidate_sl = min(struct_sl, min_safe_sl)
                 candidate_dist_pct = (entry - candidate_sl) / entry * 100
@@ -246,7 +253,8 @@ class OrderManagerWorker:
                 "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode,
                 "nearest_res": res if (res and res_touches >= 2) else None,
                 "nearest_sup": sup if (sup and sup_touches >= 2) else None,
-                "recent_high": rec_hi
+                "recent_high": rec_hi,
+                "recent_low_2h": rec_low
             })
             paper.save()
 
