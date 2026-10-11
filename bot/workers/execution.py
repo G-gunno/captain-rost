@@ -5,7 +5,6 @@ from bot.core.state import bot_state
 from bot.exchange.paper_exchange import paper
 from bot.utils.format import pair_html, usd, fmt_price, fmt_pct, pnl_emoji, funding_line
 from bot.strategy.shadow import shadow
-from bot.strategy.indicators import atr
 
 class ExecutionRiskWorker:
     """Критический воркер ведения открытых позиций (Трейлинг-стопы, TP/SL, Риск-менеджмент). Zero-delay."""
@@ -107,7 +106,7 @@ class ExecutionRiskWorker:
                     breakeven_price = pos["avg"] * 1.0025
                     pos["sl"] = max(pos["sl"], breakeven_price)
                     
-                    # ⚡ Технический расчет цели для раннера (без слепого умножения на 1.03)
+                    # ⚡ Технический расчет цели для раннера
                     tp1_dist = pos["tp"] - pos["avg"]
                     pos["tp"] = round(pos["tp"] + tp1_dist * 1.25, 8)
                     state_changed = True
