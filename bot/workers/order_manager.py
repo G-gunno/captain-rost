@@ -33,7 +33,7 @@ TIER_MAX_SL = {
 }
 
 class OrderManagerWorker:
-    """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров с учетом S/R и хаев."""
+    """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров с учетом правила Пола Поддержки."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -89,13 +89,15 @@ class OrderManagerWorker:
             ideal_entry = cand["last"] * (1 + off)
             entry = ideal_entry if is_mom else min(ideal_entry, bid1)
 
-            # ⚡ 1. ПРИВЯЗКА ВХОДА К РЕТЕСТУ ПОДДЕРЖКИ (PRICE ACTION ENTRY)
+            # ⚡ 1. ПРАВИЛО «ПОЛА ПОДДЕРЖКИ» (SUPPORT FLOOR)
             sup = cand.get("nearest_sup")
             sup_touches = cand.get("sup_touches", 0)
             if sup and sup_touches >= 2 and not is_mom:
-                retest_target = sup * 1.002
-                if retest_target < cand["last"] and abs(retest_target - entry) / entry <= 0.012:
-                    entry = retest_target
+                retest_floor = sup * 1.0015
+                if cand["last"] >= retest_floor:
+                    # Лимитка не должна падать под поддержку — прижимаем к полу ретеста
+                    entry = max(entry, retest_floor)
+                    entry = min(entry, bid1)
 
             a = cand["atr"]
             if a <= 0: continue
@@ -120,12 +122,14 @@ class OrderManagerWorker:
 
             sl = entry - sl_dist_raw
 
-            # ⚡ 2. СТРУКТУРНЫЙ СТОП-ЛОСС ЗА ПОДДЕРЖКУ (STRUCTURAL INVALIDATION)
+            # ⚡ 2. СТРУКТУРНЫЙ СТОП-ЛОСС ЗА ПОДДЕРЖКУ
             if sup and sup_touches >= 2 and sup < entry:
                 struct_sl = sup * 0.997
-                struct_dist_pct = (entry - struct_sl) / entry * 100
-                if sl_floor_pct * 100 <= struct_dist_pct <= max_sl_allowed:
-                    sl = struct_sl
+                min_safe_sl = entry * (1 - sl_floor_pct)
+                candidate_sl = min(struct_sl, min_safe_sl)
+                candidate_dist_pct = (entry - candidate_sl) / entry * 100
+                if candidate_dist_pct <= max_sl_allowed:
+                    sl = candidate_sl
 
             sl_dist = entry - sl
             if sl_dist <= 0: continue
@@ -138,7 +142,7 @@ class OrderManagerWorker:
             tp = entry + tp_dist_raw
             min_rr = 1.5
 
-            # ⚡ 3. ОГРАНИЧЕНИЕ ТЕЙКА ЛОКАЛЬНЫМ ХАЕМ 6 ЧАСОВ (RECENT HIGH CEILING)
+            # ⚡ 3. ОГРАНИЧЕНИЕ ТЕЙКА ХАЕМ 6 ЧАСОВ
             rec_hi = cand.get("recent_high")
             if rec_hi and rec_hi > entry:
                 rec_hi_cap = rec_hi * 0.998
@@ -149,7 +153,7 @@ class OrderManagerWorker:
                     else:
                         continue
 
-            # ⚡ 4. АДАПТИВНЫЙ ТЕЙК ПОД СОПРОТИВЛЕНИЕ (RESISTANCE CEILING)
+            # ⚡ 4. АДАПТИВНЫЙ ТЕЙК ПОД СОПРОТИВЛЕНИЕ
             res = cand.get("nearest_res")
             res_touches = cand.get("res_touches", 0)
 
