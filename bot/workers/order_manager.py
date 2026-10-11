@@ -22,7 +22,7 @@ TIER_TP_FLOOR = {
     "TOP20": 0.012,  # 1.2%
     "MID":   0.020,  # 2.0%
     "SMALL": 0.025,  # 2.5%
-    "MICRO": 0.028,  # 2.8% (было 4.5% — устраняет зависание MERL)
+    "MICRO": 0.028,  # 2.8%
 }
 
 TIER_MAX_SL = {
@@ -127,6 +127,16 @@ class OrderManagerWorker:
                 if (entry - sl) / entry * 100 > max_sl_allowed:
                     continue
 
+            # ⚡ Привязка TP1 к уровню сопротивления (если сопротивление выше входа)
+            res = cand.get("nearest_res")
+            if res and res > entry:
+                res_dist_pct = (res - entry) / entry * 100
+                if res_dist_pct < tp_floor_pct:
+                    continue
+                res_cap_tp = res * 0.997
+                if res_cap_tp < tp and (res_cap_tp - entry) / entry * 100 >= tp_floor_pct:
+                    tp = round(res_cap_tp, 8)
+
             rr = (tp - entry) / (entry - sl) if entry > sl else 0
             if tp <= entry or sl >= entry or round(rr, 2) < min_rr:
                 continue
@@ -202,7 +212,7 @@ class OrderManagerWorker:
             paper.save()
 
             reasons_html = "<br>".join([f"• {r}" for r in cand.get("reasons", [])])
-            paper.log_event(sym, "order_placed", entry, text=reasons_html, mode=entry_mode)
+            paper.log_event(sym, "order_placed", entry, text=reasons_html, mode=entry_mode, tp=tp, sl=sl)
 
             tp_pct = (tp - entry) / entry * 100
             sl_pct = (sl - entry) / entry * 100
