@@ -255,7 +255,6 @@ class PositionManagerWorker:
             dev_pct = abs(ideal_price - old_price) / old_price * 100
 
             if ideal_price < old_price and dev_pct >= 0.5:
-                # Цена плавно опускается, мы можем аккуратно сдвинуть лимитку ниже
                 order["price"] = ideal_price
                 action_type = "correct"
                 price_icon = "⬇️"
@@ -280,9 +279,10 @@ class PositionManagerWorker:
             tp_dist = max(2.0 * a, sl_dist * 1.35, order["price"] * tp_floor)
             calc_tp = order["price"] + tp_dist
 
+            # ⚡ Синхронная проверка сопротивления (RR >= 1.0)
             if live_res and live_res > order["price"]:
                 res_cap = live_res * 0.997
-                if res_cap < calc_tp and (res_cap - order["price"]) >= sl_dist * 1.35:
+                if res_cap < calc_tp and (res_cap - order["price"]) >= sl_dist * 1.0:
                     calc_tp = round(res_cap, 8)
 
             order["tp"] = calc_tp
