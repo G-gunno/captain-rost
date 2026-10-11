@@ -40,47 +40,58 @@ def atr(candles, period=14):
     return a
 
 
-def find_sr_levels(candles, window=48):
+def find_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72):
     """
-    Поиск сильных локальных уровней поддержки и сопротивления.
-    Уровень считается значимым ТОЛЬКО если подтвержден как минимум 2 касаниями.
+    Институциональный мультитаймфрейм поиск S/R:
+    - 1H свечи (горизонт 3 суток) дают фундаментальные уровни старшего порядка.
+    - 15m свечи (горизонт 15 часов) дают локальные подтверждения.
     """
-    if len(candles) < 20:
+    if not candles_15m or len(candles_15m) < 15:
         return None, 0, None, 0
 
-    recent = candles[-window:] if len(candles) >= window else candles
-    last_price = recent[-1]["close"]
-    
+    last_price = candles_15m[-1]["close"]
     swing_highs = []
     swing_lows = []
-    
-    n = len(recent)
-    # Радиус 3 свечи (45 минут слева и справа) для исключения мелкого рыночного шума
-    for i in range(3, n - 3):
-        h = recent[i]["high"]
-        l = recent[i]["low"]
-        if all(h >= recent[i+j]["high"] for j in (-3, -2, -1, 1, 2, 3)):
+
+    # 1. Старший таймфрейм 1H (3 дня истории)
+    if candles_1h and len(candles_1h) >= 20:
+        recent_1h = candles_1h[-window_1h:] if len(candles_1h) >= window_1h else candles_1h
+        n1 = len(recent_1h)
+        for i in range(2, n1 - 2):
+            h = recent_1h[i]["high"]
+            l = recent_1h[i]["low"]
+            if all(h >= recent_1h[i+j]["high"] for j in (-2, -1, 1, 2)):
+                swing_highs.extend([h, h])  # 1H уровни имеют двойной вес
+            if all(l <= recent_1h[i+j]["low"] for j in (-2, -1, 1, 2)):
+                swing_lows.extend([l, l])
+
+    # 2. Рабочий таймфрейм 15m (15 часов истории)
+    recent_15m = candles_15m[-window_15m:] if len(candles_15m) >= window_15m else candles_15m
+    n15 = len(recent_15m)
+    for i in range(3, n15 - 3):
+        h = recent_15m[i]["high"]
+        l = recent_15m[i]["low"]
+        if all(h >= recent_15m[i+j]["high"] for j in (-3, -2, -1, 1, 2, 3)):
             swing_highs.append(h)
-        if all(l <= recent[i+j]["low"] for j in (-3, -2, -1, 1, 2, 3)):
+        if all(l <= recent_15m[i+j]["low"] for j in (-3, -2, -1, 1, 2, 3)):
             swing_lows.append(l)
 
-    res_above = [h for h in swing_highs if h > last_price * 1.002]
+    # Кластеризация сопротивлений выше текущей цены
+    res_above = [h for h in swing_highs if h > last_price * 1.0015]
     nearest_res = None
     res_touches = 0
     if res_above:
-        # Ищем кластеры (уровни с наибольшим числом касаний)
         clusters = []
         for h in set(res_above):
             touches = sum(1 for x in res_above if abs(x - h) / h <= 0.005)
             clusters.append((h, touches))
-        
-        # Фильтруем только подтвержденные уровни (минимум 2 касания)
         confirmed_res = [c for c in clusters if c[1] >= 2]
         if confirmed_res:
-            confirmed_res.sort(key=lambda x: x[0])  # Ближайшее подтвержденное сопротивление
+            confirmed_res.sort(key=lambda x: x[0])  # Ближайшее сильное сопротивление
             nearest_res, res_touches = confirmed_res[0]
 
-    sup_below = [l for l in swing_lows if l < last_price * 0.998]
+    # Кластеризация поддержек ниже текущей цены
+    sup_below = [l for l in swing_lows if l < last_price * 0.9985]
     nearest_sup = None
     sup_touches = 0
     if sup_below:
@@ -88,10 +99,9 @@ def find_sr_levels(candles, window=48):
         for l in set(sup_below):
             touches = sum(1 for x in sup_below if abs(x - l) / l <= 0.005)
             clusters_sup.append((l, touches))
-        
         confirmed_sup = [c for c in clusters_sup if c[1] >= 2]
         if confirmed_sup:
-            confirmed_sup.sort(key=lambda x: x[0], reverse=True)  # Ближайшая подтвержденная поддержка
+            confirmed_sup.sort(key=lambda x: x[0], reverse=True)  # Ближайшая сильная поддержка
             nearest_sup, sup_touches = confirmed_sup[0]
 
     return nearest_res, res_touches, nearest_sup, sup_touches
