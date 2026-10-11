@@ -6,13 +6,15 @@ import httpx
 from loguru import logger
 
 from bot.exchange.market_data import market_data
-from bot.strategy.indicators import ema, rsi, atr
+from bot.exchange.paper_exchange import paper
+from bot.strategy.indicators import ema, rsi, atr, find_sr_levels
 from bot.strategy.learner import learner
 from bot.strategy.shadow import shadow
 from bot.news.cmc import (get_coin_name, get_sectors_for_pool,
                           get_ranks_for_pool, tier_of, TIER_EMOJI, fetch_missing_names)
 from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sentiment
 from bot.strategy.fundamental import get_macro_trend, is_sector_hot, get_fear_and_greed, check_coinglass_liquidation_threat
+from bot.utils.format import fmt_price
 
 SCAN_SUMMARY = {"text": "", "thrs": {}, "ts": 0}
 FILTERED_BY_NEWS = []
@@ -210,8 +212,8 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         reasons.append("отвержение на хаях (шпилька продаж)")
 
     # 🛑 2. ЗАЩИТА ОТ FOMO
+    a15 = atr(candles_15m)
     if not is_open_pos:
-        a15 = atr(candles_15m)
         if a15 > 0 and e21 > 0:
             dist_from_ema = last - e21
             if dist_from_ema > 1.8 * a15:
@@ -239,6 +241,24 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         score += 3.5  
         reasons.append("тихая консолидация на EMA50 (накопление)")
         keys.append("accumulation")
+
+    # 🛑 4. ДЕТЕКТОР УРОВНЕЙ СОПРОТИВЛЕНИЯ И ПОДДЕРЖКИ (S/R Barrier)
+    nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_15m, window=48)
+    
+    if nearest_res and a15 > 0 and not is_open_pos:
+        dist_to_res = nearest_res - last
+        if dist_to_res < 1.0 * a15 or (dist_to_res / last * 100) < 0.6:
+            mult_penalty = 4.0 if res_touches >= 2 else 2.5
+            score -= mult_penalty
+            touch_str = f" ({res_touches} касания)" if res_touches >= 2 else ""
+            reasons.append(f"в упор к сопротивлению ${fmt_price(nearest_res)}{touch_str}")
+
+    if nearest_sup and a15 > 0 and not is_open_pos:
+        dist_to_sup = last - nearest_sup
+        if dist_to_sup < 0.8 * a15 and sup_touches >= 2 and last > closes[-2]:
+            score += 1.5
+            reasons.append(f"отскок от поддержки ${fmt_price(nearest_sup)} ({sup_touches} касания)")
+            keys.append("support_bounce")
 
     if t["change_pct"] <= -7.0 and r <= 35 and vol_ratio >= 2.5:
         score += 2.0
@@ -275,7 +295,10 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 1.0
             reasons.append("MTF: ловушка (даунтренд)")
 
-    signal_values = {"rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio}
+    signal_values = {
+        "rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio,
+        "nearest_res": nearest_res, "nearest_sup": nearest_sup
+    }
     return score, reasons, keys, signal_values
 
 def normalize(raw, regime):
@@ -405,6 +428,16 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
     raw_max = raw_max_score(regime)
     fng = get_fear_and_greed()
 
+    # ⚡ Запись истории режимов рынка для графика и отчетов
+    if not paper.market_history or paper.market_history[-1].get("regime") != regime:
+        paper.market_history.append({
+            "ts": int(time.time()),
+            "regime": regime,
+            "mode": getattr(learner, "current_risk_mode", "NORMAL")
+        })
+        paper.market_history = paper.market_history[-500:]
+        paper.save()
+
     sem = asyncio.Semaphore(10)
 
     async def _analyze_sym(sym):
@@ -486,7 +519,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             chg_val = signal_values.get("chg24h", 0)
             vol_val = signal_values.get("volume", 0)
             
-            # ⚡ ИСПРАВЛЕНО: используются корректные переменные rsi_val и vol_val
             is_momentum = ("impulse" in keys and 55 <= rsi_val <= 68 and 1.5 <= chg_val <= 12.0 and vol_val >= 1.4)
 
             if is_reversal: entry_mode = "reversal"
@@ -519,6 +551,8 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 "signal_values": signal_values,
                 "is_momentum": is_momentum,
                 "entry_mode": entry_mode,
+                "nearest_res": signal_values.get("nearest_res"),
+                "nearest_sup": signal_values.get("nearest_sup"),
                 "size_mult": 1.0
             }
 
