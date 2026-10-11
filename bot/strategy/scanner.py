@@ -206,7 +206,7 @@ async def fetch_new_listings():
                     if not cursor:
                         break
             _instruments_cache["data"], _instruments_cache["ts"] = raw, now
-        except Exception as e:
+        except Exception:
             raw = []
 
     now_ms = int(now * 1000)
@@ -246,7 +246,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     elif r > w["rsi_hi"]: 
         score -= 1.5; reasons.append(f"перегрев RSI {r:.0f}") 
 
-    # Проверка направления объема (не начисляем за дамп)
+    # Проверка направления объема
     last_candle = candles_15m[-1]
     is_green_candle = last_candle["close"] >= last_candle["open"]
     candle_range = last_candle["high"] - last_candle["low"]
@@ -288,7 +288,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         score -= 3.5
         reasons.append("истощение тренда (поздний вход в лесенку)")
 
-    # 🛑 1. ЗАЩИТА НАКОПЛЕНИЯ ОТ СЛИВА СВЕРХУ ВНИЗ
+    # Защита накопления от сквозного слива
     is_near_ema50 = (0.998 <= (last / e50) <= 1.012)
     is_quiet_vol = vol_ratio < 1.15
     rsi_cool = 42 <= r <= 56
@@ -298,7 +298,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     e50_past = ema(closes[:-5], 50)[-1] if len(closes) > 55 else e50
     ema50_flat_or_rising = e50 >= (e50_past * 0.999)
 
-    # Проверка, что цена не валится серией красных свечей
     not_falling_streak = not (len(closes) >= 3 and closes[-1] < closes[-2] < closes[-3])
     recent_range = (max(c["high"] for c in candles_15m[-4:]) - min(c["low"] for c in candles_15m[-4:])) / last if last > 0 else 1.0
     is_tight_box = recent_range <= 0.025
@@ -342,7 +341,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
 
     if t["quote_volume"] < 500_000: score -= 1
 
-    # 🛑 2. ФИЛЬТР КОНТРТРЕНДА СТАРШЕГО ПОРЯДКА (1H EMA21)
+    # Защита от 1H даунтренда
     if candles_1h and len(candles_1h) >= 25:
         closes_1h = [c["close"] for c in candles_1h]
         last_1h = closes_1h[-1]
@@ -368,14 +367,16 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 3.5
             reasons.append(f"1H даунтренд (цена < EMA21_1H ${fmt_price(e21_1h)})")
 
-    # Максимум за последние 6 часов (24 свечи по 15m) для ограничения TP1
+    # Экстремумы для ограничения ордеров
     recent_high = max(c["high"] for c in candles_15m[-24:]) if len(candles_15m) >= 24 else max(c["high"] for c in candles_15m)
+    recent_low_2h = min(c["low"] for c in candles_15m[-8:]) if len(candles_15m) >= 8 else min(c["low"] for c in candles_15m)
 
     signal_values = {
         "rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio,
         "nearest_res": nearest_res, "res_touches": res_touches,
         "nearest_sup": nearest_sup, "sup_touches": sup_touches,
-        "recent_high": recent_high
+        "recent_high": recent_high,
+        "recent_low_2h": recent_low_2h
     }
     return score, reasons, keys, signal_values
 
@@ -633,6 +634,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 "nearest_sup": signal_values.get("nearest_sup"),
                 "sup_touches": signal_values.get("sup_touches", 0),
                 "recent_high": signal_values.get("recent_high"),
+                "recent_low_2h": signal_values.get("recent_low_2h"),
                 "size_mult": 1.0
             }
 
