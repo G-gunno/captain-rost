@@ -44,7 +44,7 @@ def find_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72, wi
     """
     Институциональный мультитаймфрейм поиск S/R:
     - 1H свечи (горизонт 3 суток) дают фундаментальные уровни старшего порядка.
-    - 15m свечи (горизонт 15 часов) дают локальные подтверждения.
+    - 15m свечи с асимметричным плечом (3 слева, 1 справа) мгновенно фиксируют разворотное дно.
     """
     if window is not None:
         window_15m = window
@@ -68,15 +68,15 @@ def find_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72, wi
             if all(l <= recent_1h[i+j]["low"] for j in (-2, -1, 1, 2)):
                 swing_lows.extend([l, l])
 
-    # 2. Внутридневной таймфрейм 15m
+    # 2. Внутридневной таймфрейм 15m (3 свечи слева для опоры, 1 свеча справа для реакции за 15 мин)
     recent_15m = candles_15m[-window_15m:] if len(candles_15m) >= window_15m else candles_15m
     n15 = len(recent_15m)
-    for i in range(3, n15 - 3):
+    for i in range(3, n15 - 1):
         h = recent_15m[i]["high"]
         l = recent_15m[i]["low"]
-        if all(h >= recent_15m[i+j]["high"] for j in (-3, -2, -1, 1, 2, 3)):
+        if all(h >= recent_15m[i-j]["high"] for j in (1, 2, 3)) and h >= recent_15m[i+1]["high"]:
             swing_highs.append(h)
-        if all(l <= recent_15m[i+j]["low"] for j in (-3, -2, -1, 1, 2, 3)):
+        if all(l <= recent_15m[i-j]["low"] for j in (1, 2, 3)) and l <= recent_15m[i+1]["low"]:
             swing_lows.append(l)
 
     res_above = [h for h in swing_highs if h > last_price * 1.0015]
