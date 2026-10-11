@@ -5,6 +5,7 @@ from bot.core.state import bot_state
 from bot.exchange.paper_exchange import paper
 from bot.utils.format import pair_html, usd, fmt_price, fmt_pct, pnl_emoji, funding_line
 from bot.strategy.shadow import shadow
+from bot.strategy.indicators import atr
 
 class ExecutionRiskWorker:
     """Критический воркер ведения открытых позиций (Трейлинг-стопы, TP/SL, Риск-менеджмент). Zero-delay."""
@@ -67,7 +68,7 @@ class ExecutionRiskWorker:
             sl_pct = (f["sl"] - f["price"]) / f["price"] * 100
             emode = f.get("entry_mode", "")
             ev_mode_str = "Ловец дна" if emode == "reversal" else ("Ракета" if emode == "rocket" else "Снайпер")
-            paper.log_event(f["symbol"], "buy", f["price"], mode=ev_mode_str, tp=f.get("tp"), sl=f.get("sl"))
+            paper.log_event(f["symbol"], "buy", f["price"], mode=ev_mode_str, tp=f.get("tp"), sl=f.get("sl"), sup=f.get("nearest_sup"), res=f.get("nearest_res"))
 
             self.bus.publish("NOTIFY", {
                 "text": f"🛒 <b>Покупка</b> · {pair_html(f['symbol'], f)}\n💵 {usd(f['qty'] * f['price'])} · 📥 {fmt_price(f['price'])}\n🎯 TP {fmt_pct(tp_pct)} · 🛡 SL {fmt_pct(sl_pct)}",
@@ -86,7 +87,7 @@ class ExecutionRiskWorker:
             if last <= pos["sl"]:
                 ex = paper._sell(sym, last, "SL 🛡", regime_now=bot_state.current_regime)
                 ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"
-                paper.log_event(sym, ev_type, last, "SL 🛡", tp=pos.get("tp"), sl=pos.get("sl"))
+                paper.log_event(sym, ev_type, last, "SL 🛡", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                 bot_state.set_cooldown(sym, 420)
                 self.bus.publish("NOTIFY", {
                     "text": f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · SL 🛡\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}",
@@ -100,12 +101,15 @@ class ExecutionRiskWorker:
                     half = pos["qty"] / 2
                     ex = paper.sell_partial(sym, half, pos["tp"], "TP1 🎯")
                     pos["tp1_done"] = True
-                    paper.log_event(sym, "tp1", last, f"TP1 (+{ex['pnl_pct']:.1f}%)", mode="TP1 🎯", tp=pos.get("tp"), sl=pos.get("sl"))
+                    paper.log_event(sym, "tp1", last, f"TP1 (+{ex['pnl_pct']:.1f}%)", mode="TP1 🎯", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                     shadow.mark_success(sym)
 
-                    breakeven_price = pos["avg"] * 1.002
+                    breakeven_price = pos["avg"] * 1.0025
                     pos["sl"] = max(pos["sl"], breakeven_price)
-                    pos["tp"] = round(pos["tp"] * 1.03, 10) 
+                    
+                    # ⚡ Технический расчет цели для раннера (без слепого умножения на 1.03)
+                    tp1_dist = pos["tp"] - pos["avg"]
+                    pos["tp"] = round(pos["tp"] + tp1_dist * 1.25, 8)
                     state_changed = True
 
                     self.bus.publish("NOTIFY", {
@@ -114,7 +118,7 @@ class ExecutionRiskWorker:
                     })
                 else:
                     ex = paper._sell(sym, last, "TP ✅", regime_now=bot_state.current_regime)
-                    paper.log_event(sym, "tp_runner", last, f"TP RUNNER (+{ex['pnl_pct']:.1f}%)", mode="TP RUNNER 🚀", tp=last, sl=pos.get("sl"))
+                    paper.log_event(sym, "tp_runner", last, f"TP RUNNER (+{ex['pnl_pct']:.1f}%)", mode="TP RUNNER 🚀", tp=last, sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                     shadow.mark_success(sym)
                     bot_state.set_cooldown(sym, 180)
                     self.bus.publish("NOTIFY", {
@@ -175,7 +179,7 @@ class ExecutionRiskWorker:
                 pos["sl"] = round(new_sl, 8)
                 pos["max_sl"] = pos["sl"]
                 tag = "🔒 БУ" if (current_sl < breakeven and new_sl >= breakeven and not pos.get("tp1_done")) else f"Трейлинг SL ({tier})"
-                paper.log_event(sym, "sl_moved", pos["sl"], tag, tp=pos.get("tp"), sl=pos["sl"])
+                paper.log_event(sym, "sl_moved", pos["sl"], tag, tp=pos.get("tp"), sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                 self.bus.publish("NOTIFY", {
                     "text": f"🛡 SL поднят по <b>{sym[:-4]}</b> до {new_sl_str} ({tag})", 
                     "urgent": False
