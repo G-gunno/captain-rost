@@ -37,7 +37,7 @@ TIER_MAX_SL = {
 }
 
 class PositionManagerWorker:
-    """Медленный I/O воркер: охрана позиций и реквоты ордеров с сохранением структуры S/R."""
+    """Медленный I/O воркер: охрана позиций и стабильные реквоты без эффекта качелей."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -252,15 +252,19 @@ class PositionManagerWorker:
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
 
-            # ⚡ ДИНАМИЧЕСКИЙ РАСЧЕТ УРОВНЕЙ ДЛЯ РЕКВОТА
+            # ⚡ ДИНАМИЧЕСКИЙ РАСЧЕТ УРОВНЕЙ С ГИСТЕРЕЗИСОМ (ЗАЩИТА ОТ КАЧЕЛЕЙ)
             nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles)
             live_sup = nearest_sup if (nearest_sup and sup_touches >= 2) else order.get("nearest_sup")
             live_res = nearest_res if (nearest_res and res_touches >= 2) else order.get("nearest_res")
 
-            # ⚡ ПРАВИЛО «ПОЛА ПОДДЕРЖКИ»: Лимитка не должна сползать под поддержку!
-            if live_sup and is_sniper and t["last"] >= live_sup:
+            # ⚡ БУФЕР ПРОБОЯ ПОДДЕРЖКИ: Поддержка считается сломанной только при уходе ниже 0.6%!
+            support_broken = live_sup and (t["last"] < live_sup * 0.994)
+
+            # ⚡ ЕСЛИ ПОДДЕРЖКА ЖИВА — ЛИМИТКА СТОИТ НА ПОЛУ И НЕ СЪЕЗЖАЕТ ВНИЗ!
+            if live_sup and is_sniper and not support_broken:
                 retest_floor = live_sup * 1.0015
                 ideal_price = max(ideal_price, retest_floor)
+                ideal_price = min(ideal_price, t.get("bid1", t["last"]))
 
             dev_pct = abs(ideal_price - old_price) / old_price * 100
 
@@ -274,7 +278,7 @@ class PositionManagerWorker:
             action_type = None
 
             if entry_mode in ("rocket", "reversal"):
-                if ideal_price < old_price and dev_pct >= 0.2:
+                if ideal_price < old_price and dev_pct >= 0.3:
                     order["price"] = ideal_price
                     action_type = "correct"
                     price_icon = "⬇️"
@@ -288,16 +292,18 @@ class PositionManagerWorker:
                     self._notify(f"⚠ Снят · {pair_html(sym, order)} · 🚀 (⏸️ 7м)")
                     continue
 
-                if ideal_price < old_price and dev_pct >= 0.2:
+                # ⚡ АНТИ-ДРЕБЕЗГ: Сдвиг вниз разрешен только если нет активного пола поддержки
+                # и отклонение составляет минимум 0.5% (а не мизерные 0.2%)
+                if ideal_price < old_price and dev_pct >= 0.5 and (not live_sup or support_broken):
                     order["price"] = ideal_price
                     action_type = "correct"
                     price_icon = "⬇️"
-                elif is_accum and ideal_price > old_price and dev_pct >= 0.2 and t["last"] <= (e50 * 1.012):
+                elif is_accum and ideal_price > old_price and dev_pct >= 0.3 and t["last"] <= (e50 * 1.012):
                     order["price"] = ideal_price
                     action_type = "hunt"
                     price_icon = "⬆️"
-                elif live_sup and ideal_price > old_price and dev_pct >= 0.2 and t["last"] >= live_sup:
-                    # Подтяжка вверх к ретесту поддержки, если старая цена была слишком глубоко под полом
+                elif live_sup and ideal_price > old_price and dev_pct >= 0.3 and not support_broken:
+                    # Подтяжка вверх к поддержке фиксируется стабильно
                     order["price"] = ideal_price
                     action_type = "support_floor"
                     price_icon = "⬆️"
@@ -309,7 +315,7 @@ class PositionManagerWorker:
 
             sl_dist = max(1.2 * a, order["price"] * sl_floor)
 
-            if live_sup and live_sup < order["price"]:
+            if live_sup and live_sup < order["price"] and not support_broken:
                 struct_sl = live_sup * 0.997
                 min_safe_sl = order["price"] * (1 - sl_floor)
                 candidate_sl = min(struct_sl, min_safe_sl)
@@ -338,6 +344,9 @@ class PositionManagerWorker:
 
             if action_type:
                 order["created"] = current_time  
+                # Сохраняем актуальный опорный уровень в сам ордер
+                order["nearest_sup"] = live_sup
+                order["nearest_res"] = live_res
                 paper.save()
                 paper.log_event(sym, "order_moved", ideal_price, f"Сдвиг: {action_type}", tp=order["tp"], sl=order["sl"])
                 msg_desc = "подтяжка к поддержке" if action_type == "support_floor" else ("подтяжка к сжатию" if action_type == "hunt" else f"сдвиг на {dev_pct:.2f}%")
