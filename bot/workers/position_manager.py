@@ -37,7 +37,7 @@ TIER_MAX_SL = {
 }
 
 class PositionManagerWorker:
-    """Медленный I/O воркер: охрана позиций и реквоты без дребезга и без блокировки хаев."""
+    """Медленный I/O воркер: охрана позиций и реквоты БЕЗ погони за ракетами."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -123,7 +123,7 @@ class PositionManagerWorker:
                 if pnl_pct >= 1.0 or pnl_pct <= 0:
                     reason = "✂📰 Новости"
                     ex = paper._sell(sym, last, reason, regime_now=regime)
-                    paper.log_event(sym, "sell", last, f"Новости {neg}/{mentions}", tp=pos.get("tp"), sl=pos.get("sl"))
+                    paper.log_event(sym, "sell", last, f"Новости {neg}/{mentions}", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                     self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · {reason} {neg}/{mentions}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                     continue
 
@@ -158,7 +158,7 @@ class PositionManagerWorker:
 
                 ex = paper._sell(sym, last, reason, regime_now=regime)
                 ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"
-                paper.log_event(sym, ev_type, last, reason, tp=pos.get("tp"), sl=pos.get("sl"))
+                paper.log_event(sym, ev_type, last, reason, tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                 if ex["pnl"] > 0: shadow.mark_success(sym)
                 self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · {reason}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                 continue
@@ -169,10 +169,10 @@ class PositionManagerWorker:
                     pos["tp"] = round(new_tp, 10)
                     pos["sl"] = max(pos["sl"], pos["avg"] + 0.5 * a)
                     paper.save()
-                    paper.log_event(sym, "tp_runner_raised", pos["tp"], f"TP Runner поднят", mode="TP поднят 🎯", tp=pos["tp"], sl=pos["sl"])
+                    paper.log_event(sym, "tp_runner_raised", pos["tp"], f"TP Runner поднят", mode="TP поднят 🎯", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                     self._notify(f"🎯 <b>TP поднят</b> (раннер) · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])}")
 
-        # 2. Проверка ордеров
+        # 2. Проверка неисполненных ордеров
         for order in list(paper.orders):
             sym = order["symbol"]
             t = tickers.get(sym)
@@ -184,7 +184,7 @@ class PositionManagerWorker:
 
             if neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33):
                 paper.cancel_order(order["id"])
-                paper.log_event(sym, "cancel", t["last"], "Токсичные новости")
+                paper.log_event(sym, "cancel", t["last"], "Токсичные новости", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 7200)
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🤬📰 (⏸️ 2ч)")
                 continue
@@ -211,21 +211,21 @@ class PositionManagerWorker:
             if not order_amnesty:
                 if score_now <= thr - 1.5:
                     paper.cancel_order(order["id"])
-                    paper.log_event(sym, "cancel", t["last"], "Сигнал умер (Слом тренда/Дамп)")
+                    paper.log_event(sym, "cancel", t["last"], "Сигнал умер", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                     bot_state.set_cooldown(sym, 420)
                     self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️ (⏸️ 7м)")
                     continue
 
                 if score_now < thr - 0.5:
                     paper.cancel_order(order["id"])
-                    paper.log_event(sym, "cancel", t["last"], "Сигнал ослаб")
+                    paper.log_event(sym, "cancel", t["last"], "Сигнал ослаб", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                     bot_state.set_cooldown(sym, 180)
                     self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🪫 (⏸️ 3м)")
                     continue
 
             if (current_time - order["created"]) > 7200:
                 paper.cancel_order(order["id"])
-                paper.log_event(sym, "cancel", t["last"], "Тайм-аут 2ч")
+                paper.log_event(sym, "cancel", t["last"], "Тайм-аут 2ч", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 420)
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ⏳ (⏸️ 7м)")
                 continue
@@ -233,85 +233,41 @@ class PositionManagerWorker:
             a = atr(candles)
             if a <= 0: continue
 
+            # Защита от улета цены вверх: не догонять!
+            if t["last"] > order["price"] + 2.0 * a: 
+                paper.cancel_order(order["id"])
+                paper.log_event(sym, "cancel", t["last"], "Улетела без нас", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
+                bot_state.set_cooldown(sym, 300)
+                self._notify(f"⚠ Снят · {pair_html(sym, order)} · 🚀 Улетела без нас (отмена погони)")
+                continue
+
             atr_pct = a / t["last"] * 100
-
-            last_c = candles[-1] if candles else None
-            if last_c and a > 0:
-                c_body = last_c["open"] - last_c["close"]
-                vols_past = [c["volume"] for c in candles[-21:-1]]
-                avg_vol_past = (sum(vols_past) / len(vols_past)) if vols_past else 1.0
-                vol_ratio_now = last_c["volume"] / avg_vol_past if avg_vol_past else 1.0
-                if last_c["close"] < last_c["open"] and c_body >= 1.2 * a and vol_ratio_now >= 1.2:
-                    paper.cancel_order(order["id"])
-                    paper.log_event(sym, "cancel", t["last"], "Падающий нож (дамп-свеча)")
-                    bot_state.set_cooldown(sym, 300)
-                    self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🔪 Водопад (защита от ножа)")
-                    continue
-
             off = entry_offset(score_now, thr, regime, atr_pct, entry_mode, tier=tier, is_accumulation=is_accum)
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
 
-            # Динамический расчет уровней S/R
             nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles)
             live_sup = nearest_sup if (nearest_sup and sup_touches >= 2) else order.get("nearest_sup")
             live_res = nearest_res if (nearest_res and res_touches >= 2) else order.get("nearest_res")
 
-            # Буфер пробоя
-            support_broken = live_sup and (t["last"] < live_sup * 0.994)
-
-            if live_sup and is_sniper and not support_broken:
-                retest_floor = live_sup * 1.0015
-                ideal_price = max(ideal_price, retest_floor)
-                ideal_price = min(ideal_price, t.get("bid1", t["last"]))
-
+            # ⚡ ЗАПРЕТ ПОГОНИ: Лимитка может корректироваться ТОЛЬКО вниз (на более глубокий откат)
+            action_type = None
             dev_pct = abs(ideal_price - old_price) / old_price * 100
 
-            if entry_mode == "rocket" and ideal_price > old_price:
-                paper.cancel_order(order["id"])
-                paper.log_event(sym, "cancel", t["last"], "Ракета улетела (не берем на хаях)")
-                bot_state.set_cooldown(sym, 300)
-                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🚀💨 Улетела (не берем на хаях)")
-                continue
+            if ideal_price < old_price and dev_pct >= 0.5:
+                # Цена плавно опускается, мы можем аккуратно сдвинуть лимитку ниже
+                order["price"] = ideal_price
+                action_type = "correct"
+                price_icon = "⬇️"
 
-            action_type = None
-
-            if entry_mode in ("rocket", "reversal"):
-                if ideal_price < old_price and dev_pct >= 0.3:
-                    order["price"] = ideal_price
-                    action_type = "correct"
-                    price_icon = "⬇️"
-            else:
-                ideal_price = min(ideal_price, t.get("bid1", t["last"]))
-
-                if t["last"] > old_price + 3.0 * a: 
-                    paper.cancel_order(order["id"])
-                    paper.log_event(sym, "cancel", t["last"], "Улетела без нас")
-                    bot_state.set_cooldown(sym, 420)
-                    self._notify(f"⚠ Снят · {pair_html(sym, order)} · 🚀 (⏸️ 7м)")
-                    continue
-
-                if ideal_price < old_price and dev_pct >= 0.5 and (not live_sup or support_broken):
-                    order["price"] = ideal_price
-                    action_type = "correct"
-                    price_icon = "⬇️"
-                elif is_accum and ideal_price > old_price and dev_pct >= 0.3 and t["last"] <= (e50 * 1.012):
-                    order["price"] = ideal_price
-                    action_type = "hunt"
-                    price_icon = "⬆️"
-                elif live_sup and ideal_price > old_price and dev_pct >= 0.3 and not support_broken:
-                    order["price"] = ideal_price
-                    action_type = "support_floor"
-                    price_icon = "⬆️"
-
-            # Расчет стопа и тейка
+            # Пересчет уровней стопа и тейка
             sl_floor = TIER_SL_FLOOR.get(tier, 0.020)
             tp_floor = TIER_TP_FLOOR.get(tier, 0.028)
             max_sl_dist = order["price"] * (TIER_MAX_SL.get(tier, 3.5) / 100.0)
 
             sl_dist = max(1.2 * a, order["price"] * sl_floor)
 
-            if live_sup and live_sup < order["price"] and not support_broken:
+            if live_sup and live_sup < order["price"]:
                 struct_sl = live_sup * 0.997
                 min_safe_sl = order["price"] * (1 - sl_floor)
                 candidate_sl = min(struct_sl, min_safe_sl)
@@ -321,7 +277,6 @@ class PositionManagerWorker:
 
             order["sl"] = order["price"] - sl_dist
 
-            # Тейк-профит прижимается только к подтвержденной стене продавца
             tp_dist = max(2.0 * a, sl_dist * 1.35, order["price"] * tp_floor)
             calc_tp = order["price"] + tp_dist
 
@@ -337,8 +292,7 @@ class PositionManagerWorker:
                 order["nearest_sup"] = live_sup
                 order["nearest_res"] = live_res
                 paper.save()
-                paper.log_event(sym, "order_moved", ideal_price, f"Сдвиг: {action_type}", tp=order["tp"], sl=order["sl"])
-                msg_desc = "подтяжка к поддержке" if action_type == "support_floor" else ("подтяжка к сжатию" if action_type == "hunt" else f"сдвиг на {dev_pct:.2f}%")
-                self._notify(f"📐 <b>Сдвиг {price_icon}</b> · {pair_html(sym, order)}\n📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · {msg_desc}")
+                paper.log_event(sym, "order_moved", ideal_price, f"Сдвиг: {action_type}", tp=order["tp"], sl=order["sl"], sup=live_sup, res=live_res)
+                self._notify(f"📐 <b>Сдвиг {price_icon}</b> · {pair_html(sym, order)}\n📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · сдвиг на {dev_pct:.2f}%")
             else:
                 paper.save()
