@@ -33,7 +33,7 @@ TIER_MAX_SL = {
 }
 
 class OrderManagerWorker:
-    """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров с защитой от пустых зон."""
+    """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -89,20 +89,14 @@ class OrderManagerWorker:
             ideal_entry = cand["last"] * (1 + off)
             entry = ideal_entry if is_mom else min(ideal_entry, bid1)
 
-            # ⚡ 1. ПРАВИЛО «ПОЛА ПОДДЕРЖКИ» И 2-ЧАСОВОГО МИНИМУМА
+            # ⚡ 1. ПРАВИЛО «ПОЛА ПОДДЕРЖКИ»
             sup = cand.get("nearest_sup")
             sup_touches = cand.get("sup_touches", 0)
-            rec_low = cand.get("recent_low_2h")
 
-            floor_level = None
-            if sup and sup_touches >= 2:
-                floor_level = sup * 1.0015
-            elif rec_low and rec_low < cand["last"]:
-                floor_level = rec_low * 1.0015
-
-            if floor_level and not is_mom:
-                if cand["last"] >= floor_level:
-                    entry = max(entry, floor_level)
+            if sup and sup_touches >= 2 and not is_mom:
+                retest_floor = sup * 1.0015
+                if cand["last"] >= retest_floor:
+                    entry = max(entry, retest_floor)
                     entry = min(entry, bid1)
 
             a = cand["atr"]
@@ -128,10 +122,9 @@ class OrderManagerWorker:
 
             sl = entry - sl_dist_raw
 
-            # ⚡ 2. СТРУКТУРНЫЙ СТОП-ЛОСС ЗА ОПОРНЫЙ МИНИМУМ
-            anchor_low = sup if (sup and sup_touches >= 2) else rec_low
-            if anchor_low and anchor_low < entry:
-                struct_sl = anchor_low * 0.997
+            # ⚡ 2. СТРУКТУРНЫЙ СТОП-ЛОСС ЗА ПОДДЕРЖКУ
+            if sup and sup_touches >= 2 and sup < entry:
+                struct_sl = sup * 0.997
                 min_safe_sl = entry * (1 - sl_floor_pct)
                 candidate_sl = min(struct_sl, min_safe_sl)
                 candidate_dist_pct = (entry - candidate_sl) / entry * 100
@@ -149,18 +142,7 @@ class OrderManagerWorker:
             tp = entry + tp_dist_raw
             min_rr = 1.5
 
-            # ⚡ 3. ОГРАНИЧЕНИЕ ТЕЙКА ХАЕМ 6 ЧАСОВ
-            rec_hi = cand.get("recent_high")
-            if rec_hi and rec_hi > entry:
-                rec_hi_cap = rec_hi * 0.998
-                if rec_hi_cap < tp:
-                    if (rec_hi_cap - entry) / sl_dist >= 1.35:
-                        tp = round(rec_hi_cap, 8)
-                        min_rr = 1.35
-                    else:
-                        continue
-
-            # ⚡ 4. АДАПТИВНЫЙ ТЕЙК ПОД СОПРОТИВЛЕНИЕ
+            # ⚡ 3. АДАПТИВНЫЙ ТЕЙК ПОД ПОДТВЕРЖДЕННОЕ СОПРОТИВЛЕНИЕ (стены >= 2 касаний)
             res = cand.get("nearest_res")
             res_touches = cand.get("res_touches", 0)
 
@@ -253,8 +235,6 @@ class OrderManagerWorker:
                 "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode,
                 "nearest_res": res if (res and res_touches >= 2) else None,
                 "nearest_sup": sup if (sup and sup_touches >= 2) else None,
-                "recent_high": rec_hi,
-                "recent_low_2h": rec_low
             })
             paper.save()
 
