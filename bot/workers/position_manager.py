@@ -26,7 +26,7 @@ TIER_TP_FLOOR = {
     "TOP20": 0.012,
     "MID":   0.020,
     "SMALL": 0.025,
-    "MICRO": 0.028,  # Синхронизировано с order_manager
+    "MICRO": 0.028,
 }
 
 class PositionManagerWorker:
@@ -116,7 +116,7 @@ class PositionManagerWorker:
                 if pnl_pct >= 1.0 or pnl_pct <= 0:
                     reason = "✂📰 Новости"
                     ex = paper._sell(sym, last, reason, regime_now=regime)
-                    paper.log_event(sym, "sell", last, f"Новости {neg}/{mentions}")
+                    paper.log_event(sym, "sell", last, f"Новости {neg}/{mentions}", tp=pos.get("tp"), sl=pos.get("sl"))
                     self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · {reason} {neg}/{mentions}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                     continue
 
@@ -152,7 +152,7 @@ class PositionManagerWorker:
 
                 ex = paper._sell(sym, last, reason, regime_now=regime)
                 ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"
-                paper.log_event(sym, ev_type, last, reason)
+                paper.log_event(sym, ev_type, last, reason, tp=pos.get("tp"), sl=pos.get("sl"))
                 if ex["pnl"] > 0: shadow.mark_success(sym)
                 self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · {reason}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                 continue
@@ -163,6 +163,7 @@ class PositionManagerWorker:
                     pos["tp"] = round(new_tp, 10)
                     pos["sl"] = max(pos["sl"], pos["avg"] + 0.5 * a)
                     paper.save()
+                    paper.log_event(sym, "tp_runner_raised", pos["tp"], f"TP Runner поднят", mode="TP поднят 🎯", tp=pos["tp"], sl=pos["sl"])
                     self._notify(f"🎯 <b>TP поднят</b> (раннер) · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · 🛡 {fmt_price(pos['sl'])}")
 
         # 2. Проверка ОРДЕРОВ (реквоты и отмены)
@@ -290,7 +291,7 @@ class PositionManagerWorker:
             if action_type:
                 order["created"] = current_time  
                 paper.save()
-                paper.log_event(sym, "order_moved", ideal_price, f"Сдвиг: {action_type}")
+                paper.log_event(sym, "order_moved", ideal_price, f"Сдвиг: {action_type}", tp=order["tp"], sl=order["sl"])
                 msg_desc = f"подтяжка к сжатию" if action_type == "hunt" else f"сдвиг на {dev_pct:.2f}%"
                 self._notify(f"📐 <b>Сдвиг {price_icon}</b> · {pair_html(sym, order)}\n📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · {msg_desc}")
             else:
