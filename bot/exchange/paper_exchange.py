@@ -24,13 +24,12 @@ class PaperExchange:
         self.positions = {}
         self.orders = []
         self.trades = []
-        self.funding_coins = {} # Хранит крипту в Накоплениях (Аккаунт финансирования)
+        self.funding_coins = {}
         self.realized = []
         self.market_history = []
         self.chart_events = [] 
         self._last_upload = 0.0
         self._load()
-        # ИСПРАВЛЕНИЕ: Вызов удален!
 
     def _load(self):
         data = None
@@ -65,18 +64,18 @@ class PaperExchange:
             "funding_coins": getattr(self, "funding_coins", {}),
             "realized": self.realized,
             "market_history": self.market_history,
-            "chart_events": self.chart_events[-500:] if hasattr(self, 'chart_events') else [] # <-- Было -3000:
+            "chart_events": self.chart_events[-500:] if hasattr(self, 'chart_events') else []
         }
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             self.state_file.write_text(json.dumps(payload, ensure_ascii=False))
         except Exception as e:
             logger.error(f"Paper save error: {e}")
-        if time.time() - self._last_upload > 3600:  # <-- Было 900. Ставим 1 раз в час.
+        if time.time() - self._last_upload > 3600:
             self._last_upload = time.time()
             upload_state(REMOTE_PATH, payload)
             
-    def log_event(self, symbol, ev_type, price, text="", rsi_val=None, mode=None):
+    def log_event(self, symbol, ev_type, price, text="", rsi_val=None, mode=None, tp=None, sl=None):
         if not hasattr(self, 'chart_events'):
             self.chart_events = []
         self.chart_events.append({
@@ -86,7 +85,9 @@ class PaperExchange:
             "price": price,
             "text": text,
             "rsi": round(rsi_val, 1) if rsi_val else None,
-            "mode": mode
+            "mode": mode,
+            "tp": round(float(tp), 8) if tp is not None else None,
+            "sl": round(float(sl), 8) if sl is not None else None,
         })
 
     def _resolve_sector(self, symbol, fallback_sector=None):
@@ -294,24 +295,17 @@ class PaperExchange:
 
         if total_pnl > 0:
             if tier == "TOP20":
-                # === СТРАТЕГИЯ НАКОПЛЕНИЯ КРИПТЫ (Funding Account) ===
-                # Считаем, сколько монет нужно продать, чтобы вернуть тело сделки + комиссии
                 target_return = cost + fee_buy
                 qty_to_sell = (target_return / (1 - self.FEE_PCT / 100)) / price
                 qty_kept = pos["qty"] - qty_to_sell
                 
-                # Откатываем стандартную продажу всей позиции, возвращаем на торговый баланс только USDT-тело
                 self.usdt -= (proceeds - fee_sell) 
                 self.usdt += target_return         
                 
-                # Переводим бесплатные монеты на Аккаунт Финансирования
                 if not hasattr(self, 'funding_coins'): self.funding_coins = {}
                 self.funding_coins[sym] = self.funding_coins.get(sym, 0.0) + qty_kept
-                
                 reason += " 🏦"
-                # ====================================================
             else:
-                # Для альткоинов переводим 30% профита в USDT на Аккаунт Финансирования
                 transferred = round(total_pnl * 0.30, 4)
                 self.usdt -= transferred
                 self.funding += transferred
@@ -322,7 +316,7 @@ class PaperExchange:
             "sector": sector, "tier": tier, "kind": kind,
             "is_momentum": pos.get("is_momentum", False),
             "entry_mode": entry_mode,
-            "regime": pos.get("regime_entry", "neutral")  # <--- ДОБАВИЛИ ЭТО
+            "regime": pos.get("regime_entry", "neutral")
         })
         self.trades.append({
             "side": "Sell", "symbol": sym, "qty": pos["qty"],
