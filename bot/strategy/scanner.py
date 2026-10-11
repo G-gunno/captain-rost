@@ -246,7 +246,27 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     elif r > w["rsi_hi"]: 
         score -= 1.5; reasons.append(f"перегрев RSI {r:.0f}") 
 
-    if vol_ratio > w["vol_lo"]: score += learner.weight("volume"); reasons.append(f"объём x{vol_ratio:.1f}"); keys.append("volume")
+    # ✅ СТАЛО:
+    last_candle = candles_15m[-1]
+    is_green_candle = last_candle["close"] >= last_candle["open"]
+    candle_range = last_candle["high"] - last_candle["low"]
+    
+    if vol_ratio > w["vol_lo"]:
+        # Бонус дается только если свеча зеленая ИЛИ закрытие в верхней части свечи (выкуп тени снизу)
+        has_bottom_wick_buy = candle_range > 0 and (last_candle["close"] >= last_candle["low"] + 0.6 * candle_range)
+        
+        if is_green_candle or has_bottom_wick_buy:
+            score += learner.weight("volume")
+            reasons.append(f"объём покупок x{vol_ratio:.1f}")
+            keys.append("volume")
+        else:
+            # Если свеча красная и закрылась на лоях — это дамп/слив, штрафуем!
+            score -= 2.0
+            reasons.append(f"сливной объём x{vol_ratio:.1f} (давление продаж)")
+
+    # 🛑 1. ЗАЩИТА ОТ ШПИЛЕК И ОТВЕРЖЕНИЯ
+    recent_rejection = False
+    for c in candles_15m[-3:]:
 
     recent_rejection = False
     for c in candles_15m[-3:]:
