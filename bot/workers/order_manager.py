@@ -127,15 +127,20 @@ class OrderManagerWorker:
                 if (entry - sl) / entry * 100 > max_sl_allowed:
                     continue
 
-            # ⚡ Привязка TP1 к уровню сопротивления (если сопротивление выше входа)
+            # ⚡ Интеллектуальный учет сопротивления (ТОЛЬКО для подтвержденных стен >= 2 касаний)
             res = cand.get("nearest_res")
-            if res and res > entry:
-                res_dist_pct = (res - entry) / entry * 100
-                if res_dist_pct < tp_floor_pct:
+            res_touches = cand.get("res_touches", 0)
+
+            if res and res_touches >= 2 and res > entry:
+                res_dist = res - entry
+                # Если стена слишком близко и не дает забрать даже 1.35x RR — блокируем вход в потолок!
+                if res_dist < sl_dist_raw * 1.35:
                     continue
+                # Если запас хода достаточный — аккуратно прижимаем TP под уровень стены
                 res_cap_tp = res * 0.997
-                if res_cap_tp < tp and (res_cap_tp - entry) / entry * 100 >= tp_floor_pct:
+                if res_cap_tp < tp:
                     tp = round(res_cap_tp, 8)
+                    min_rr = 1.35  # Адаптируем минимальный RR для сделок с прижатием к уровню
 
             rr = (tp - entry) / (entry - sl) if entry > sl else 0
             if tp <= entry or sl >= entry or round(rr, 2) < min_rr:
