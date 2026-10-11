@@ -43,8 +43,36 @@ TIER_CORR_LIMITS = {
     "MICRO": 0.75,
 }
 
+# ⚡ Трекер гистерезиса фаз рынка (защита от бычьих ловушек)
+_regime_tracker = {
+    "prev_regime": "neutral",
+    "last_bear_ts": 0.0,
+    "bull_start_ts": 0.0,
+    "breadth_streak": 0,
+}
+
+def _init_regime_tracker():
+    if _regime_tracker["last_bear_ts"] == 0.0 and hasattr(paper, "market_history") and paper.market_history:
+        for h in reversed(paper.market_history):
+            if h.get("regime") == "bear" and _regime_tracker["last_bear_ts"] == 0.0:
+                _regime_tracker["last_bear_ts"] = float(h.get("ts", 0))
+            if h.get("regime") == "bull" and _regime_tracker["bull_start_ts"] == 0.0:
+                _regime_tracker["bull_start_ts"] = float(h.get("ts", 0))
+        _regime_tracker["prev_regime"] = paper.market_history[-1].get("regime", "neutral")
+
 def get_thresholds(regime):
-    base = BASE_THRESHOLDS.get(regime, BASE_THRESHOLDS["neutral"])
+    now = time.time()
+    bull_start = _regime_tracker.get("bull_start_ts", 0.0)
+    bull_age = (now - bull_start) if bull_start > 0 else 0
+
+    # ⚡ Защита от бычьей ловушки (NEUTRAL -> BULL):
+    # Первые 30 минут фазы BULL пороги удерживаются на строгом уровне NEUTRAL (6.0),
+    # блокируя покупки перегретых шпилек в начале ложного импульса.
+    if regime == "bull" and (bull_start == 0.0 or bull_age < 1800):
+        base = BASE_THRESHOLDS["neutral"]
+    else:
+        base = BASE_THRESHOLDS.get(regime, BASE_THRESHOLDS["neutral"])
+
     adj = learner.threshold_adj 
     t = shadow.tuning
 
@@ -89,45 +117,75 @@ def _corr(a, b):
     return cov / (va * vb) ** 0.5
 
 async def get_regime():
+    now = time.time()
+    _init_regime_tracker()
+
     candles = await market_data.get_kline("BTCUSDT", "60", 250)
     if len(candles) < 60:
-        return "neutral", {}
+        return _regime_tracker.get("prev_regime", "neutral"), {}
     closes = [c["close"] for c in candles]
     e21, e50, e200 = ema(closes, 21)[-1], ema(closes, 50)[-1], ema(closes, 200)[-1]
     last = closes[-1]
 
     if e21 > e50 > e200:
-        regime = "bull"
+        raw_regime = "bull"
     elif e21 < e50 < e200:
-        regime = "bear"
+        raw_regime = "bear"
     else:
-        regime = "neutral"
+        raw_regime = "neutral"
 
-    if regime == "neutral":
-        tickers = await market_data.get_tickers()
-        if tickers:
-            tradable = [s for s, t in tickers.items() if is_tradable(s) and t["quote_volume"] >= 500_000]
-            if tradable:
-                green_alts = sum(1 for s in tradable if tickers[s]["change_pct"] > 3.0)
-                breadth_pct = (green_alts / len(tradable)) * 100
+    # Анализ ширины рынка (Market Breadth)
+    tickers = await market_data.get_tickers()
+    if tickers:
+        tradable = [s for s, t in tickers.items() if is_tradable(s) and t["quote_volume"] >= 500_000]
+        if tradable:
+            green_alts = sum(1 for s in tradable if tickers[s]["change_pct"] > 3.0)
+            breadth_pct = (green_alts / len(tradable)) * 100
 
-                if breadth_pct >= 40.0:
-                    regime = "bull"
-                    logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые. Режим принудительно переведен в 'bull'.")
+            # ⚡ 1. Фильтр ложного сквиза: требуем удержания >= 45% минимум 2 сканирования подряд (6 мин)
+            if breadth_pct >= 45.0:
+                _regime_tracker["breadth_streak"] += 1
+                if _regime_tracker["breadth_streak"] >= 2 and raw_regime == "neutral":
+                    raw_regime = "bull"
+                    logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые (подтверждено 2-й цикл). Переход в 'bull'.")
+                elif _regime_tracker["breadth_streak"] == 1 and raw_regime == "neutral":
+                    logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые (цикл 1/2). Ожидание подтверждения для BULL.")
+            else:
+                _regime_tracker["breadth_streak"] = 0
 
     stable_trend = get_macro_trend()
     fng = get_fear_and_greed()
 
-    if stable_trend == "bull" and regime == "neutral":
-        regime = "bull"
-    elif stable_trend == "bear" and regime == "bull":
-        regime = "neutral" 
+    if stable_trend == "bull" and raw_regime == "neutral":
+        raw_regime = "bull"
+    elif stable_trend == "bear" and raw_regime == "bull":
+        raw_regime = "neutral" 
 
-    if fng < 40 and regime == "bull":
-        regime = "neutral" 
-    elif fng > 75 and regime == "bear":
-        regime = "neutral" 
+    if fng < 40 and raw_regime == "bull":
+        raw_regime = "neutral" 
+    elif fng > 75 and raw_regime == "bear":
+        raw_regime = "neutral" 
 
+    regime = raw_regime
+
+    # ⚡ 2. ГИСТЕРЕЗИС: Запрет прямого прыжка BEAR -> BULL (Карантин 45 минут в NEUTRAL)
+    if regime == "bear":
+        _regime_tracker["last_bear_ts"] = now
+        _regime_tracker["bull_start_ts"] = 0.0
+    elif regime == "bull":
+        time_since_bear = now - _regime_tracker["last_bear_ts"]
+        if _regime_tracker["last_bear_ts"] > 0 and time_since_bear < 2700:
+            rem_min = (2700 - time_since_bear) / 60
+            regime = "neutral"
+            logger.info(f"🛡 Гистерезис: выход из BEAR заблокировал прямой прыжок в BULL. Буфер NEUTRAL еще {rem_min:.1f} мин.")
+        else:
+            if _regime_tracker["bull_start_ts"] == 0.0:
+                _regime_tracker["bull_start_ts"] = now
+                logger.info("🚀 Подтвержден старт фазы BULL. Запущен 30-минутный прогрев порогов.")
+    else:
+        _regime_tracker["bull_start_ts"] = 0.0
+
+    _regime_tracker["prev_regime"] = regime
     return regime, {"btc": last, "ema50": e50, "ema200": e200}
 
 async def fetch_new_listings():
@@ -156,7 +214,7 @@ async def fetch_new_listings():
                     if not cursor:
                         break
             _instruments_cache["data"], _instruments_cache["ts"] = raw, now
-        except Exception:
+        except Exception as e:
             raw = []
 
     now_ms = int(now * 1000)
@@ -428,7 +486,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
     raw_max = raw_max_score(regime)
     fng = get_fear_and_greed()
 
-    # ⚡ Запись истории режимов рынка для графика и отчетов
     if not paper.market_history or paper.market_history[-1].get("regime") != regime:
         paper.market_history.append({
             "ts": int(time.time()),
@@ -519,6 +576,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             chg_val = signal_values.get("chg24h", 0)
             vol_val = signal_values.get("volume", 0)
             
+            # ⚡ Корректное обращение к локальным переменным
             is_momentum = ("impulse" in keys and 55 <= rsi_val <= 68 and 1.5 <= chg_val <= 12.0 and vol_val >= 1.4)
 
             if is_reversal: entry_mode = "reversal"
