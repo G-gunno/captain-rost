@@ -67,7 +67,7 @@ class ExecutionRiskWorker:
             sl_pct = (f["sl"] - f["price"]) / f["price"] * 100
             emode = f.get("entry_mode", "")
             ev_mode_str = "Ловец дна" if emode == "reversal" else ("Ракета" if emode == "rocket" else "Снайпер")
-            paper.log_event(f["symbol"], "buy", f["price"], mode=ev_mode_str)
+            paper.log_event(f["symbol"], "buy", f["price"], mode=ev_mode_str, tp=f.get("tp"), sl=f.get("sl"))
 
             self.bus.publish("NOTIFY", {
                 "text": f"🛒 <b>Покупка</b> · {pair_html(f['symbol'], f)}\n💵 {usd(f['qty'] * f['price'])} · 📥 {fmt_price(f['price'])}\n🎯 TP {fmt_pct(tp_pct)} · 🛡 SL {fmt_pct(sl_pct)}",
@@ -86,7 +86,7 @@ class ExecutionRiskWorker:
             if last <= pos["sl"]:
                 ex = paper._sell(sym, last, "SL 🛡", regime_now=bot_state.current_regime)
                 ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"
-                paper.log_event(sym, ev_type, last, "SL 🛡")
+                paper.log_event(sym, ev_type, last, "SL 🛡", tp=pos.get("tp"), sl=pos.get("sl"))
                 bot_state.set_cooldown(sym, 420)
                 self.bus.publish("NOTIFY", {
                     "text": f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · SL 🛡\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}",
@@ -100,7 +100,7 @@ class ExecutionRiskWorker:
                     half = pos["qty"] / 2
                     ex = paper.sell_partial(sym, half, pos["tp"], "TP1 🎯")
                     pos["tp1_done"] = True
-                    paper.log_event(sym, "sell_profit", last, "TP1 🎯")
+                    paper.log_event(sym, "tp1", last, f"TP1 (+{ex['pnl_pct']:.1f}%)", mode="TP1 🎯", tp=pos.get("tp"), sl=pos.get("sl"))
                     shadow.mark_success(sym)
 
                     breakeven_price = pos["avg"] * 1.002
@@ -114,7 +114,7 @@ class ExecutionRiskWorker:
                     })
                 else:
                     ex = paper._sell(sym, last, "TP ✅", regime_now=bot_state.current_regime)
-                    paper.log_event(sym, "sell_profit", last, "TP ✅")
+                    paper.log_event(sym, "tp_runner", last, f"TP RUNNER (+{ex['pnl_pct']:.1f}%)", mode="TP RUNNER 🚀", tp=last, sl=pos.get("sl"))
                     shadow.mark_success(sym)
                     bot_state.set_cooldown(sym, 180)
                     self.bus.publish("NOTIFY", {
@@ -139,12 +139,11 @@ class ExecutionRiskWorker:
 
         tier = pos.get("tier") or "SMALL"
 
-        # ⚡ Обновленные пороги безубытка и раннеров
         TIER_TRAIL_CONFIG = {
             "TOP20": {"be_trigger": 0.007, "runner_dist": 0.008, "pre_tp_trigger": 1.5, "pre_tp_dist": 0.006},
             "MID":   {"be_trigger": 0.010, "runner_dist": 0.013, "pre_tp_trigger": 2.0, "pre_tp_dist": 0.010},
             "SMALL": {"be_trigger": 0.012, "runner_dist": 0.016, "pre_tp_trigger": 2.2, "pre_tp_dist": 0.012},
-            "MICRO": {"be_trigger": 0.014, "runner_dist": 0.022, "pre_tp_trigger": 2.5, "pre_tp_dist": 0.018},  # ⚡ Ровно 0.014 (+1.4%)!
+            "MICRO": {"be_trigger": 0.014, "runner_dist": 0.022, "pre_tp_trigger": 2.5, "pre_tp_dist": 0.018},
         }
         cfg = TIER_TRAIL_CONFIG.get(tier, TIER_TRAIL_CONFIG["SMALL"])
 
@@ -153,18 +152,18 @@ class ExecutionRiskWorker:
         breakeven = avg_p * 1.0025
         profit_pct = (max_p - avg_p) / avg_p * 100
 
-        # 1. РАННИЙ БЕЗУБЫТОК
+        # 1. Ранний безубыток
         if max_p >= avg_p * (1 + cfg["be_trigger"]):
             if new_sl < breakeven:
                 new_sl = breakeven
 
-        # 2. ТРЕЙЛИНГ РАННЕРА
+        # 2. Трейлинг раннера
         if pos.get("tp1_done"):
             runner_trail = max_p * (1 - cfg["runner_dist"])
             min_runner_sl = avg_p * 1.005
             new_sl = max(new_sl, runner_trail, min_runner_sl)
         else:
-            # 3. ТРЕЙЛИНГ ДО TP1
+            # 3. Трейлинг до TP1
             if profit_pct >= cfg["pre_tp_trigger"]:
                 new_sl = max(new_sl, max_p * (1 - cfg["pre_tp_dist"]))
 
@@ -176,7 +175,7 @@ class ExecutionRiskWorker:
                 pos["sl"] = round(new_sl, 8)
                 pos["max_sl"] = pos["sl"]
                 tag = "🔒 БУ" if (current_sl < breakeven and new_sl >= breakeven and not pos.get("tp1_done")) else f"Трейлинг SL ({tier})"
-                paper.log_event(sym, "sl_moved", pos["sl"], tag)
+                paper.log_event(sym, "sl_moved", pos["sl"], tag, tp=pos.get("tp"), sl=pos["sl"])
                 self.bus.publish("NOTIFY", {
                     "text": f"🛡 SL поднят по <b>{sym[:-4]}</b> до {new_sl_str} ({tag})", 
                     "urgent": False
