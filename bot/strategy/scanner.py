@@ -267,9 +267,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     # 🛑 1. ЗАЩИТА ОТ ШПИЛЕК И ОТВЕРЖЕНИЯ
     recent_rejection = False
     for c in candles_15m[-3:]:
-
-    recent_rejection = False
-    for c in candles_15m[-3:]:
         c_rng = c["high"] - c["low"]
         c_wick = c["high"] - max(c["close"], c["open"])
         if c_rng > 0 and (c_wick / c_rng) > 0.45:
