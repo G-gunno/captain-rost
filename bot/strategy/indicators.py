@@ -42,14 +42,10 @@ def atr(candles, period=14):
 
 def find_sr_levels(candles, window=48):
     """
-    Поиск локальных уровней поддержки и сопротивления (Swing Highs & Lows).
-    Возвращает:
-      nearest_res: ближайшее сопротивление выше последней цены (или None)
-      res_touches: число касаний уровня сопротивления
-      nearest_sup: ближайшая поддержка ниже последней цены (или None)
-      sup_touches: число касаний уровня поддержки
+    Поиск сильных локальных уровней поддержки и сопротивления.
+    Уровень считается значимым ТОЛЬКО если подтвержден как минимум 2 касаниями.
     """
-    if len(candles) < 15:
+    if len(candles) < 20:
         return None, 0, None, 0
 
     recent = candles[-window:] if len(candles) >= window else candles
@@ -59,26 +55,43 @@ def find_sr_levels(candles, window=48):
     swing_lows = []
     
     n = len(recent)
-    for i in range(2, n - 2):
+    # Радиус 3 свечи (45 минут слева и справа) для исключения мелкого рыночного шума
+    for i in range(3, n - 3):
         h = recent[i]["high"]
         l = recent[i]["low"]
-        if h >= recent[i-1]["high"] and h >= recent[i-2]["high"] and h >= recent[i+1]["high"] and h >= recent[i+2]["high"]:
+        if all(h >= recent[i+j]["high"] for j in (-3, -2, -1, 1, 2, 3)):
             swing_highs.append(h)
-        if l <= recent[i-1]["low"] and l <= recent[i-2]["low"] and l <= recent[i+1]["low"] and l <= recent[i+2]["low"]:
+        if all(l <= recent[i+j]["low"] for j in (-3, -2, -1, 1, 2, 3)):
             swing_lows.append(l)
 
-    res_above = [h for h in swing_highs if h > last_price * 1.001]
+    res_above = [h for h in swing_highs if h > last_price * 1.002]
     nearest_res = None
     res_touches = 0
     if res_above:
-        nearest_res = min(res_above)
-        res_touches = sum(1 for h in swing_highs if abs(h - nearest_res) / nearest_res <= 0.004)
+        # Ищем кластеры (уровни с наибольшим числом касаний)
+        clusters = []
+        for h in set(res_above):
+            touches = sum(1 for x in res_above if abs(x - h) / h <= 0.005)
+            clusters.append((h, touches))
+        
+        # Фильтруем только подтвержденные уровни (минимум 2 касания)
+        confirmed_res = [c for c in clusters if c[1] >= 2]
+        if confirmed_res:
+            confirmed_res.sort(key=lambda x: x[0])  # Ближайшее подтвержденное сопротивление
+            nearest_res, res_touches = confirmed_res[0]
 
-    sup_below = [l for l in swing_lows if l < last_price * 0.999]
+    sup_below = [l for l in swing_lows if l < last_price * 0.998]
     nearest_sup = None
     sup_touches = 0
     if sup_below:
-        nearest_sup = max(sup_below)
-        sup_touches = sum(1 for l in swing_lows if abs(l - nearest_sup) / nearest_sup <= 0.004)
+        clusters_sup = []
+        for l in set(sup_below):
+            touches = sum(1 for x in sup_below if abs(x - l) / l <= 0.005)
+            clusters_sup.append((l, touches))
+        
+        confirmed_sup = [c for c in clusters_sup if c[1] >= 2]
+        if confirmed_sup:
+            confirmed_sup.sort(key=lambda x: x[0], reverse=True)  # Ближайшая подтвержденная поддержка
+            nearest_sup, sup_touches = confirmed_sup[0]
 
     return nearest_res, res_touches, nearest_sup, sup_touches
