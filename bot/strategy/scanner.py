@@ -29,7 +29,6 @@ STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
                 "RLUSD", "PYUSD", "EURI", "USDS", "USD0", "FRAX",
                 "LUSD", "GUSD", "XUSD", "USDX", "CUSD", "SUSD"}
 
-# === МАТРИЦА ПОРОГОВ ===
 BASE_THRESHOLDS = {
     "bull": {"rocket": 6.0, "sniper": 5.5, "reversal": 6.5},
     "neutral": {"rocket": 6.5, "sniper": 6.0, "reversal": 6.0},
@@ -43,7 +42,6 @@ TIER_CORR_LIMITS = {
     "MICRO": 0.75,
 }
 
-# ⚡ Трекер гистерезиса фаз рынка (защита от бычьих ловушек)
 _regime_tracker = {
     "prev_regime": "neutral",
     "last_bear_ts": 0.0,
@@ -65,9 +63,6 @@ def get_thresholds(regime):
     bull_start = _regime_tracker.get("bull_start_ts", 0.0)
     bull_age = (now - bull_start) if bull_start > 0 else 0
 
-    # ⚡ Защита от бычьей ловушки (NEUTRAL -> BULL):
-    # Первые 30 минут фазы BULL пороги удерживаются на строгом уровне NEUTRAL (6.0),
-    # блокируя покупки перегретых шпилек в начале ложного импульса.
     if regime == "bull" and (bull_start == 0.0 or bull_age < 1800):
         base = BASE_THRESHOLDS["neutral"]
     else:
@@ -134,7 +129,6 @@ async def get_regime():
     else:
         raw_regime = "neutral"
 
-    # Анализ ширины рынка (Market Breadth)
     tickers = await market_data.get_tickers()
     if tickers:
         tradable = [s for s, t in tickers.items() if is_tradable(s) and t["quote_volume"] >= 500_000]
@@ -142,7 +136,6 @@ async def get_regime():
             green_alts = sum(1 for s in tradable if tickers[s]["change_pct"] > 3.0)
             breadth_pct = (green_alts / len(tradable)) * 100
 
-            # ⚡ 1. Фильтр ложного сквиза: требуем удержания >= 45% минимум 2 сканирования подряд (6 мин)
             if breadth_pct >= 45.0:
                 _regime_tracker["breadth_streak"] += 1
                 if _regime_tracker["breadth_streak"] >= 2 and raw_regime == "neutral":
@@ -168,7 +161,6 @@ async def get_regime():
 
     regime = raw_regime
 
-    # ⚡ 2. ГИСТЕРЕЗИС: Запрет прямого прыжка BEAR -> BULL (Карантин 45 минут в NEUTRAL)
     if regime == "bear":
         _regime_tracker["last_bear_ts"] = now
         _regime_tracker["bull_start_ts"] = 0.0
@@ -214,7 +206,7 @@ async def fetch_new_listings():
                     if not cursor:
                         break
             _instruments_cache["data"], _instruments_cache["ts"] = raw, now
-        except Exception as e:
+        except Exception:
             raw = []
 
     now_ms = int(now * 1000)
@@ -256,7 +248,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
 
     if vol_ratio > w["vol_lo"]: score += learner.weight("volume"); reasons.append(f"объём x{vol_ratio:.1f}"); keys.append("volume")
 
-    # 🛑 1. ЗАЩИТА ОТ ШПИЛЕК И ОТВЕРЖЕНИЯ
     recent_rejection = False
     for c in candles_15m[-3:]:
         c_rng = c["high"] - c["low"]
@@ -269,7 +260,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         score -= 3.0
         reasons.append("отвержение на хаях (шпилька продаж)")
 
-    # 🛑 2. ЗАЩИТА ОТ FOMO
     a15 = atr(candles_15m)
     if not is_open_pos:
         if a15 > 0 and e21 > 0:
@@ -291,7 +281,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     no_recent_pump = t["change_pct"] < 4.0      
     trend_ok = e21 >= (e50 * 0.998)             
 
-    # 🛑 3. ЗАЩИТА ОТ ПАДАЮЩЕЙ EMA50
     e50_past = ema(closes[:-5], 50)[-1] if len(closes) > 55 else e50
     ema50_flat_or_rising = e50 >= (e50_past * 0.999)
 
@@ -300,20 +289,19 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         reasons.append("тихая консолидация на EMA50 (накопление)")
         keys.append("accumulation")
 
-    # 🛑 4. ДЕТЕКТОР УРОВНЕЙ СОПРОТИВЛЕНИЯ И ПОДДЕРЖКИ (S/R Barrier)
+    # Детектор сильных подтвержденных уровней
     nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_15m, window=48)
     
-    if nearest_res and a15 > 0 and not is_open_pos:
+    # Штраф ТОЛЬКО если это подтвержденное сопротивление (минимум 2 касания)
+    if nearest_res and res_touches >= 2 and a15 > 0 and not is_open_pos:
         dist_to_res = nearest_res - last
-        if dist_to_res < 1.0 * a15 or (dist_to_res / last * 100) < 0.6:
-            mult_penalty = 4.0 if res_touches >= 2 else 2.5
-            score -= mult_penalty
-            touch_str = f" ({res_touches} касания)" if res_touches >= 2 else ""
-            reasons.append(f"в упор к сопротивлению ${fmt_price(nearest_res)}{touch_str}")
+        if dist_to_res < 1.0 * a15 or (dist_to_res / last * 100) < 0.8:
+            score -= 3.5
+            reasons.append(f"в упор к стене ${fmt_price(nearest_res)} ({res_touches} касания)")
 
-    if nearest_sup and a15 > 0 and not is_open_pos:
+    if nearest_sup and sup_touches >= 2 and a15 > 0 and not is_open_pos:
         dist_to_sup = last - nearest_sup
-        if dist_to_sup < 0.8 * a15 and sup_touches >= 2 and last > closes[-2]:
+        if dist_to_sup < 0.8 * a15 and last > closes[-2]:
             score += 1.5
             reasons.append(f"отскок от поддержки ${fmt_price(nearest_sup)} ({sup_touches} касания)")
             keys.append("support_bounce")
@@ -355,7 +343,8 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
 
     signal_values = {
         "rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio,
-        "nearest_res": nearest_res, "nearest_sup": nearest_sup
+        "nearest_res": nearest_res, "res_touches": res_touches,
+        "nearest_sup": nearest_sup, "sup_touches": sup_touches
     }
     return score, reasons, keys, signal_values
 
@@ -576,7 +565,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             chg_val = signal_values.get("chg24h", 0)
             vol_val = signal_values.get("volume", 0)
             
-            # ⚡ Корректное обращение к локальным переменным
             is_momentum = ("impulse" in keys and 55 <= rsi_val <= 68 and 1.5 <= chg_val <= 12.0 and vol_val >= 1.4)
 
             if is_reversal: entry_mode = "reversal"
@@ -610,7 +598,9 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 "is_momentum": is_momentum,
                 "entry_mode": entry_mode,
                 "nearest_res": signal_values.get("nearest_res"),
+                "res_touches": signal_values.get("res_touches", 0),
                 "nearest_sup": signal_values.get("nearest_sup"),
+                "sup_touches": signal_values.get("sup_touches", 0),
                 "size_mult": 1.0
             }
 
