@@ -64,7 +64,7 @@ class PaperExchange:
             "funding_coins": getattr(self, "funding_coins", {}),
             "realized": self.realized,
             "market_history": self.market_history,
-            "chart_events": self.chart_events[-500:] if hasattr(self, 'chart_events') else []
+            "chart_events": self.chart_events[-600:] if hasattr(self, 'chart_events') else []
         }
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -75,7 +75,7 @@ class PaperExchange:
             self._last_upload = time.time()
             upload_state(REMOTE_PATH, payload)
             
-    def log_event(self, symbol, ev_type, price, text="", rsi_val=None, mode=None, tp=None, sl=None):
+    def log_event(self, symbol, ev_type, price, text="", rsi_val=None, mode=None, tp=None, sl=None, sup=None, res=None):
         if not hasattr(self, 'chart_events'):
             self.chart_events = []
         self.chart_events.append({
@@ -88,6 +88,8 @@ class PaperExchange:
             "mode": mode,
             "tp": round(float(tp), 8) if tp is not None else None,
             "sl": round(float(sl), 8) if sl is not None else None,
+            "sup": round(float(sup), 8) if sup is not None else None,
+            "res": round(float(res), 8) if res is not None else None,
         })
 
     def _resolve_sector(self, symbol, fallback_sector=None):
@@ -150,6 +152,8 @@ class PaperExchange:
                     pos["entry_mode"] = order.get("entry_mode", "sniper")
                     pos["max_price"] = order["price"]
                     pos["entry_time"] = int(time.time())
+                    pos["nearest_sup"] = order.get("nearest_sup")
+                    pos["nearest_res"] = order.get("nearest_res")
                     self.trades.append({
                         "side": "Buy",
                         "symbol": order["symbol"],
