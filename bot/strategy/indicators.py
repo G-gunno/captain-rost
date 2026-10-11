@@ -40,23 +40,18 @@ def atr(candles, period=14):
     return a
 
 
-def find_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72, window=None):
+def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72):
     """
-    Институциональный мультитаймфрейм поиск S/R:
-    - 1H свечи (горизонт 3 суток) дают фундаментальные уровни старшего порядка.
-    - 15m свечи с асимметричным плечом (3 слева, 1 справа) мгновенно фиксируют разворотное дно.
+    Возвращает все подтвержденные уровни поддержки и сопротивления
+    в виде списков кортежей (цена, количество_касаний).
     """
-    if window is not None:
-        window_15m = window
-
     if not candles_15m or len(candles_15m) < 15:
-        return None, 0, None, 0
+        return [], []
 
-    last_price = candles_15m[-1]["close"]
     swing_highs = []
     swing_lows = []
 
-    # 1. Старший таймфрейм 1H (3 дня истории)
+    # 1. Анализ 1H свечей (старший порядок, вес 2x)
     if candles_1h and isinstance(candles_1h, list) and len(candles_1h) >= 20:
         recent_1h = candles_1h[-window_1h:] if len(candles_1h) >= window_1h else candles_1h
         n1 = len(recent_1h)
@@ -68,7 +63,7 @@ def find_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72, wi
             if all(l <= recent_1h[i+j]["low"] for j in (-2, -1, 1, 2)):
                 swing_lows.extend([l, l])
 
-    # 2. Внутридневной таймфрейм 15m (3 свечи слева для опоры, 1 свеча справа для реакции за 15 мин)
+    # 2. Анализ 15m свечей (асимметричный фрактал: 3 слева, 1 справа)
     recent_15m = candles_15m[-window_15m:] if len(candles_15m) >= window_15m else candles_15m
     n15 = len(recent_15m)
     for i in range(3, n15 - 1):
@@ -79,30 +74,52 @@ def find_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72, wi
         if all(l <= recent_15m[i-j]["low"] for j in (1, 2, 3)) and l <= recent_15m[i+1]["low"]:
             swing_lows.append(l)
 
-    res_above = [h for h in swing_highs if h > last_price * 1.0015]
+    # Кластеризация сопротивлений
+    clusters_res = []
+    for h in set(swing_highs):
+        touches = sum(1 for x in swing_highs if abs(x - h) / h <= 0.005)
+        clusters_res.append((h, touches))
+    confirmed_res = [c for c in clusters_res if c[1] >= 2]
+    confirmed_res.sort(key=lambda x: x[0])
+
+    # Кластеризация поддержек
+    clusters_sup = []
+    for l in set(swing_lows):
+        touches = sum(1 for x in swing_lows if abs(x - l) / l <= 0.005)
+        clusters_sup.append((l, touches))
+    confirmed_sup = [c for c in clusters_sup if c[1] >= 2]
+    confirmed_sup.sort(key=lambda x: x[0], reverse=True)
+
+    return confirmed_res, confirmed_sup
+
+
+def find_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72, window=None):
+    """
+    Поиск ближайших уровней S/R с защитой от слепых зон при тесте в упор.
+    """
+    if window is not None:
+        window_15m = window
+
+    if not candles_15m or len(candles_15m) < 15:
+        return None, 0, None, 0
+
+    last_price = candles_15m[-1]["close"]
+    confirmed_res, confirmed_sup = get_all_sr_levels(candles_15m, candles_1h, window_15m, window_1h)
+
+    # Сопротивление: ищем уровни, которые выше или вплотную к цене (>= -0.1%)
+    res_above = [c for c in confirmed_res if c[0] >= last_price * 0.999]
     nearest_res = None
     res_touches = 0
     if res_above:
-        clusters = []
-        for h in set(res_above):
-            touches = sum(1 for x in res_above if abs(x - h) / h <= 0.005)
-            clusters.append((h, touches))
-        confirmed_res = [c for c in clusters if c[1] >= 2]
-        if confirmed_res:
-            confirmed_res.sort(key=lambda x: x[0])
-            nearest_res, res_touches = confirmed_res[0]
+        res_above.sort(key=lambda x: x[0])
+        nearest_res, res_touches = res_above[0]
 
-    sup_below = [l for l in swing_lows if l < last_price * 0.9985]
+    # Поддержка: ищем уровни, которые ниже или вплотную к цене (<= +0.1%)
+    sup_below = [c for c in confirmed_sup if c[0] <= last_price * 1.001]
     nearest_sup = None
     sup_touches = 0
     if sup_below:
-        clusters_sup = []
-        for l in set(sup_below):
-            touches = sum(1 for x in sup_below if abs(x - l) / l <= 0.005)
-            clusters_sup.append((l, touches))
-        confirmed_sup = [c for c in clusters_sup if c[1] >= 2]
-        if confirmed_sup:
-            confirmed_sup.sort(key=lambda x: x[0], reverse=True)
-            nearest_sup, sup_touches = confirmed_sup[0]
+        sup_below.sort(key=lambda x: x[0], reverse=True)
+        nearest_sup, sup_touches = sup_below[0]
 
     return nearest_res, res_touches, nearest_sup, sup_touches
