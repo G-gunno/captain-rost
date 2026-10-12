@@ -188,7 +188,9 @@ class OrderManagerWorker:
                 "kind": kind, "sector": sector, "tier": tier, "corr": cand.get("corr"),
                 "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode,
                 "nearest_res": res,
+                "res_touches": res_touches,
                 "nearest_sup": sup,
+                "sup_touches": sup_touches,
                 "sl_state": "SHIELD"
             })
             paper.save()
