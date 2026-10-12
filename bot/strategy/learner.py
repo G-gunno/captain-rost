@@ -9,8 +9,11 @@ from bot.core.remote_state import download_state, upload_state
 STATE_FILE = Path("storage/learner.json")
 REMOTE_PATH = "learner.json"
 
-# Убрали паттерны: "mtf_dip", "reversal", "accumulation". Они теперь имеют жесткий скор.
-KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "news_pos", "hype", "indep"]
+# Базовые индикаторы + 5 институциональных моделей ликвидности (Price Action)
+KEYS = [
+    "ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "news_pos", "hype", "indep",
+    "pinbar", "divergence", "vcp", "breakout", "engulfing"
+]
 
 SAT_LIMIT_BASE = 20.0
 SAT_LIMIT_MAX = 30.0
@@ -21,7 +24,7 @@ TIERS = ["TOP20", "MID", "SMALL", "MICRO"]
 
 
 class Learner:
-    """Самообучение: веса + адаптив + сектора + тиры + типы выходов + стиль."""
+    """Самообучение: веса индикаторов и паттернов + адаптив + сектора + тиры + стиль."""
 
     def __init__(self):
         self.weights = {k: 1.0 for k in KEYS}
@@ -45,7 +48,14 @@ class Learner:
         if data is None:
             data = download_state(REMOTE_PATH)
         if data:
-            self.weights.update(data.get("weights", {}))
+            # Обновляем сохраненные веса, сохраняя дефолтные 1.0 для новых паттернов
+            loaded_weights = data.get("weights", {})
+            for k in KEYS:
+                if k in loaded_weights:
+                    self.weights[k] = loaded_weights[k]
+                else:
+                    self.weights[k] = 1.0
+
             self.results = data.get("results", [])
             self.threshold_adj = float(data.get("threshold_adj", 0))
             self.sector_stats = data.get("sector_stats", {})
@@ -115,10 +125,12 @@ class Learner:
         if soft and not win:
             delta *= 0.5
 
+        # Корректируем веса сработавших индикаторов И паттернов
         for k in keys:
             if k in self.weights:
                 self.weights[k] = round(min(1.7, max(0.3, self.weights[k] + delta)), 3)
 
+        # Эквалайзер: удерживаем баланс общей суммы весов
         target = float(len(self.weights))          
         cur = sum(self.weights.values())
         if cur > 0:
@@ -227,8 +239,6 @@ class Learner:
                 if wr < 0.35:
                     wr_adj = 0.25 
                     
-        # === ИНСТИТУЦИОНАЛЬНЫЙ ФИКС: Ограничиваем влияние паники ===
-        # Глобальный порог теперь дышит очень мягко (максимум ±0.25 балла). 
         raw_adj = dyn_adj + wr_adj
         self.threshold_adj = round(max(-0.25, min(0.25, raw_adj * 0.2)), 2)
         
