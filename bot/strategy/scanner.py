@@ -91,9 +91,8 @@ def is_tradable(symbol):
 def raw_max_score(regime):
     m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
     m += learner.weight("indep")
-    m += max(learner.weight("news_pos"), learner.weight("hype"))
-    # Максимальный возможный вклад активного паттерна с его весом
-    m += max(learner.weight("pinbar"), learner.weight("vcp"), learner.weight("breakout")) * 2.5
+    m += learner.weight("news_pos")
+    m += 3.5  # Максимальный потенциальный вклад ключевого паттерна
     m += 0.5   
     return m
 
@@ -243,7 +242,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     w = shadow.signal_windows()
     score, reasons, keys = 0.0, [], []
 
-    # 1. Трендовая база
+    # 1. Трендовый контекст
     if last > e50: score += learner.weight("ema50"); reasons.append("цена выше EMA50"); keys.append("ema50")
     if e21 > e50: score += learner.weight("ema21"); reasons.append("EMA21>EMA50"); keys.append("ema21")
     if e12 > e26: score += learner.weight("impulse"); reasons.append("импульс роста"); keys.append("impulse")
@@ -273,7 +272,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 2.0
             reasons.append(f"сливной объём x{vol_ratio:.1f} (давление продаж)")
 
-    # Штраф за шпильку продаж на хаях
     recent_rejection = False
     for c in candles_15m[-3:]:
         c_rng = c["high"] - c["low"]
@@ -285,26 +283,26 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         score -= 3.0
         reasons.append("отвержение на хаях (шпилька продаж)")
 
-    # Защита от FOMO-перегрева
     if not is_open_pos and a15 > 0 and e21 > 0:
         dist_from_ema = last - e21
         if dist_from_ema > 2.0 * a15:
             score -= 4.0
             reasons.append(f"FOMO-перегрев (+{dist_from_ema/a15:.1f} ATR от EMA21)")
 
-    # ⚡ 4. PRICE ACTION PATTERN ENGINE (Обучаемые паттерны!)
+    # ⚡ 4. СЛОЙ 2: АВТОНОМНЫЕ ТРИГГЕРЫ PRICE ACTION
     detected_patterns = detect_patterns(candles_15m, a15, e50, recent_high)
     matched_modes = []
+    pattern_keys = []
 
     for pat in detected_patterns:
         pkey = pat["key"]
-        p_weight = learner.weight(pkey) * pat["weight"]
-        score += p_weight
-        reasons.append(f"{pat['name']} (+{p_weight:.2f})")
-        keys.append(pkey)
+        p_bonus = pat["base_bonus"] * learner.pattern_multiplier(pkey)
+        score += p_bonus
+        reasons.append(f"{pat['name']} (+{p_bonus:.1f})")
+        pattern_keys.append(pkey)
         matched_modes.append(pat["mode"])
 
-    # Оценка суточного тренда тикера
+    # Динамика 24h
     if 0 < t["change_pct"] < w["chg_hi"]:
         score += learner.weight("chg24h")
         reasons.append(f"24ч +{t['change_pct']:.1f}%")
@@ -353,7 +351,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 1.0
             reasons.append("MTF: ловушка (даунтренд)")
 
-        is_rev_candidate = ("pinbar" in keys or "divergence" in keys)
+        is_rev_candidate = ("pinbar" in pattern_keys or "divergence" in pattern_keys)
         if last_1h < e21_1h and not is_open_pos and not is_rev_candidate:
             score -= 3.5
             reasons.append(f"1H даунтренд (цена < EMA21_1H ${fmt_price(e21_1h)})")
@@ -364,7 +362,8 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         "nearest_sup": nearest_sup, "sup_touches": sup_touches,
         "recent_high": recent_high,
         "recent_low_2h": recent_low_2h,
-        "matched_modes": matched_modes
+        "matched_modes": matched_modes,
+        "patterns": pattern_keys
     }
     return score, reasons, keys, signal_values
 
@@ -406,11 +405,10 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
         if pos_news > neg:
             raw += learner.weight("news_pos")
         elif mentions >= 2:
-            raw += learner.weight("hype")
+            raw += 0.5
 
     score10 = normalize(raw, regime)
 
-    # Определение режима входа по найденным паттернам
     modes = sv_live.get("matched_modes", [])
     if "reversal" in modes: entry_mode_live = "reversal"
     elif "rocket" in modes: entry_mode_live = "rocket"
@@ -567,13 +565,10 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 reasons.append(f"позитивный новостной фон ({pos_news})")
                 keys.append("news_pos")
             elif mentions >= 2:
-                score += learner.weight("hype")
-                reasons.append(f"медиа-хайп ({mentions} упом.)")
-                keys.append("hype")
+                score += 0.5
 
             score10 = (score / raw_max * SCORE_MAX) if raw_max > 0 else 0.0
 
-            # Классификация режима на основе активных паттернов
             modes = signal_values.get("matched_modes", [])
             if "reversal" in modes: entry_mode = "reversal"
             elif "rocket" in modes: entry_mode = "rocket"
@@ -603,6 +598,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 "corr": round(corr, 2), "atr_pct": round(atr_pct, 2),
                 "kind": kind, "sector": sector, "tier": tier,
                 "signal_values": signal_values,
+                "patterns": signal_values.get("patterns", []),
                 "is_momentum": (entry_mode == "rocket"),
                 "entry_mode": entry_mode,
                 "nearest_res": signal_values.get("nearest_res"),
