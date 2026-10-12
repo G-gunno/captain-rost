@@ -28,27 +28,20 @@ def detect_patterns(candles_15m: list, a15: float, e50: float, recent_high: floa
     lower_wick = min(last["open"], last["close"]) - last["low"]
     upper_wick = last["high"] - max(last["open"], last["close"])
 
-    # Базовый средний объем за 20 свечей
     vols = [c["volume"] for c in candles_15m]
     avg_vol = sum(vols[-21:-1]) / 20 if len(vols) >= 21 else (sum(vols) / len(vols))
     vol_ratio = (last["volume"] / avg_vol) if avg_vol > 0 else 1.0
 
-    # =========================================================================
-    # 1. SPRING PINBAR (Пин-бар выкупа на дне / Спринг)
-    # =========================================================================
-    # Длинный хвост снизу (>= 45% от свечи), закрытие в верхней половине, объем от 1.2x
+    # 1. SPRING PINBAR (Пин-бар выкупа на дне)
     if (lower_wick / c_range) >= 0.45 and (last["close"] >= last["low"] + 0.45 * c_range) and vol_ratio >= 1.2:
         patterns.append({
             "key": "pinbar",
             "name": f"Пин-бар выкупа (хвост {lower_wick/c_range*100:.0f}%, vol x{vol_ratio:.1f})",
             "mode": "reversal",
-            "weight": 2.5
+            "base_bonus": 3.0
         })
 
-    # =========================================================================
     # 2. BULLISH DIVERGENCE (Бычья дивергенция RSI)
-    # =========================================================================
-    # Поиск двух последовательных минимумов цены: цена обновляет low, а RSI растет
     if len(candles_15m) >= 25:
         rsi_now = rsi(closes)
         rsi_past = rsi(closes[:-6])
@@ -60,13 +53,10 @@ def detect_patterns(candles_15m: list, a15: float, e50: float, recent_high: floa
                 "key": "divergence",
                 "name": f"Бычья дивергенция RSI ({rsi_past:.0f} -> {rsi_now:.0f})",
                 "mode": "reversal",
-                "weight": 2.5
+                "base_bonus": 2.5
             })
 
-    # =========================================================================
     # 3. VCP COMPRESSION (Сжатие волатильности по Вайкоффу на EMA50)
-    # =========================================================================
-    # Консолидация в узком диапазоне возле EMA50 на сухих объемах
     if e50 > 0 and len(candles_15m) >= 8:
         is_near_ema50 = 0.998 <= (last["close"] / e50) <= 1.012
         recent_box = (max(c["high"] for c in candles_15m[-5:]) - min(c["low"] for c in candles_15m[-5:])) / last["close"]
@@ -78,13 +68,10 @@ def detect_patterns(candles_15m: list, a15: float, e50: float, recent_high: floa
                 "key": "vcp",
                 "name": f"Сжатие VCP на EMA50 (бокс {recent_box*100:.1f}%)",
                 "mode": "sniper",
-                "weight": 2.5
+                "base_bonus": 3.0
             })
 
-    # =========================================================================
     # 4. CLEAN BREAKOUT (Истинный импульсный пробой)
-    # =========================================================================
-    # Пробой хая без длинной верхней шпильки (верхний хвост <= 25%), полнотелый бар
     if recent_high > 0 and last["close"] >= recent_high * 0.998:
         solid_body = (body / c_range) >= 0.55 if c_range > 0 else False
         clean_top = (upper_wick / c_range) <= 0.25 if c_range > 0 else False
@@ -93,13 +80,10 @@ def detect_patterns(candles_15m: list, a15: float, e50: float, recent_high: floa
                 "key": "breakout",
                 "name": f"Импульсный пробой (чистый бар, vol x{vol_ratio:.1f})",
                 "mode": "rocket",
-                "weight": 2.5
+                "base_bonus": 3.0
             })
 
-    # =========================================================================
-    # 5. FAILED AUCTION (Ловушка продавца / Бычье поглощение)
-    # =========================================================================
-    # Предыдущая свеча красная, текущая зеленая и полностью перекрывает тело предыдущей
+    # 5. FAILED AUCTION (Бычье поглощение / Ловушка продавца)
     prev_red = prev["close"] < prev["open"]
     if prev_red and is_green:
         engulfs_body = last["close"] >= prev["open"] and last["open"] <= prev["close"]
@@ -108,7 +92,7 @@ def detect_patterns(candles_15m: list, a15: float, e50: float, recent_high: floa
                 "key": "engulfing",
                 "name": "Бычье поглощение (ловушка продавцов)",
                 "mode": "sniper",
-                "weight": 2.0
+                "base_bonus": 2.0
             })
 
     return patterns
