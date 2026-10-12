@@ -485,7 +485,15 @@ async def cmd_status(update, context):
                 
                 tp_pct = (pos["tp"] - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
                 sl_pct = (pos["sl"] - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
-                sl_str = f"📈 <b>{fmt_price(pos['sl'])} ({fmt_pct(sl_pct)})</b>" if sl_pct >= 0.5 else f"🔒 <b>{fmt_price(pos['sl'])} ({fmt_pct(sl_pct)})</b>" if sl_pct >= 0.15 else f"🛡 {fmt_price(pos['sl'])} ({fmt_pct(sl_pct)})"
+                
+                state_map = {
+                    "SHIELD": "🛡 Защита",
+                    "BREAKEVEN": "🔒 БУ",
+                    "PROFIT_LOCK": "💼 Профит-лок",
+                    "TRAILING_RUNNER": "📈 Трейлинг"
+                }
+                sl_tag = state_map.get(pos.get("sl_state", "SHIELD"), "🛡")
+                sl_str = f"{sl_tag} <b>{fmt_price(pos['sl'])} ({fmt_pct(sl_pct)})</b>"
                 msg.append(f"   🎯 {fmt_price(pos['tp'])} ({fmt_pct(tp_pct)}) · {sl_str}")
         else: msg.append("📦 <b>Позиции</b>: нет")
         msg.append("")
