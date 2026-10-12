@@ -116,14 +116,31 @@ class ExecutionRiskWorker:
                         "urgent": False
                     })
                 else:
-                    ex = paper._sell(sym, last, "TP ✅", regime_now=bot_state.current_regime)
-                    paper.log_event(sym, "tp_runner", last, f"TP RUNNER (+{ex['pnl_pct']:.1f}%)", mode="TP RUNNER 🚀", tp=last, sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
-                    shadow.mark_success(sym)
-                    bot_state.set_cooldown(sym, 180)
-                    self.bus.publish("NOTIFY", {
-                        "text": f"🎯 <b>TP RUNNER</b> · {pair_html(sym, ex)} · ✅\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}",
-                        "urgent": False
-                    })
+                    # ⚡ Проверка следующего сопротивления перед закрытием раннера
+                    candles_15m = await market_data.get_kline(sym, "15", 120)
+                    candles_1h = await market_data.get_kline(sym, "60", 250)
+                    next_target = calc_runner_target(sym, last, candles_15m, candles_1h)
+                    
+                    if next_target > pos["tp"] * 1.008:
+                        old_tp = pos["tp"]
+                        pos["tp"] = next_target
+                        pos["sl"] = max(pos["sl"], old_tp * 0.997)
+                        pos["sl_state"] = "TRAILING_RUNNER"
+                        state_changed = True
+                        paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP Runner поднят к следующей стене", mode="TP поднят 🎯", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                        self.bus.publish("NOTIFY", {
+                            "text": f"🎯 <b>TP Runner поднят к следующему уровню</b> · {pair_html(sym, pos)}\n🎯 Новая цель: {fmt_price(pos['tp'])} · 🛡 Стоп: {fmt_price(pos['sl'])}",
+                            "urgent": False
+                        })
+                    else:
+                        ex = paper._sell(sym, last, "TP ✅", regime_now=bot_state.current_regime)
+                        paper.log_event(sym, "tp_runner", last, f"TP RUNNER (+{ex['pnl_pct']:.1f}%)", mode="TP RUNNER 🚀", tp=last, sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                        shadow.mark_success(sym)
+                        bot_state.set_cooldown(sym, 180)
+                        self.bus.publish("NOTIFY", {
+                            "text": f"🎯 <b>TP RUNNER</b> · {pair_html(sym, ex)} · ✅\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}",
+                            "urgent": False
+                        })
                 continue
 
             # ⚡ ТРЕЙЛИНГ И МАШИНА СОСТОЯНИЙ СТОПА ЧЕРЕЗ RISK МОДУЛЬ
