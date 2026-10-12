@@ -10,6 +10,7 @@ from bot.exchange.paper_exchange import paper
 from bot.strategy.indicators import ema, rsi, atr, find_sr_levels
 from bot.strategy.learner import learner
 from bot.strategy.shadow import shadow
+from bot.strategy.patterns import detect_patterns
 from bot.news.cmc import (get_coin_name, get_sectors_for_pool,
                           get_ranks_for_pool, tier_of, TIER_EMOJI, fetch_missing_names)
 from bot.news.rss_news import fetch_news_cache, fetch_listings_cache, check_sentiment
@@ -91,7 +92,8 @@ def raw_max_score(regime):
     m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
     m += learner.weight("indep")
     m += max(learner.weight("news_pos"), learner.weight("hype"))
-    m += 3.5   
+    # Максимальный возможный вклад активного паттерна с его весом
+    m += max(learner.weight("pinbar"), learner.weight("vcp"), learner.weight("breakout")) * 2.5
     m += 0.5   
     return m
 
@@ -229,20 +231,24 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
     e12, e26 = ema(closes, 12)[-1], ema(closes, 26)[-1]
     r = rsi(closes)
+    a15 = atr(candles_15m)
 
     vols = [c["volume"] for c in candles_15m]
     base_vol = sum(vols[-21:-1]) / 20 if len(vols) > 21 else (sum(vols) / max(1, len(vols)))
     vol_ratio = vols[-1] / base_vol if base_vol else 1.0
 
+    recent_high = max(c["high"] for c in candles_15m[-24:]) if len(candles_15m) >= 24 else max(c["high"] for c in candles_15m)
+    recent_low_2h = min(c["low"] for c in candles_15m[-8:]) if len(candles_15m) >= 8 else min(c["low"] for c in candles_15m)
+
     w = shadow.signal_windows()
     score, reasons, keys = 0.0, [], []
 
-    # Базовые скользящие
+    # 1. Трендовая база
     if last > e50: score += learner.weight("ema50"); reasons.append("цена выше EMA50"); keys.append("ema50")
     if e21 > e50: score += learner.weight("ema21"); reasons.append("EMA21>EMA50"); keys.append("ema21")
     if e12 > e26: score += learner.weight("impulse"); reasons.append("импульс роста"); keys.append("impulse")
 
-    # Баллы за RSI (тренд или паника)
+    # 2. RSI
     if 40 <= r <= w["rsi_hi"]: 
         score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
     elif r < 35:
@@ -250,12 +256,11 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     elif r > w["rsi_hi"]: 
         score -= 1.5; reasons.append(f"перегрев RSI {r:.0f}") 
 
+    # 3. Объем
     last_candle = candles_15m[-1]
     is_green = last_candle["close"] >= last_candle["open"]
     c_range = last_candle["high"] - last_candle["low"]
-    lower_wick = (min(last_candle["open"], last_candle["close"]) - last_candle["low"])
-    upper_wick = (last_candle["high"] - max(last_candle["open"], last_candle["close"]))
-
+    lower_wick = min(last_candle["open"], last_candle["close"]) - last_candle["low"]
     is_panic_dip = (t["change_pct"] <= -6.0 or r < 35)
 
     if vol_ratio > w["vol_lo"]:
@@ -268,7 +273,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 2.0
             reasons.append(f"сливной объём x{vol_ratio:.1f} (давление продаж)")
 
-    # Штраф за шпильку отвержения на хаях
+    # Штраф за шпильку продаж на хаях
     recent_rejection = False
     for c in candles_15m[-3:]:
         c_rng = c["high"] - c["low"]
@@ -276,58 +281,42 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         if c_rng > 0 and (c_w / c_rng) > 0.45:
             recent_rejection = True
             break
-            
     if recent_rejection and not is_open_pos:
         score -= 3.0
         reasons.append("отвержение на хаях (шпилька продаж)")
 
-    a15 = atr(candles_15m)
-    if not is_open_pos:
-        if a15 > 0 and e21 > 0:
-            dist_from_ema = last - e21
-            if dist_from_ema > 2.0 * a15:
-                score -= 4.0  
-                reasons.append(f"FOMO-перегрев (+{dist_from_ema/a15:.1f} ATR от EMA21)")
+    # Защита от FOMO-перегрева
+    if not is_open_pos and a15 > 0 and e21 > 0:
+        dist_from_ema = last - e21
+        if dist_from_ema > 2.0 * a15:
+            score -= 4.0
+            reasons.append(f"FOMO-перегрев (+{dist_from_ema/a15:.1f} ATR от EMA21)")
 
-    # ⚡ ПАТТЕРН 1: РАКЕТА (MOMENTUM) — проверка свежести импульса последних 2 часов!
-    recent_2h_high = max(c["high"] for c in candles_15m[-8:]) if len(candles_15m) >= 8 else last
-    recent_2h_low = min(c["low"] for c in candles_15m[-8:]) if len(candles_15m) >= 8 else last
-    pump_range = recent_2h_high - recent_2h_low
-    deep_pullback_from_pump = pump_range > 0 and (recent_2h_high - last) / pump_range > 0.35
+    # ⚡ 4. PRICE ACTION PATTERN ENGINE (Обучаемые паттерны!)
+    detected_patterns = detect_patterns(candles_15m, a15, e50, recent_high)
+    matched_modes = []
 
-    # Запрещаем ракету, если импульс угас или свеча имеет сливной верхний хвост
-    has_ugly_top_wick = c_range > 0 and (upper_wick / c_range) >= 0.40
-    is_rocket_setup = (
-        e12 > e26 and 52 <= r <= 78 and vol_ratio >= 1.35 and 
-        last > e21 > e50 and not deep_pullback_from_pump and not has_ugly_top_wick
-    )
-    if is_rocket_setup and not is_open_pos:
-        score += 3.0
-        reasons.append(f"СВЕЖИЙ ИМПУЛЬС (ракета vol x{vol_ratio:.1f})")
-        keys.append("rocket_momentum")
+    for pat in detected_patterns:
+        pkey = pat["key"]
+        p_weight = learner.weight(pkey) * pat["weight"]
+        score += p_weight
+        reasons.append(f"{pat['name']} (+{p_weight:.2f})")
+        keys.append(pkey)
+        matched_modes.append(pat["mode"])
 
-    # ⚡ ПАТТЕРН 2: ТИХОЕ НАКОПЛЕНИЕ (QUIET ACCUMULATION)
-    is_near_ema50 = (0.998 <= (last / e50) <= 1.012)
-    is_quiet_vol = vol_ratio < 1.15
-    rsi_cool = 42 <= r <= 56
-    no_recent_pump = t["change_pct"] < 5.0      
-    trend_ok = e21 >= e50             
+    # Оценка суточного тренда тикера
+    if 0 < t["change_pct"] < w["chg_hi"]:
+        score += learner.weight("chg24h")
+        reasons.append(f"24ч +{t['change_pct']:.1f}%")
+        keys.append("chg24h")
+    elif t["change_pct"] >= w["chg_hi"]:
+        score -= 1.0
+        reasons.append(f"памп +{t['change_pct']:.1f}% (уже поздно)")
 
-    e50_past = ema(closes[:-5], 50)[-1] if len(closes) > 55 else e50
-    ema50_flat_or_rising = e50 >= (e50_past * 0.999)
+    if t["quote_volume"] < 500_000:
+        score -= 1.0
 
-    not_falling_streak = not (len(closes) >= 3 and closes[-1] < closes[-2] < closes[-3])
-    recent_box = (max(c["high"] for c in candles_15m[-4:]) - min(c["low"] for c in candles_15m[-4:])) / last if last > 0 else 1.0
-    is_tight_box = recent_box <= 0.025
-    not_dump_candle = not (last_candle["close"] < last_candle["open"] and (last_candle["open"] - last_candle["close"]) > 0.5 * a15)
-
-    if (is_near_ema50 and is_quiet_vol and rsi_cool and no_recent_pump and 
-        trend_ok and ema50_flat_or_rising and not_falling_streak and is_tight_box and not_dump_candle):
-        score += 3.5  
-        reasons.append("тихая консолидация на EMA50 (накопление)")
-        keys.append("accumulation")
-
-    # Уровни S/R
+    # Мультитаймфрейм уровни S/R
     nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_15m, candles_1h)
     
     if nearest_res and res_touches >= 2 and a15 > 0 and not is_open_pos:
@@ -342,26 +331,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score += 1.5
             reasons.append(f"отскок от поддержки ${fmt_price(nearest_sup)} ({sup_touches}x)")
             keys.append("support_bounce")
-
-    # ⚡ ПАТТЕРН 3: ЛОВЕЦ ДНА (REVERSAL) — строгий Price Action фильтр!
-    # Запрещено входить на полнотелых красных свечах посреди водопада!
-    is_hammer_or_pinbar = c_range > 0 and (lower_wick / c_range) >= 0.45 and (last_candle["close"] >= last_candle["low"] + 0.45 * c_range)
-    is_green_reversal_bar = is_green and last > closes[-2]
-    confirmed_price_action_stop = is_hammer_or_pinbar or is_green_reversal_bar
-
-    is_panic_level = (t["change_pct"] <= -6.0 and r <= 35) or (t["change_pct"] <= -12.0 and vol_ratio >= 1.8)
-
-    if is_panic_level and confirmed_price_action_stop and not is_open_pos:
-        score += 4.0
-        reasons.append(f"ОТКУП ДНА (разворотный бар vol x{vol_ratio:.1f})")
-        keys.append("reversal")
-    else:
-        if 0 < t["change_pct"] < w["chg_hi"]: 
-            score += learner.weight("chg24h"); reasons.append(f"24ч +{t['change_pct']:.1f}%"); keys.append("chg24h")
-        elif t["change_pct"] >= w["chg_hi"]: 
-            score -= 1.0; reasons.append(f"памп +{t['change_pct']:.1f}% (уже поздно)") 
-
-    if t["quote_volume"] < 500_000: score -= 1
 
     # Защита от 1H даунтренда
     if candles_1h and len(candles_1h) >= 25:
@@ -384,20 +353,18 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 1.0
             reasons.append("MTF: ловушка (даунтренд)")
 
-        is_rev_candidate = ("reversal" in keys)
+        is_rev_candidate = ("pinbar" in keys or "divergence" in keys)
         if last_1h < e21_1h and not is_open_pos and not is_rev_candidate:
             score -= 3.5
             reasons.append(f"1H даунтренд (цена < EMA21_1H ${fmt_price(e21_1h)})")
-
-    recent_high = max(c["high"] for c in candles_15m[-24:]) if len(candles_15m) >= 24 else max(c["high"] for c in candles_15m)
-    recent_low_2h = min(c["low"] for c in candles_15m[-8:]) if len(candles_15m) >= 8 else min(c["low"] for c in candles_15m)
 
     signal_values = {
         "rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio,
         "nearest_res": nearest_res, "res_touches": res_touches,
         "nearest_sup": nearest_sup, "sup_touches": sup_touches,
         "recent_high": recent_high,
-        "recent_low_2h": recent_low_2h
+        "recent_low_2h": recent_low_2h,
+        "matched_modes": matched_modes
     }
     return score, reasons, keys, signal_values
 
@@ -443,11 +410,10 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
 
     score10 = normalize(raw, regime)
 
-    is_reversal = "reversal" in keys_live
-    is_momentum = "rocket_momentum" in keys_live
-
-    if is_reversal: entry_mode_live = "reversal"
-    elif is_momentum: entry_mode_live = "rocket"
+    # Определение режима входа по найденным паттернам
+    modes = sv_live.get("matched_modes", [])
+    if "reversal" in modes: entry_mode_live = "reversal"
+    elif "rocket" in modes: entry_mode_live = "rocket"
     else: entry_mode_live = "sniper"
 
     if deriv_t:
@@ -607,11 +573,10 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
             score10 = (score / raw_max * SCORE_MAX) if raw_max > 0 else 0.0
 
-            is_reversal = "reversal" in keys
-            is_momentum = "rocket_momentum" in keys
-
-            if is_reversal: entry_mode = "reversal"
-            elif is_momentum: entry_mode = "rocket"
+            # Классификация режима на основе активных паттернов
+            modes = signal_values.get("matched_modes", [])
+            if "reversal" in modes: entry_mode = "reversal"
+            elif "rocket" in modes: entry_mode = "rocket"
             else: entry_mode = "sniper"
 
             deriv_t = deriv_tickers.get(sym)
@@ -638,7 +603,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 "corr": round(corr, 2), "atr_pct": round(atr_pct, 2),
                 "kind": kind, "sector": sector, "tier": tier,
                 "signal_values": signal_values,
-                "is_momentum": is_momentum,
+                "is_momentum": (entry_mode == "rocket"),
                 "entry_mode": entry_mode,
                 "nearest_res": signal_values.get("nearest_res"),
                 "res_touches": signal_values.get("res_touches", 0),
