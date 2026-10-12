@@ -52,7 +52,7 @@ class OrderManagerWorker:
             sym = cand["symbol"]
             base = sym[:-4]
 
-            # ⚡ 1. ПРЕДВАРИТЕЛЬНЫЙ НОВОСТНОЙ ФИЛЬТР (ДО ЛЮБЫХ ДЕЙСТВИЙ)
+            # Предварительный фильтр новостей
             name = await get_coin_name(base)
             neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
             if neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33):
@@ -60,7 +60,8 @@ class OrderManagerWorker:
                 bot_state.set_cooldown(sym, 7200)
                 continue
 
-            is_accum = "accumulation" in cand.get("reason_keys", [])
+            patterns = cand.get("patterns", [])
+            is_accum = "vcp" in patterns
             if bot_state.is_on_cooldown(sym) and not is_accum:
                 logger.debug(f"OrderManager: {sym} пропущен (кулдаун)")
                 continue
@@ -72,7 +73,7 @@ class OrderManagerWorker:
             kind = cand.get("kind", "core")
             sector = cand.get("sector", "Other")
             tier = cand.get("tier") or "SMALL"
-            entry_mode = cand.get("entry_mode", "rocket" if cand.get("is_momentum") else "sniper")
+            entry_mode = cand.get("entry_mode", "sniper")
             is_mom = cand.get("is_momentum", False)
 
             thr = thrs.get(entry_mode, 6.0)
@@ -83,7 +84,6 @@ class OrderManagerWorker:
             ideal_entry = cand["last"] * (1 + off)
             entry = ideal_entry if is_mom else min(ideal_entry, bid1)
 
-            # Правило пола поддержки
             sup = cand.get("nearest_sup")
             sup_touches = cand.get("sup_touches", 0)
             if sup and sup_touches >= 2 and not is_mom:
@@ -95,7 +95,6 @@ class OrderManagerWorker:
             a = cand["atr"]
             if a <= 0: continue
 
-            # ⚡ 2. ЕДИНЫЙ РАСЧЕТ SL И TP ЧЕРЕЗ МОДУЛЬ RISK
             res = cand.get("nearest_res")
             res_touches = cand.get("res_touches", 0)
 
@@ -124,7 +123,7 @@ class OrderManagerWorker:
                     logger.debug(f"OrderManager: {sym} пропущен (лимит сателлитов {sat_limit}%)")
                     continue
 
-            # Проверка лимитов секторов и ротация
+            # Ротация слабых позиций
             planned_sells, planned_cancels = [], []
             lim = other_lim if sector == "Other" else sec_lim
             sector_count = sum(1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector)
@@ -191,7 +190,8 @@ class OrderManagerWorker:
                 "res_touches": res_touches,
                 "nearest_sup": sup,
                 "sup_touches": sup_touches,
-                "sl_state": "SHIELD"
+                "sl_state": "SHIELD",
+                "patterns": patterns
             })
             paper.save()
 
