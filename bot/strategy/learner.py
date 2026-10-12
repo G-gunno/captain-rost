@@ -9,11 +9,16 @@ from bot.core.remote_state import download_state, upload_state
 STATE_FILE = Path("storage/learner.json")
 REMOTE_PATH = "learner.json"
 
-# Базовые индикаторы + 5 институциональных моделей ликвидности (Price Action)
-KEYS = [
-    "ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "news_pos", "hype", "indep",
-    "pinbar", "divergence", "vcp", "breakout", "engulfing"
-]
+# Чистые базовые метрики контекста рынка (строго 8 параметров)
+KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "indep", "news_pos"]
+
+PATTERN_NAMES = {
+    "pinbar": "🔨 Пин-бар выкупа (Spring)",
+    "divergence": "🧲 Дивергенция RSI",
+    "vcp": "📦 Сжатие волатильности (VCP)",
+    "breakout": "🚀 Импульсный пробой",
+    "engulfing": "⚡ Бычье поглощение"
+}
 
 SAT_LIMIT_BASE = 20.0
 SAT_LIMIT_MAX = 30.0
@@ -24,7 +29,7 @@ TIERS = ["TOP20", "MID", "SMALL", "MICRO"]
 
 
 class Learner:
-    """Самообучение: веса индикаторов и паттернов + адаптив + сектора + тиры + стиль."""
+    """Самообучение: веса контекста + автономный учет результативности паттернов."""
 
     def __init__(self):
         self.weights = {k: 1.0 for k in KEYS}
@@ -35,6 +40,7 @@ class Learner:
         self.exit_stats = {}
         self.kind_stats = {}
         self.entry_stats = {}
+        self.pattern_stats = {}
         self._last_upload = 0.0
         self._load()
 
@@ -48,8 +54,8 @@ class Learner:
         if data is None:
             data = download_state(REMOTE_PATH)
         if data:
-            # Обновляем сохраненные веса, сохраняя дефолтные 1.0 для новых паттернов
             loaded_weights = data.get("weights", {})
+            # Очищаем старые ключи паттернов из эквалайзера, оставляя только базовые метрики
             for k in KEYS:
                 if k in loaded_weights:
                     self.weights[k] = loaded_weights[k]
@@ -63,7 +69,8 @@ class Learner:
             self.exit_stats = data.get("exit_stats", {})
             self.kind_stats = data.get("kind_stats", {})
             self.entry_stats = data.get("entry_stats", {})
-            logger.info("learner: опыт загружен")
+            self.pattern_stats = data.get("pattern_stats", {})
+            logger.info("learner: опыт загружен (2-слойная архитектура активна)")
 
     def save(self):
         payload = {
@@ -75,6 +82,7 @@ class Learner:
             "exit_stats": {k: v[-50:] for k, v in self.exit_stats.items()},
             "kind_stats": {k: v[-50:] for k, v in self.kind_stats.items()},
             "entry_stats": {k: v[-50:] for k, v in self.entry_stats.items()},
+            "pattern_stats": {k: v[-50:] for k, v in self.pattern_stats.items()},
         }
         try:
             STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -89,9 +97,11 @@ class Learner:
         return self.weights.get(key, 1.0)
 
     def record(self, keys, win, pnl_pct=0.0, sector=None, tier=None,
-               exit_type=None, runner_bonus=0.0, kind=None, soft=False, entry_mode=None):
+               exit_type=None, runner_bonus=0.0, kind=None, soft=False, 
+               entry_mode=None, patterns=None):
         self.results.append(1 if win else 0)
         self.results = self.results[-200:]
+        
         if sector:
             hist = self.sector_stats.setdefault(sector, [])
             hist.append(round(pnl_pct, 2))
@@ -113,6 +123,13 @@ class Learner:
             em_h.append(round(pnl_pct, 2))
             self.entry_stats[entry_mode] = em_h[-50:]
 
+        # ⚡ Автономная запись результативности паттернов
+        if patterns:
+            for p in patterns:
+                ph = self.pattern_stats.setdefault(p, [])
+                ph.append(round(pnl_pct, 2))
+                self.pattern_stats[p] = ph[-50:]
+
         abs_pnl = abs(pnl_pct)
         if abs_pnl >= 3.0:
             delta = 0.10 if win else -0.10
@@ -125,13 +142,13 @@ class Learner:
         if soft and not win:
             delta *= 0.5
 
-        # Корректируем веса сработавших индикаторов И паттернов
+        # Корректируем ТОЛЬКО базовые метрики контекста
         for k in keys:
             if k in self.weights:
                 self.weights[k] = round(min(1.7, max(0.3, self.weights[k] + delta)), 3)
 
-        # Эквалайзер: удерживаем баланс общей суммы весов
-        target = float(len(self.weights))          
+        # Эквалайзер сохраняет баланс базовой корзины (строго сумма 8.0)
+        target = float(len(self.weights))
         cur = sum(self.weights.values())
         if cur > 0:
             k = target / cur
@@ -142,8 +159,17 @@ class Learner:
 
         self.save()
         logger.info(f"learner: win={win} pnl={pnl_pct:+.2f}% delta={delta:+.3f} "
-                    f"exit={exit_type} runner={runner_bonus:.1f}% soft={soft} "
-                    f"keys={keys} sector={sector} tier={tier} kind={kind}")
+                    f"keys={keys} patterns={patterns} sector={sector} tier={tier}")
+
+    def pattern_multiplier(self, pattern_key: str) -> float:
+        """Динамический множитель силы паттерна: от 0.60x до 1.40x."""
+        hist = self.pattern_stats.get(pattern_key) or []
+        if len(hist) < 3:
+            return 1.0
+        wr = sum(1 for p in hist if p > 0) / len(hist)
+        avg = sum(hist) / len(hist)
+        mult = 1.0 + (wr - 0.5) * 0.5 + min(0.2, max(-0.2, avg * 0.05))
+        return round(max(0.60, min(1.40, mult)), 2)
 
     def sector_bias(self, sector):
         hist = self.sector_stats.get(sector) or []
@@ -187,6 +213,7 @@ class Learner:
         self.exit_stats = {}
         self.kind_stats = {}
         self.entry_stats = {}
+        self.pattern_stats = {}
         self.save()
         logger.info("learner: опыт сброшен")
 
@@ -198,6 +225,7 @@ class Learner:
         self.exit_stats = {}
         self.kind_stats = {}
         self.entry_stats = {}
+        self.pattern_stats = {}
         self.save()
         logger.info("learner: статистика сброшена (веса сохранены)")
 
@@ -241,7 +269,6 @@ class Learner:
                     
         raw_adj = dyn_adj + wr_adj
         self.threshold_adj = round(max(-0.25, min(0.25, raw_adj * 0.2)), 2)
-        
         self.save()
         return self.threshold_adj
 
