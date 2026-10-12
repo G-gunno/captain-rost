@@ -229,8 +229,13 @@ class PositionManagerWorker:
                 order["sl"] = sl
                 order["tp"] = tp
 
+            order["nearest_sup"] = live_sup
+            order["sup_touches"] = live_sup_touches
             order["nearest_res"] = live_res
             order["res_touches"] = live_res_touches
+
+            if action_type:
+                order["created"] = current_time
                 paper.save()
                 msg_desc = "подтяжка к сжатию (VCP)" if action_type == "hunt_vcp" else f"сдвиг на {dev_pct:.2f}%"
                 paper.log_event(sym, "order_moved", order["price"], f"Сдвиг: {action_type}", tp=order["tp"], sl=order["sl"], sup=live_sup, res=live_res)
