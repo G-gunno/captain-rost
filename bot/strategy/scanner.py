@@ -91,7 +91,7 @@ def raw_max_score(regime):
     m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
     m += learner.weight("indep")
     m += max(learner.weight("news_pos"), learner.weight("hype"))
-    m += 3.5   # Максимальный вес паттерна (накопление / ракета / реверсал)
+    m += 3.5   
     m += 0.5   
     return m
 
@@ -237,42 +237,43 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     w = shadow.signal_windows()
     score, reasons, keys = 0.0, [], []
 
-    # Базовые трендовые индикаторы
+    # Базовые скользящие
     if last > e50: score += learner.weight("ema50"); reasons.append("цена выше EMA50"); keys.append("ema50")
     if e21 > e50: score += learner.weight("ema21"); reasons.append("EMA21>EMA50"); keys.append("ema21")
     if e12 > e26: score += learner.weight("impulse"); reasons.append("импульс роста"); keys.append("impulse")
 
-    # ⚡ 1. РАЗБЛОКИРОВКА RSI: баллы за тренд ИЛИ за перепроданность на дне
+    # Баллы за RSI (тренд или паника)
     if 40 <= r <= w["rsi_hi"]: 
         score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
     elif r < 35:
-        # Паника на дне даёт баллы ловцу ножей!
         score += learner.weight("rsi"); reasons.append(f"перепроданность RSI {r:.0f}"); keys.append("rsi")
     elif r > w["rsi_hi"]: 
         score -= 1.5; reasons.append(f"перегрев RSI {r:.0f}") 
 
-    # ⚡ 2. НАПРАВЛЕНИЕ ОБЪЁМА (не штрафовать панический объём на дне)
     last_candle = candles_15m[-1]
-    is_green_candle = last_candle["close"] >= last_candle["open"]
-    candle_range = last_candle["high"] - last_candle["low"]
+    is_green = last_candle["close"] >= last_candle["open"]
+    c_range = last_candle["high"] - last_candle["low"]
+    lower_wick = (min(last_candle["open"], last_candle["close"]) - last_candle["low"])
+    upper_wick = (last_candle["high"] - max(last_candle["open"], last_candle["close"]))
+
     is_panic_dip = (t["change_pct"] <= -6.0 or r < 35)
 
     if vol_ratio > w["vol_lo"]:
-        has_bottom_wick_buy = candle_range > 0 and (last_candle["close"] >= last_candle["low"] + 0.6 * candle_range)
-        if is_green_candle or has_bottom_wick_buy:
+        has_bottom_wick = c_range > 0 and (lower_wick / c_range) >= 0.40
+        if is_green or has_bottom_wick:
             score += learner.weight("volume")
             reasons.append(f"объём покупок x{vol_ratio:.1f}")
             keys.append("volume")
         elif not is_panic_dip:
-            # Штрафуем за сливной объём только если это не откуп паники
             score -= 2.0
             reasons.append(f"сливной объём x{vol_ratio:.1f} (давление продаж)")
 
+    # Штраф за шпильку отвержения на хаях
     recent_rejection = False
     for c in candles_15m[-3:]:
         c_rng = c["high"] - c["low"]
-        c_wick = c["high"] - max(c["close"], c["open"])
-        if c_rng > 0 and (c_wick / c_rng) > 0.45:
+        c_w = c["high"] - max(c["close"], c["open"])
+        if c_rng > 0 and (c_w / c_rng) > 0.45:
             recent_rejection = True
             break
             
@@ -288,14 +289,24 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
                 score -= 4.0  
                 reasons.append(f"FOMO-перегрев (+{dist_from_ema/a15:.1f} ATR от EMA21)")
 
-    # ⚡ 3. ПАТТЕРН 1: РАКЕТА (MOMENTUM BREAKOUT) — получает паритетный бонус +3.0 балла!
-    is_rocket_setup = (e12 > e26 and 52 <= r <= 78 and t["change_pct"] >= 2.0 and vol_ratio >= 1.35 and last > e21 > e50)
+    # ⚡ ПАТТЕРН 1: РАКЕТА (MOMENTUM) — проверка свежести импульса последних 2 часов!
+    recent_2h_high = max(c["high"] for c in candles_15m[-8:]) if len(candles_15m) >= 8 else last
+    recent_2h_low = min(c["low"] for c in candles_15m[-8:]) if len(candles_15m) >= 8 else last
+    pump_range = recent_2h_high - recent_2h_low
+    deep_pullback_from_pump = pump_range > 0 and (recent_2h_high - last) / pump_range > 0.35
+
+    # Запрещаем ракету, если импульс угас или свеча имеет сливной верхний хвост
+    has_ugly_top_wick = c_range > 0 and (upper_wick / c_range) >= 0.40
+    is_rocket_setup = (
+        e12 > e26 and 52 <= r <= 78 and vol_ratio >= 1.35 and 
+        last > e21 > e50 and not deep_pullback_from_pump and not has_ugly_top_wick
+    )
     if is_rocket_setup and not is_open_pos:
         score += 3.0
-        reasons.append(f"ИМПУЛЬСНЫЙ ПРОРЫВ (ракета vol x{vol_ratio:.1f})")
+        reasons.append(f"СВЕЖИЙ ИМПУЛЬС (ракета vol x{vol_ratio:.1f})")
         keys.append("rocket_momentum")
 
-    # ⚡ 4. ПАТТЕРН 2: НАКОПЛЕНИЕ (QUIET ACCUMULATION)
+    # ⚡ ПАТТЕРН 2: ТИХОЕ НАКОПЛЕНИЕ (QUIET ACCUMULATION)
     is_near_ema50 = (0.998 <= (last / e50) <= 1.012)
     is_quiet_vol = vol_ratio < 1.15
     rsi_cool = 42 <= r <= 56
@@ -306,8 +317,8 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     ema50_flat_or_rising = e50 >= (e50_past * 0.999)
 
     not_falling_streak = not (len(closes) >= 3 and closes[-1] < closes[-2] < closes[-3])
-    recent_range = (max(c["high"] for c in candles_15m[-4:]) - min(c["low"] for c in candles_15m[-4:])) / last if last > 0 else 1.0
-    is_tight_box = recent_range <= 0.025
+    recent_box = (max(c["high"] for c in candles_15m[-4:]) - min(c["low"] for c in candles_15m[-4:])) / last if last > 0 else 1.0
+    is_tight_box = recent_box <= 0.025
     not_dump_candle = not (last_candle["close"] < last_candle["open"] and (last_candle["open"] - last_candle["close"]) > 0.5 * a15)
 
     if (is_near_ema50 and is_quiet_vol and rsi_cool and no_recent_pump and 
@@ -316,10 +327,9 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         reasons.append("тихая консолидация на EMA50 (накопление)")
         keys.append("accumulation")
 
-    # Мультитаймфрейм S/R
+    # Уровни S/R
     nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_15m, candles_1h)
     
-    # ⚡ Защита от покупки в лоб сопротивления
     if nearest_res and res_touches >= 2 and a15 > 0 and not is_open_pos:
         dist_to_res = nearest_res - last
         if dist_to_res < 0.8 * a15 or (dist_to_res / last * 100) < 0.7:
@@ -333,10 +343,17 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             reasons.append(f"отскок от поддержки ${fmt_price(nearest_sup)} ({sup_touches}x)")
             keys.append("support_bounce")
 
-    # ⚡ 5. ПАТТЕРН 3: ЛОВЕЦ ДНА (REVERSAL KNIFE CATCH) — получает весомый балл +4.0
-    if (t["change_pct"] <= -6.0 and r <= 35) or (t["change_pct"] <= -12.0 and vol_ratio >= 1.8):
+    # ⚡ ПАТТЕРН 3: ЛОВЕЦ ДНА (REVERSAL) — строгий Price Action фильтр!
+    # Запрещено входить на полнотелых красных свечах посреди водопада!
+    is_hammer_or_pinbar = c_range > 0 and (lower_wick / c_range) >= 0.45 and (last_candle["close"] >= last_candle["low"] + 0.45 * c_range)
+    is_green_reversal_bar = is_green and last > closes[-2]
+    confirmed_price_action_stop = is_hammer_or_pinbar or is_green_reversal_bar
+
+    is_panic_level = (t["change_pct"] <= -6.0 and r <= 35) or (t["change_pct"] <= -12.0 and vol_ratio >= 1.8)
+
+    if is_panic_level and confirmed_price_action_stop and not is_open_pos:
         score += 4.0
-        reasons.append(f"ОТКУП ДНА (паника vol x{vol_ratio:.1f})")
+        reasons.append(f"ОТКУП ДНА (разворотный бар vol x{vol_ratio:.1f})")
         keys.append("reversal")
     else:
         if 0 < t["change_pct"] < w["chg_hi"]: 
@@ -346,7 +363,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
 
     if t["quote_volume"] < 500_000: score -= 1
 
-    # Защита от 1H даунтренда (НЕ штрафует ловцов ножей на панике!)
+    # Защита от 1H даунтренда
     if candles_1h and len(candles_1h) >= 25:
         closes_1h = [c["close"] for c in candles_1h]
         last_1h = closes_1h[-1]
@@ -590,7 +607,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
             score10 = (score / raw_max * SCORE_MAX) if raw_max > 0 else 0.0
 
-            # Определение режима входа
             is_reversal = "reversal" in keys
             is_momentum = "rocket_momentum" in keys
 
