@@ -56,7 +56,7 @@ def _dedup_levels(levels):
     return deduped
 
 
-def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72):
+def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72):
     """
     Возвращает все подтвержденные уровни S/R с дедупликацией шума.
     """
