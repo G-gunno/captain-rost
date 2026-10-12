@@ -102,13 +102,15 @@ class ExecutionRiskWorker:
                     paper.log_event(sym, "tp1", last, f"TP1 (+{ex['pnl_pct']:.1f}%)", mode="TP1 🎯", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                     shadow.mark_success(sym)
 
-                    # ⚡ Перевод в безубыток и расчет цели для Runner через уровни старшего ТФ
+                    # Перевод в безубыток и расчет цели для Runner через уровни старшего ТФ
                     candles_15m = await market_data.get_kline(sym, "15", 120)
                     candles_1h = await market_data.get_kline(sym, "60", 250)
                     pos["tp"] = calc_runner_target(sym, last, candles_15m, candles_1h)
 
                     pos["sl_state"] = "BREAKEVEN"
-                    pos["sl"] = max(pos["sl"], pos["avg"] * 1.0025)
+                    pos["sl"] = max(pos["sl"], round(pos["avg"] * 1.0025, 8))
+                    pos["_last_notified_sl_str"] = fmt_price(pos["sl"])
+                    pos["_last_notified_sl_state"] = "BREAKEVEN"
                     state_changed = True
 
                     self.bus.publish("NOTIFY", {
@@ -116,7 +118,6 @@ class ExecutionRiskWorker:
                         "urgent": False
                     })
                 else:
-                    # ⚡ Проверка следующего сопротивления перед закрытием раннера
                     candles_15m = await market_data.get_kline(sym, "15", 120)
                     candles_1h = await market_data.get_kline(sym, "60", 250)
                     next_target = calc_runner_target(sym, last, candles_15m, candles_1h)
@@ -124,8 +125,10 @@ class ExecutionRiskWorker:
                     if next_target > pos["tp"] * 1.008:
                         old_tp = pos["tp"]
                         pos["tp"] = next_target
-                        pos["sl"] = max(pos["sl"], old_tp * 0.997)
+                        pos["sl"] = max(pos["sl"], round(old_tp * 0.997, 8))
                         pos["sl_state"] = "TRAILING_RUNNER"
+                        pos["_last_notified_sl_str"] = fmt_price(pos["sl"])
+                        pos["_last_notified_sl_state"] = "TRAILING_RUNNER"
                         state_changed = True
                         paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP Runner поднят к следующей стене", mode="TP поднят 🎯", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                         self.bus.publish("NOTIFY", {
@@ -143,22 +146,30 @@ class ExecutionRiskWorker:
                         })
                 continue
 
-            # ⚡ ТРЕЙЛИНГ И МАШИНА СОСТОЯНИЙ СТОПА ЧЕРЕЗ RISK МОДУЛЬ
+            # ⚡ ТРЕЙЛИНГ И МАШИНА СОСТОЯНИЙ СТОПА (С АНТИ-СПАМ ЗАЩИТОЙ)
             max_p = max(pos.get("max_price", last), last)
             pos["max_price"] = max_p
 
             sl_updated, new_sl, new_state, tag_desc = update_position_sl(pos, max_p)
             if sl_updated:
+                old_sl_str = pos.get("_last_notified_sl_str") or fmt_price(pos.get("sl", 0.0))
+                new_sl_str = fmt_price(new_sl)
+                old_state = pos.get("_last_notified_sl_state") or pos.get("sl_state", "SHIELD")
+
                 pos["sl"] = new_sl
                 pos["sl_state"] = new_state
                 pos["max_sl"] = new_sl
                 state_changed = True
 
-                paper.log_event(sym, "sl_moved", pos["sl"], tag_desc, tp=pos.get("tp"), sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
-                self.bus.publish("NOTIFY", {
-                    "text": f"🛡 SL поднят по <b>{sym[:-4]}</b> до {fmt_price(new_sl)} ({tag_desc})", 
-                    "urgent": False
-                })
+                # ⚡ АНТИ-СПАМ: Уведомляем ТОЛЬКО если отображаемая цена или статус реально изменились!
+                if new_sl_str != old_sl_str or new_state != old_state:
+                    pos["_last_notified_sl_str"] = new_sl_str
+                    pos["_last_notified_sl_state"] = new_state
+                    paper.log_event(sym, "sl_moved", pos["sl"], tag_desc, tp=pos.get("tp"), sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                    self.bus.publish("NOTIFY", {
+                        "text": f"🛡 SL поднят по <b>{sym[:-4]}</b> до {new_sl_str} ({tag_desc})", 
+                        "urgent": False
+                    })
 
         if state_changed:
             paper.save()
