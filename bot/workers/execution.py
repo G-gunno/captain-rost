@@ -3,11 +3,13 @@ from loguru import logger
 from bot.core.event_bus import EventBus
 from bot.core.state import bot_state
 from bot.exchange.paper_exchange import paper
-from bot.utils.format import pair_html, usd, fmt_price, fmt_pct, pnl_emoji, funding_line
+from bot.exchange.market_data import market_data
+from bot.utils.format import pair_html, usd, fmt_price, fmt_pct, pnl_emoji
 from bot.strategy.shadow import shadow
+from bot.strategy.risk import update_position_sl, calc_runner_target
 
 class ExecutionRiskWorker:
-    """Критический воркер ведения открытых позиций (Трейлинг-стопы, TP/SL, Риск-менеджмент). Zero-delay."""
+    """Критический воркер исполнения ордеров, машины состояний SL и фиксации TP."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -16,7 +18,7 @@ class ExecutionRiskWorker:
         self._last_btc_price = 0.0
 
     async def run(self) -> None:
-        logger.info("⚡ Execution Worker запущен: мониторинг рисков, исполнение ордеров и трейлинг-стопы")
+        logger.info("⚡ Execution Worker запущен: машина состояний SL и исполнение позиций...")
         await asyncio.gather(
             self._price_loop(),
             self._emergency_loop()
@@ -27,7 +29,7 @@ class ExecutionRiskWorker:
             try:
                 event = await self.price_queue.get()
                 tickers = event.payload
-                self._process_tick(tickers)
+                await self._process_tick(tickers)
                 self.price_queue.task_done()
             except Exception as e:
                 logger.error(f"Execution _price_loop error: {e}")
@@ -48,8 +50,7 @@ class ExecutionRiskWorker:
             except Exception as e:
                 logger.error(f"Execution _emergency_loop error: {e}")
 
-    def _process_tick(self, tickers: dict) -> None:
-        # 1. Проверка глобального риска (Дамп BTC)
+    async def _process_tick(self, tickers: dict) -> None:
         btc = tickers.get("BTCUSDT")
         if btc:
             last_btc = btc["last"]
@@ -60,7 +61,6 @@ class ExecutionRiskWorker:
                     return
             self._last_btc_price = last_btc
 
-        # 2. Мгновенная проверка исполнения лимитных ордеров (check_fills)
         fills = paper.check_fills(tickers)
         for f in fills:
             tp_pct = (f["tp"] - f["price"]) / f["price"] * 100
@@ -74,7 +74,6 @@ class ExecutionRiskWorker:
                 "urgent": False
             })
 
-        # 3. Быстрый проход по открытым позициям (TP/SL/Трейлинг)
         state_changed = False
 
         for sym, pos in list(paper.positions.items()):
@@ -103,12 +102,13 @@ class ExecutionRiskWorker:
                     paper.log_event(sym, "tp1", last, f"TP1 (+{ex['pnl_pct']:.1f}%)", mode="TP1 🎯", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                     shadow.mark_success(sym)
 
-                    breakeven_price = pos["avg"] * 1.0025
-                    pos["sl"] = max(pos["sl"], breakeven_price)
-                    
-                    # ⚡ Технический расчет цели для раннера
-                    tp1_dist = pos["tp"] - pos["avg"]
-                    pos["tp"] = round(pos["tp"] + tp1_dist * 1.25, 8)
+                    # ⚡ Перевод в безубыток и расчет цели для Runner через уровни старшего ТФ
+                    candles_15m = await market_data.get_kline(sym, "15", 120)
+                    candles_1h = await market_data.get_kline(sym, "60", 250)
+                    pos["tp"] = calc_runner_target(sym, last, candles_15m, candles_1h)
+
+                    pos["sl_state"] = "BREAKEVEN"
+                    pos["sl"] = max(pos["sl"], pos["avg"] * 1.0025)
                     state_changed = True
 
                     self.bus.publish("NOTIFY", {
@@ -126,63 +126,22 @@ class ExecutionRiskWorker:
                     })
                 continue
 
-            # Трейлинг-стоп (Сдвиг SL)
+            # ⚡ ТРЕЙЛИНГ И МАШИНА СОСТОЯНИЙ СТОПА ЧЕРЕЗ RISK МОДУЛЬ
             max_p = max(pos.get("max_price", last), last)
-            if max_p > pos.get("max_price", 0.0):
-                pos["max_price"] = max_p
-                state_changed = self._update_trailing_stop(sym, pos, max_p) or state_changed
+            pos["max_price"] = max_p
+
+            sl_updated, new_sl, new_state, tag_desc = update_position_sl(pos, max_p)
+            if sl_updated:
+                pos["sl"] = new_sl
+                pos["sl_state"] = new_state
+                pos["max_sl"] = new_sl
+                state_changed = True
+
+                paper.log_event(sym, "sl_moved", pos["sl"], tag_desc, tp=pos.get("tp"), sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                self.bus.publish("NOTIFY", {
+                    "text": f"🛡 SL поднят по <b>{sym[:-4]}</b> до {fmt_price(new_sl)} ({tag_desc})", 
+                    "urgent": False
+                })
 
         if state_changed:
             paper.save()
-
-    def _update_trailing_stop(self, sym: str, pos: dict, max_p: float) -> bool:
-        avg_p = pos["avg"]
-        if avg_p <= 0:
-            return False
-
-        tier = pos.get("tier") or "SMALL"
-
-        TIER_TRAIL_CONFIG = {
-            "TOP20": {"be_trigger": 0.007, "runner_dist": 0.008, "pre_tp_trigger": 1.5, "pre_tp_dist": 0.006},
-            "MID":   {"be_trigger": 0.010, "runner_dist": 0.013, "pre_tp_trigger": 2.0, "pre_tp_dist": 0.010},
-            "SMALL": {"be_trigger": 0.012, "runner_dist": 0.016, "pre_tp_trigger": 2.2, "pre_tp_dist": 0.012},
-            "MICRO": {"be_trigger": 0.014, "runner_dist": 0.022, "pre_tp_trigger": 2.5, "pre_tp_dist": 0.018},
-        }
-        cfg = TIER_TRAIL_CONFIG.get(tier, TIER_TRAIL_CONFIG["SMALL"])
-
-        current_sl = pos["sl"]
-        new_sl = current_sl
-        breakeven = avg_p * 1.0025
-        profit_pct = (max_p - avg_p) / avg_p * 100
-
-        # 1. Ранний безубыток
-        if max_p >= avg_p * (1 + cfg["be_trigger"]):
-            if new_sl < breakeven:
-                new_sl = breakeven
-
-        # 2. Трейлинг раннера
-        if pos.get("tp1_done"):
-            runner_trail = max_p * (1 - cfg["runner_dist"])
-            min_runner_sl = avg_p * 1.005
-            new_sl = max(new_sl, runner_trail, min_runner_sl)
-        else:
-            # 3. Трейлинг до TP1
-            if profit_pct >= cfg["pre_tp_trigger"]:
-                new_sl = max(new_sl, max_p * (1 - cfg["pre_tp_dist"]))
-
-        if new_sl > current_sl:
-            old_sl_str = fmt_price(current_sl)
-            new_sl_str = fmt_price(new_sl)
-
-            if new_sl_str != old_sl_str:
-                pos["sl"] = round(new_sl, 8)
-                pos["max_sl"] = pos["sl"]
-                tag = "🔒 БУ" if (current_sl < breakeven and new_sl >= breakeven and not pos.get("tp1_done")) else f"Трейлинг SL ({tier})"
-                paper.log_event(sym, "sl_moved", pos["sl"], tag, tp=pos.get("tp"), sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
-                self.bus.publish("NOTIFY", {
-                    "text": f"🛡 SL поднят по <b>{sym[:-4]}</b> до {new_sl_str} ({tag})", 
-                    "urgent": False
-                })
-                return True
-
-        return False
