@@ -1,17 +1,17 @@
 from bot.strategy.indicators import rsi
 
 
-def detect_patterns(candles_15m: list, a15: float, e50: float, recent_high: float) -> list:
+def detect_patterns(candles_15m: list, a15: float, e50: float, e21: float, recent_high: float) -> list:
     """
     Price Action & Liquidity Pattern Engine.
-    Распознает 5 ключевых крипто-сетапов ликвидности:
-    1. pinbar (Спринг / Пин-бар выкупа на дне)
-    2. divergence (Бычья дивергенция RSI)
-    3. vcp (Сжатие волатильности на EMA50 по Вайкоффу)
-    4. breakout (Истинный импульсный пробой полки)
-    5. engulfing (Ловушка продавца / бычье поглощение)
+    Строгая контекстная валидация моделей:
+    1. pinbar -> reversal (на дне/панике) ИЛИ sniper (отскок по тренду)
+    2. divergence -> reversal (бычья дивергенция RSI)
+    3. vcp -> sniper (сжатие волатильности строго в аптренде e21 >= e50)
+    4. breakout -> rocket (истинный пробой хая предыдущих свечей)
+    5. engulfing -> sniper/reversal (поглощение)
     """
-    if not candles_15m or len(candles_15m) < 15:
+    if not candles_15m or len(candles_15m) < 25:
         return []
 
     patterns = []
@@ -31,33 +31,43 @@ def detect_patterns(candles_15m: list, a15: float, e50: float, recent_high: floa
     vols = [c["volume"] for c in candles_15m]
     avg_vol = sum(vols[-21:-1]) / 20 if len(vols) >= 21 else (sum(vols) / len(vols))
     vol_ratio = (last["volume"] / avg_vol) if avg_vol > 0 else 1.0
+    r = rsi(closes)
 
-    # 1. SPRING PINBAR (Пин-бар выкупа на дне)
+    # 1. SPRING PINBAR (Контекстный пин-бар)
     if (lower_wick / c_range) >= 0.45 and (last["close"] >= last["low"] + 0.45 * c_range) and vol_ratio >= 1.2:
-        patterns.append({
-            "key": "pinbar",
-            "name": f"Пин-бар выкупа (хвост {lower_wick/c_range*100:.0f}%, vol x{vol_ratio:.1f})",
-            "mode": "reversal",
-            "base_bonus": 3.0
-        })
-
-    # 2. BULLISH DIVERGENCE (Бычья дивергенция RSI)
-    if len(candles_15m) >= 25:
-        rsi_now = rsi(closes)
-        rsi_past = rsi(closes[:-6])
-        low_now = min(c["low"] for c in candles_15m[-6:])
-        low_past = min(c["low"] for c in candles_15m[-18:-6])
-
-        if low_now < low_past and rsi_now > (rsi_past + 2.5) and rsi_now <= 45:
+        # На дне рынка (перепроданность или под EMA50) — это реверсал
+        if r <= 42 or last["close"] < e50:
             patterns.append({
-                "key": "divergence",
-                "name": f"Бычья дивергенция RSI ({rsi_past:.0f} -> {rsi_now:.0f})",
+                "key": "pinbar",
+                "name": f"Пин-бар выкупа на дне (хвост {lower_wick/c_range*100:.0f}%, vol x{vol_ratio:.1f})",
                 "mode": "reversal",
-                "base_bonus": 2.5
+                "base_bonus": 3.0
+            })
+        # В аптренде над EMA50 — это подтвержденный снайперский отскок
+        elif e21 >= e50 and last["close"] >= e50:
+            patterns.append({
+                "key": "pinbar",
+                "name": f"Молот по тренду (хвост {lower_wick/c_range*100:.0f}%, vol x{vol_ratio:.1f})",
+                "mode": "sniper",
+                "base_bonus": 2.0
             })
 
-    # 3. VCP COMPRESSION (Сжатие волатильности по Вайкоффу на EMA50)
-    if e50 > 0 and len(candles_15m) >= 8:
+    # 2. BULLISH DIVERGENCE (Бычья дивергенция RSI)
+    rsi_now = r
+    rsi_past = rsi(closes[:-6])
+    low_now = min(c["low"] for c in candles_15m[-6:])
+    low_past = min(c["low"] for c in candles_15m[-18:-6])
+
+    if low_now < low_past and rsi_now > (rsi_past + 2.5) and rsi_now <= 45:
+        patterns.append({
+            "key": "divergence",
+            "name": f"Бычья дивергенция RSI ({rsi_past:.0f} -> {rsi_now:.0f})",
+            "mode": "reversal",
+            "base_bonus": 2.5
+        })
+
+    # 3. VCP COMPRESSION (Сжатие волатильности СТРОГО в аптренде)
+    if e50 > 0 and e21 >= (e50 * 0.999):
         is_near_ema50 = 0.998 <= (last["close"] / e50) <= 1.012
         recent_box = (max(c["high"] for c in candles_15m[-5:]) - min(c["low"] for c in candles_15m[-5:])) / last["close"]
         is_dry_volume = vol_ratio <= 1.2
@@ -71,19 +81,19 @@ def detect_patterns(candles_15m: list, a15: float, e50: float, recent_high: floa
                 "base_bonus": 3.0
             })
 
-    # 4. CLEAN BREAKOUT (Истинный импульсный пробой)
-    if recent_high > 0 and last["close"] >= recent_high * 0.998:
+    # 4. CLEAN BREAKOUT (Истинный пробой ПРЕДЫДУЩЕГО максимума)
+    if recent_high > 0 and last["close"] > recent_high:
         solid_body = (body / c_range) >= 0.55 if c_range > 0 else False
-        clean_top = (upper_wick / c_range) <= 0.25 if c_range > 0 else False
+        clean_top = (upper_wick / c_range) <= 0.20 if c_range > 0 else False
         if is_green and solid_body and clean_top and vol_ratio >= 1.35:
             patterns.append({
                 "key": "breakout",
-                "name": f"Импульсный пробой (чистый бар, vol x{vol_ratio:.1f})",
+                "name": f"Истинный пробой хая ${recent_high:.4f} (vol x{vol_ratio:.1f})",
                 "mode": "rocket",
                 "base_bonus": 3.0
             })
 
-    # 5. FAILED AUCTION (Бычье поглощение / Ловушка продавца)
+    # 5. FAILED AUCTION (Бычье поглощение)
     prev_red = prev["close"] < prev["open"]
     if prev_red and is_green:
         engulfs_body = last["close"] >= prev["open"] and last["open"] <= prev["close"]
