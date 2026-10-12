@@ -294,9 +294,27 @@ async def cmd_learn(update, context):
         rows = sorted([(s, sum(1 for p in h if p>0)/len(h), len(h), sum(h)/len(h), learner.sector_bias(s)) for s, h in learner.sector_stats.items() if h], key=lambda r: r[4], reverse=True)
         for s, swr, cnt, avg, bias in rows: lines.append(f"   {pnl_emoji(avg)} <i>{s}</i> · wr {swr:.0%} ({cnt}) · {avg:+.2f}% → {bias:+.2f}")
     
-    lines.append("\n🎯 <b>Веса сигналов</b>")
+    lines.append("\n🎯 <b>Веса индикаторов контекста</b>")
     for k, v in sorted(learner.weights.items(), key=lambda kv: kv[1], reverse=True):
         lines.append(f"   {weight_emoji(v)} <i>{k}</i> · {v:.2f} {'⚡' * max(1, int(round(v * 5)))}")
+
+    lines.append("\n🧩 <b>Паттерны Price Action</b>")
+    pat_names = {
+        "pinbar": "🔨 Пин-бар выкупа (Spring)",
+        "divergence": "🧲 Дивергенция RSI",
+        "vcp": "📦 Сжатие волатильности (VCP)",
+        "breakout": "🚀 Импульсный пробой",
+        "engulfing": "⚡ Бычье поглощение"
+    }
+    if learner.pattern_stats:
+        for p, h in sorted(learner.pattern_stats.items()):
+            if h:
+                pwr = sum(1 for x in h if x > 0) / len(h)
+                pavg = sum(h) / len(h)
+                pmult = learner.pattern_multiplier(p)
+                lines.append(f"   {pnl_emoji(pavg)} {pat_names.get(p, p)}: {len(h)} сдел. · wr {pwr:.0%} · ср. {pavg:+.2f}% (×{pmult:.2f})")
+    else:
+        lines.append("   <i>(накапливается статистика по сетапам)</i>")
 
     lines.append("\n🧾 <b>Как выходим</b>")
     if learner.exit_stats:
