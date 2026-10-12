@@ -108,7 +108,7 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72
     return _dedup_levels(confirmed_res), _dedup_levels(confirmed_sup)
 
 
-def find_sr_levels(candles_15m, candles_1h=None, window_15m=60, window_1h=72, window=None):
+def find_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72, window=None):
     """
     Поиск ближайших подтвержденных уровней:
     - Сопротивление: строго выше текущей цены (> +0.15%)
