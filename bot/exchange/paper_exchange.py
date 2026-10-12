@@ -154,6 +154,9 @@ class PaperExchange:
                     pos["entry_time"] = int(time.time())
                     pos["nearest_sup"] = order.get("nearest_sup")
                     pos["nearest_res"] = order.get("nearest_res")
+                    pos["sup_touches"] = order.get("sup_touches", 0)
+                    pos["res_touches"] = order.get("res_touches", 0)
+                    pos["sl_state"] = order.get("sl_state", "SHIELD")
                     self.trades.append({
                         "side": "Buy",
                         "symbol": order["symbol"],
