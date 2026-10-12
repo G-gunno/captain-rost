@@ -190,7 +190,10 @@ class PositionManagerWorker:
 
             nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles)
             live_sup = nearest_sup if (nearest_sup and sup_touches >= 2) else order.get("nearest_sup")
+            live_sup_touches = sup_touches if (nearest_sup and sup_touches >= 2) else order.get("sup_touches", 2 if order.get("nearest_sup") else 0)
+            
             live_res = nearest_res if (nearest_res and res_touches >= 2) else order.get("nearest_res")
+            live_res_touches = res_touches if (nearest_res and res_touches >= 2) else order.get("res_touches", 2 if order.get("nearest_res") else 0)
 
             # ⚡ ПРАВИЛА ОХОТЫ
             action_type = None
@@ -202,7 +205,6 @@ class PositionManagerWorker:
 
             # 2. Охота вниз: только плавный пересчет волатильности, не убегая от цены и не уходя под плиту!
             if ideal_price < old_price and dev_pct >= 0.5 and not in_freeze_zone:
-                # Если есть поддержка — ордеру запрещено сползать под нее!
                 if not (live_sup and ideal_price < live_sup * 1.0015):
                     order["price"] = ideal_price
                     action_type = "correct"
@@ -215,11 +217,11 @@ class PositionManagerWorker:
                     action_type = "hunt_vcp"
                     price_icon = "⬆️"
 
-            # Пересчет уровней SL/TP
+            # Пересчет уровней SL/TP через risk модуль с сохраненными касаниями
             sl, tp, is_valid, _ = calc_initial_sl_tp(
                 symbol=sym, entry=order["price"], tier=tier, a=a,
-                sup=live_sup, sup_touches=sup_touches,
-                res=live_res, res_touches=res_touches,
+                sup=live_sup, sup_touches=live_sup_touches,
+                res=live_res, res_touches=live_res_touches,
                 is_mom=(entry_mode == "rocket"), entry_mode=entry_mode
             )
 
@@ -227,10 +229,8 @@ class PositionManagerWorker:
                 order["sl"] = sl
                 order["tp"] = tp
 
-            if action_type:
-                order["created"] = current_time  
-                order["nearest_sup"] = live_sup
-                order["nearest_res"] = live_res
+            order["nearest_res"] = live_res
+            order["res_touches"] = live_res_touches
                 paper.save()
                 msg_desc = "подтяжка к сжатию (VCP)" if action_type == "hunt_vcp" else f"сдвиг на {dev_pct:.2f}%"
                 paper.log_event(sym, "order_moved", order["price"], f"Сдвиг: {action_type}", tp=order["tp"], sl=order["sl"], sup=live_sup, res=live_res)
