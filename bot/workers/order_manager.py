@@ -7,40 +7,21 @@ from bot.exchange.paper_exchange import paper
 from bot.strategy.sizing import buy_size, portfolio_limits, tier_limits, entry_offset
 from bot.strategy.scanner import get_thresholds
 from bot.strategy.learner import learner
-from bot.strategy.shadow import shadow
-from bot.utils.format import pair_html, corr_txt, funding_line, usd, fmt_price, fmt_pct
+from bot.strategy.risk import calc_initial_sl_tp
+from bot.news.cmc import get_coin_name
+from bot.news.rss_news import fetch_news_cache, check_sentiment
+from bot.utils.format import pair_html, corr_txt, usd, fmt_price, fmt_pct
 from bot.core.state import bot_state
 
-TIER_SL_FLOOR = {
-    "TOP20": 0.010,
-    "MID":   0.015,
-    "SMALL": 0.020,
-    "MICRO": 0.025,
-}
-
-TIER_TP_FLOOR = {
-    "TOP20": 0.012,
-    "MID":   0.020,
-    "SMALL": 0.025,
-    "MICRO": 0.028,
-}
-
-TIER_MAX_SL = {
-    "TOP20": 2.0,
-    "MID":   2.8,
-    "SMALL": 3.5,
-    "MICRO": 4.5,
-}
-
 class OrderManagerWorker:
-    """Управляет портфелем: сайзинг, ротация слабейших, выставление ордеров с прозрачной диагностикой."""
+    """Управляет портфелем: предварительная фильтрация новостей, единый риск и сайзинг."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
         self.signal_queue = self.bus.subscribe("SIGNALS_READY", maxsize=2)
 
     async def run(self):
-        logger.info("💼 Order Manager запущен: контроль портфеля, S/R структуры и ротация...")
+        logger.info("💼 Order Manager запущен: предварительная фильтрация новостей и контроль структуры...")
         while True:
             try:
                 event = await self.signal_queue.get()
@@ -63,12 +44,21 @@ class OrderManagerWorker:
         thrs = get_thresholds(regime)
         sec_lim, other_lim = portfolio_limits(equity)
         sat_limit = learner.satellite_limit()
-        base_min, _ = tier_limits(equity)
+        news_items = await fetch_news_cache()
 
         logger.info(f"💼 OrderManager: получено кандидатов: {len(candidates)} {[c['symbol'] for c in candidates]}")
 
         for cand in candidates:
             sym = cand["symbol"]
+            base = sym[:-4]
+
+            # ⚡ 1. ПРЕДВАРИТЕЛЬНЫЙ НОВОСТНОЙ ФИЛЬТР (ДО ЛЮБЫХ ДЕЙСТВИЙ)
+            name = await get_coin_name(base)
+            neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
+            if neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33):
+                logger.info(f"OrderManager: {sym} отклонен ДО выставления -> токсичные новости ({neg}/{mentions})")
+                bot_state.set_cooldown(sym, 7200)
+                continue
 
             is_accum = "accumulation" in cand.get("reason_keys", [])
             if bot_state.is_on_cooldown(sym) and not is_accum:
@@ -93,10 +83,9 @@ class OrderManagerWorker:
             ideal_entry = cand["last"] * (1 + off)
             entry = ideal_entry if is_mom else min(ideal_entry, bid1)
 
-            # ⚡ 1. Правило пола поддержки
+            # Правило пола поддержки
             sup = cand.get("nearest_sup")
             sup_touches = cand.get("sup_touches", 0)
-
             if sup and sup_touches >= 2 and not is_mom:
                 retest_floor = sup * 1.0015
                 if cand["last"] >= retest_floor:
@@ -104,72 +93,21 @@ class OrderManagerWorker:
                     entry = min(entry, bid1)
 
             a = cand["atr"]
-            if a <= 0:
-                logger.debug(f"OrderManager: {sym} пропущен (ATR <= 0)")
-                continue
+            if a <= 0: continue
 
-            sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.020)
-            tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.028)
-            max_sl_allowed = TIER_MAX_SL.get(tier, 3.5)
-
-            sl_tuning_mult = shadow.sl_mult()
-            tp_tuning_mult = shadow.tp_mult()
-
-            # Базовый расчет стопа
-            if kind == "satellite":
-                base_sl_mult = 0.75 if is_mom else (2.0 if entry_mode == "reversal" else 1.5)
-                sl_dist_raw = max(base_sl_mult * a * sl_tuning_mult, entry * sl_floor_pct)
-            else:
-                if is_mom: base_sl_atr = 1.0 * a
-                elif entry_mode == "reversal": base_sl_atr = 2.0 * a
-                else: base_sl_atr = 1.2 * a
-
-                sl_dist_raw = max(base_sl_atr * sl_tuning_mult, entry * sl_floor_pct)
-
-            sl = entry - sl_dist_raw
-
-            # Структурный стоп-лосс за поддержку
-            if sup and sup_touches >= 2 and sup < entry:
-                struct_sl = sup * 0.997
-                min_safe_sl = entry * (1 - sl_floor_pct)
-                candidate_sl = min(struct_sl, min_safe_sl)
-                candidate_dist_pct = (entry - candidate_sl) / entry * 100
-                if candidate_dist_pct <= max_sl_allowed:
-                    sl = candidate_sl
-
-            sl_dist = entry - sl
-            if sl_dist <= 0: continue
-
-            if (sl_dist / entry * 100) > max_sl_allowed:
-                logger.debug(f"OrderManager: {sym} пропущен (стоп {sl_dist/entry*100:.2f}% > {max_sl_allowed}%)")
-                continue
-
-            # ⚡ 2. Проверка сопротивления
+            # ⚡ 2. ЕДИНЫЙ РАСЧЕТ SL И TP ЧЕРЕЗ МОДУЛЬ RISK
             res = cand.get("nearest_res")
             res_touches = cand.get("res_touches", 0)
 
-            tp_dist_raw = max(2.0 * a * tp_tuning_mult, sl_dist * 1.5, entry * tp_floor_pct)
-            tp = entry + tp_dist_raw
-            min_rr = 1.4
+            sl, tp, is_valid, rej_reason = calc_initial_sl_tp(
+                symbol=sym, entry=entry, tier=tier, a=a,
+                sup=sup, sup_touches=sup_touches,
+                res=res, res_touches=res_touches,
+                is_mom=is_mom, entry_mode=entry_mode
+            )
 
-            if res and res > entry:
-                res_dist_pct = (res - entry) / entry * 100
-                if res_dist_pct < 0.8:
-                    logger.info(f"OrderManager: {sym} отклонён -> стена сопротивления ${fmt_price(res)} в упор ({res_dist_pct:.2f}% < 0.8%)")
-                    continue
-
-                res_cap_tp = res * 0.997
-                if res_cap_tp < tp:
-                    if (res_cap_tp - entry) / sl_dist >= 1.0:
-                        tp = round(res_cap_tp, 8)
-                        min_rr = 1.0
-                    else:
-                        logger.info(f"OrderManager: {sym} отклонён -> стена ${fmt_price(res)} не дает забрать даже 1.0x RR")
-                        continue
-
-            rr = (tp - entry) / sl_dist
-            if tp <= entry or round(rr, 2) < min_rr:
-                logger.debug(f"OrderManager: {sym} пропущен (RR {round(rr, 2)} < {min_rr})")
+            if not is_valid:
+                logger.info(f"OrderManager: {sym} отклонён -> {rej_reason}")
                 continue
 
             size = buy_size(equity, cand["score"], thr, cand["liquidity"], paper.usdt,
@@ -186,6 +124,7 @@ class OrderManagerWorker:
                     logger.debug(f"OrderManager: {sym} пропущен (лимит сателлитов {sat_limit}%)")
                     continue
 
+            # Проверка лимитов секторов и ротация
             planned_sells, planned_cancels = [], []
             lim = other_lim if sector == "Other" else sec_lim
             sector_count = sum(1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector)
@@ -250,6 +189,7 @@ class OrderManagerWorker:
                 "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode,
                 "nearest_res": res,
                 "nearest_sup": sup,
+                "sl_state": "SHIELD"
             })
             paper.save()
 
