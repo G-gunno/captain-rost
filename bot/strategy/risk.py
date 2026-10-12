@@ -33,11 +33,6 @@ TIER_TRAIL_CONFIG = {
 def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float, 
                         sup: float, sup_touches: int, res: float, res_touches: int,
                         is_mom: bool = False, entry_mode: str = "sniper"):
-    """
-    Единый расчет уровней входа:
-    - Защитный стоп ставится СТРОГО за подтвержденную поддержку (без бага min()!).
-    - Тейк поджимается под реальное сопротивление (RR >= 1.0).
-    """
     tier = tier or "SMALL"
     sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.020)
     tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.028)
@@ -48,65 +43,56 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
 
     # 1. Расчет защитного стоп-лосса
     sl_dist = 0.0
-    # Если под ценой есть подтвержденная опора — ставим стоп строго за нее!
     if sup and sup_touches >= 2 and sup < entry:
-        struct_sl = sup * 0.997
+        struct_sl = round(sup * 0.997, 8)
         candidate_dist = entry - struct_sl
         candidate_dist_pct = (candidate_dist / entry) * 100
         if candidate_dist_pct <= max_sl_allowed:
             sl = struct_sl
             sl_dist = candidate_dist
 
-    # Если структуры нет — используем формулу волатильности и пола тира
     if sl_dist <= 0:
         base_mult = 0.75 if is_mom else (2.0 if entry_mode == "reversal" else 1.2)
         sl_dist_raw = max(base_mult * a * sl_tuning, entry * sl_floor_pct)
         sl_dist = min(sl_dist_raw, entry * (max_sl_allowed / 100.0))
-        sl = entry - sl_dist
+        sl = round(entry - sl_dist, 8)
 
     if sl >= entry or (sl_dist / entry * 100) > max_sl_allowed:
         return None, None, False, "Недопустимая дистанция SL"
 
     # 2. Расчет первичного тейк-профита (TP1)
     tp_dist_raw = max(2.0 * a * tp_tuning, sl_dist * 1.5, entry * tp_floor_pct)
-    tp = entry + tp_dist_raw
+    tp = round(entry + tp_dist_raw, 8)
     min_rr = 1.35 if entry_mode == "sniper" else 1.1
 
-    # Проверка сопротивления: если над нами стена
     if res and res > entry:
         res_dist_pct = (res - entry) / entry * 100
         if res_dist_pct < 0.8:
             return None, None, False, f"Стена сопротивления в упор ({res_dist_pct:.2f}% < 0.8%)"
 
-        res_cap_tp = res * 0.997
+        res_cap_tp = round(res * 0.997, 8)
         if res_cap_tp < tp:
             if (res_cap_tp - entry) / sl_dist >= 1.0:
-                tp = round(res_cap_tp, 8)
+                tp = res_cap_tp
                 min_rr = 1.0
             else:
-                return None, None, False, f"Стена не дает забрать даже 1.0x RR"
+                return None, None, False, "Стена не дает забрать даже 1.0x RR"
 
     rr = (tp - entry) / sl_dist
     if tp <= entry or round(rr, 2) < min_rr:
         return None, None, False, f"Недостаточный RR ({round(rr, 2)} < {min_rr})"
 
-    return round(sl, 8), round(tp, 8), True, "OK"
+    return sl, tp, True, "OK"
 
 
 def calc_runner_target(symbol: str, current_price: float, candles_15m: list, candles_1h: list = None) -> float:
-    """
-    Лестничный поиск следующей цели для TP_Runner по подтвержденным уровням старшего ТФ.
-    Если выше уровней нет (ATH) — проецирует свободный ход по ATR.
-    """
     all_res, _ = get_all_sr_levels(candles_15m, candles_1h)
     
-    # Ищем подтвержденные стены продавца выше текущей цены минимум на +1.0%
     res_above = [r[0] for r in all_res if r[0] > current_price * 1.010]
     if res_above:
         res_above.sort()
         return round(res_above[0] * 0.997, 8)
 
-    # Фаза свободного полета (ATH / Blue Sky): цель через 2.5 ATR
     a = atr(candles_15m)
     return round(current_price + max(2.5 * a, current_price * 0.035), 8)
 
@@ -115,7 +101,7 @@ def update_position_sl(pos: dict, max_p: float) -> tuple:
     """
     Машина состояний стоп-лосса:
     SHIELD -> BREAKEVEN -> PROFIT_LOCK -> TRAILING_RUNNER
-    Возвращает (обновлен: bool, new_sl: float, new_state: str, tag_desc: str)
+    Полностью защищена от float-дребезга (IEEE 754) и повторных ложных срабатываний.
     """
     avg_p = pos.get("avg", 0.0)
     if avg_p <= 0:
@@ -124,32 +110,35 @@ def update_position_sl(pos: dict, max_p: float) -> tuple:
     tier = pos.get("tier") or "SMALL"
     cfg = TIER_TRAIL_CONFIG.get(tier, TIER_TRAIL_CONFIG["SMALL"])
 
-    current_sl = pos.get("sl", 0.0)
+    current_sl = round(float(pos.get("sl", 0.0)), 8)
     new_sl = current_sl
     current_state = pos.get("sl_state", "SHIELD")
     new_state = current_state
 
-    breakeven = avg_p * 1.0025
+    breakeven = round(avg_p * 1.0025, 8)
     profit_pct = (max_p - avg_p) / avg_p * 100
 
     # 1. Трейлинг раннера (после взятия TP1)
     if pos.get("tp1_done"):
         new_state = "TRAILING_RUNNER"
-        runner_trail = max_p * (1 - cfg["runner_dist"])
-        min_runner_sl = avg_p * 1.005
+        runner_trail = round(max_p * (1 - cfg["runner_dist"]), 8)
+        min_runner_sl = round(avg_p * 1.005, 8)
         new_sl = max(new_sl, runner_trail, min_runner_sl)
     else:
         # 2. До TP1: фиксация гарантированного профита
         if profit_pct >= cfg["pre_tp_trigger"]:
             new_state = "PROFIT_LOCK"
-            new_sl = max(new_sl, max_p * (1 - cfg["pre_tp_dist"]))
+            new_sl = max(new_sl, round(max_p * (1 - cfg["pre_tp_dist"]), 8))
         # 3. До TP1: ранний перевод в безубыток
         elif max_p >= avg_p * (1 + cfg["be_trigger"]):
             if new_sl < breakeven:
                 new_state = "BREAKEVEN"
                 new_sl = breakeven
 
-    if new_sl > current_sl:
+    new_sl = round(new_sl, 8)
+
+    # Защита от бесконечного цикла: фиксируем изменение ТОЛЬКО при реальном росте цены
+    if (new_sl > current_sl + 1e-7) or (new_state != current_state and new_sl >= current_sl):
         tag_map = {
             "SHIELD": "🛡 Защита",
             "BREAKEVEN": "🔒 БУ",
@@ -157,6 +146,6 @@ def update_position_sl(pos: dict, max_p: float) -> tuple:
             "TRAILING_RUNNER": f"📈 Трейлинг ({tier})"
         }
         tag_desc = tag_map.get(new_state, "Трейлинг")
-        return True, round(new_sl, 8), new_state, tag_desc
+        return True, new_sl, new_state, tag_desc
 
     return False, current_sl, current_state, ""
