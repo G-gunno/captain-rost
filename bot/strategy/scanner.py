@@ -92,8 +92,9 @@ def raw_max_score(regime):
     m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
     m += learner.weight("indep")
     m += learner.weight("news_pos")
-    m += 3.5  # Максимальный потенциальный вклад ключевого паттерна
-    m += 0.5   
+    m += 3.0   # Паттерн Price Action
+    m += 1.5   # Уровень S/R или MTF импульс
+    m += 0.5   # Макро / Сектор
     return m
 
 def _returns(closes):
@@ -236,7 +237,9 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     base_vol = sum(vols[-21:-1]) / 20 if len(vols) > 21 else (sum(vols) / max(1, len(vols)))
     vol_ratio = vols[-1] / base_vol if base_vol else 1.0
 
-    recent_high = max(c["high"] for c in candles_15m[-24:]) if len(candles_15m) >= 24 else max(c["high"] for c in candles_15m)
+    # ⚡ Честный расчет хая: строго по ПРЕДЫДУЩИМ свечам (без текущей!)
+    prior_candles = candles_15m[-25:-1] if len(candles_15m) >= 25 else candles_15m[:-1]
+    recent_high = max(c["high"] for c in prior_candles) if prior_candles else last
     recent_low_2h = min(c["low"] for c in candles_15m[-8:]) if len(candles_15m) >= 8 else min(c["low"] for c in candles_15m)
 
     w = shadow.signal_windows()
@@ -290,7 +293,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             reasons.append(f"FOMO-перегрев (+{dist_from_ema/a15:.1f} ATR от EMA21)")
 
     # ⚡ 4. СЛОЙ 2: АВТОНОМНЫЕ ТРИГГЕРЫ PRICE ACTION
-    detected_patterns = detect_patterns(candles_15m, a15, e50, recent_high)
+    detected_patterns = detect_patterns(candles_15m, a15, e50, e21, recent_high)
     matched_modes = []
     pattern_keys = []
 
@@ -302,7 +305,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         pattern_keys.append(pkey)
         matched_modes.append(pat["mode"])
 
-    # Динамика 24h
     if 0 < t["change_pct"] < w["chg_hi"]:
         score += learner.weight("chg24h")
         reasons.append(f"24ч +{t['change_pct']:.1f}%")
@@ -314,7 +316,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     if t["quote_volume"] < 500_000:
         score -= 1.0
 
-    # Мультитаймфрейм уровни S/R
     nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_15m, candles_1h)
     
     if nearest_res and res_touches >= 2 and a15 > 0 and not is_open_pos:
@@ -330,7 +331,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             reasons.append(f"отскок от поддержки ${fmt_price(nearest_sup)} ({sup_touches}x)")
             keys.append("support_bounce")
 
-    # Защита от 1H даунтренда
     if candles_1h and len(candles_1h) >= 25:
         closes_1h = [c["close"] for c in candles_1h]
         last_1h = closes_1h[-1]
@@ -384,6 +384,7 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
     base = sym[:-4]
     sectors_map = await get_sectors_for_pool([base])
     ranks_map = await get_ranks_for_pool([base])
+    sector = sectors_map.get(base, "Other")
     tier = tier_of(ranks_map.get(base))
 
     corr = _corr(_returns([c["close"] for c in candles_15m]), btc_ret)
@@ -394,7 +395,15 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
     elif corr < 0.45:
         raw += learner.weight("indep")
 
-    sb = learner.sector_bias(sectors_map.get(base, "Other"))
+    # ⚡ Синхронизация F&G и DefiLlama с основным сканером!
+    fng = get_fear_and_greed()
+    if fng >= 80: raw -= 0.5
+    elif fng <= 25: raw += 0.5
+
+    if is_sector_hot(sector):
+        raw += 0.5
+
+    sb = learner.sector_bias(sector)
     if sb: raw += sb
     tb = learner.tier_bias(tier)
     if tb: raw += tb
