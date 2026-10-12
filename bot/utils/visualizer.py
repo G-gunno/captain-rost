@@ -2,9 +2,9 @@ import pandas as pd
 import httpx
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from loguru import logger
 import json
 import os
+import time
 from pathlib import Path
 from bot.utils.format import fmt_price
 from bot.strategy.indicators import get_all_sr_levels
@@ -64,15 +64,18 @@ class TradeVisualizer:
             
         df_ev = pd.DataFrame(events)
         
-        # ⚡ Защита от KeyError: гарантируем наличие всех аналитических колонок
+        # Гарантируем наличие аналитических колонок
         for col in ['tp', 'sl', 'sup', 'res']:
             if col not in df_ev.columns:
                 df_ev[col] = None
 
         df_ev['datetime'] = pd.to_datetime(df_ev['ts'], unit='s', utc=True).dt.tz_convert(LOG_TIMEZONE).dt.tz_localize(None)
         
-        start_ts = df_ev['ts'].min() - 7200
-        end_ts = df_ev['ts'].max() + 3600
+        # ⚡ 48 часов полной истории без ограничений
+        now_ts = int(time.time())
+        min_ev_ts = df_ev['ts'].min()
+        start_ts = min(min_ev_ts - 7200, now_ts - 48 * 3600)
+        end_ts = now_ts + 3600
         
         df_kline = self.fetch_klines(start_ts, end_ts)
         if df_kline.empty:
@@ -87,7 +90,7 @@ class TradeVisualizer:
         rs = gain / loss
         df_kline['RSI'] = 100 - (100 / (1 + rs))
 
-        df_kline = df_kline.tail(500).reset_index(drop=True)
+        df_kline = df_kline.reset_index(drop=True)
         min_time = df_kline['datetime'].min()
         max_time = df_kline['datetime'].max()
         df_ev = df_ev[df_ev['datetime'] >= min_time]
@@ -107,7 +110,7 @@ class TradeVisualizer:
         fig.add_trace(go.Scatter(x=df_kline['datetime'], y=df_kline['EMA21'], mode='lines', name='EMA 21', line=dict(color='rgba(255, 235, 59, 0.8)', width=1.5)), row=1, col=1)
         fig.add_trace(go.Scatter(x=df_kline['datetime'], y=df_kline['EMA50'], mode='lines', name='EMA 50', line=dict(color='rgba(255, 152, 0, 0.8)', width=1.5)), row=1, col=1)
 
-        # ⚡ ОТРИСОВКА ВСЕХ ПОДТВЕРЖДЕННЫХ УРОВНЕЙ S/R ПО 15M (ПОЛНАЯ ВИДИМОСТЬ СЕТКИ)
+        # Отрисовка уровней S/R
         df_sr_15m = df_kline if self.interval == "15" else self.fetch_klines(start_ts, end_ts, interval_override="15")
         if df_sr_15m.empty: df_sr_15m = df_kline
         
@@ -129,7 +132,7 @@ class TradeVisualizer:
                 hoverinfo="name+y", showlegend=(idx == 0)
             ), row=1, col=1)
 
-        # ⚡ ПОТРЕЙДОВЫЙ АНАЛИЗ: Траектория SL, TP и опорные уровни для КАЖДОЙ сделки
+        # Потрейдовый анализ
         trade_groups = []
         current_trade = []
         for _, ev in df_ev.sort_values('ts').iterrows():
@@ -187,14 +190,14 @@ class TradeVisualizer:
                     hoverinfo="text+y", text=[f"🎯 Тейк: {fmt_price(p)}" for p in tp_y]
                 ), row=1, col=1)
 
-            # 3. Активные уровни Поддержки и Сопротивления этой конкретной сделки
+            # 3. Активные уровни Поддержки и Сопротивления
             tr_sup = tr_df['sup'].dropna()
             if not tr_sup.empty and tr_sup.iloc[0] > 0:
                 s_lvl = tr_sup.iloc[0]
                 fig.add_trace(go.Scatter(
                     x=[t_start, t_end], y=[s_lvl, s_lvl],
                     mode="lines", line=dict(color="rgba(33, 150, 243, 0.85)", width=2.0, dash="dash"),
-                    name=f"Опора поддержки ${fmt_price(s_lvl)} ({label_tag})", hoverinfo="name+y"
+                    name=f"Опора ${fmt_price(s_lvl)} ({label_tag})", hoverinfo="name+y"
                 ), row=1, col=1)
 
             tr_res = tr_df['res'].dropna()
@@ -203,7 +206,7 @@ class TradeVisualizer:
                 fig.add_trace(go.Scatter(
                     x=[t_start, t_end], y=[r_lvl, r_lvl],
                     mode="lines", line=dict(color="rgba(233, 30, 99, 0.85)", width=2.0, dash="dash"),
-                    name=f"Стена сопротивления ${fmt_price(r_lvl)} ({label_tag})", hoverinfo="name+y"
+                    name=f"Стена ${fmt_price(r_lvl)} ({label_tag})", hoverinfo="name+y"
                 ), row=1, col=1)
 
         # === 2 СЛОЙ: Объем ===
