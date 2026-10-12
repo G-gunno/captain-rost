@@ -30,10 +30,11 @@ STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
                 "RLUSD", "PYUSD", "EURI", "USDS", "USD0", "FRAX",
                 "LUSD", "GUSD", "XUSD", "USDX", "CUSD", "SUSD"}
 
+# ⚡ Согласованная матрица порогов под математику 2-слойного движка
 BASE_THRESHOLDS = {
     "bull": {"rocket": 6.0, "sniper": 5.5, "reversal": 5.5},
-    "neutral": {"rocket": 6.5, "sniper": 6.0, "reversal": 6.0},
-    "bear": {"rocket": 7.0, "sniper": 6.5, "reversal": 5.5},
+    "neutral": {"rocket": 6.5, "sniper": 6.0, "reversal": 5.4},
+    "bear": {"rocket": 7.0, "sniper": 6.5, "reversal": 5.2},
 }
 
 TIER_CORR_LIMITS = {
@@ -92,8 +93,8 @@ def raw_max_score(regime):
     m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
     m += learner.weight("indep")
     m += learner.weight("news_pos")
-    m += 3.0   # Паттерн Price Action
-    m += 1.5   # Уровень S/R или MTF импульс
+    m += 3.0   # Максимальный вес ключевого триггера паттерна
+    m += 1.5   # Уровень S/R
     m += 0.5   # Макро / Сектор
     return m
 
@@ -237,7 +238,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     base_vol = sum(vols[-21:-1]) / 20 if len(vols) > 21 else (sum(vols) / max(1, len(vols)))
     vol_ratio = vols[-1] / base_vol if base_vol else 1.0
 
-    # ⚡ Честный расчет хая: строго по ПРЕДЫДУЩИМ свечам (без текущей!)
     prior_candles = candles_15m[-25:-1] if len(candles_15m) >= 25 else candles_15m[:-1]
     recent_high = max(c["high"] for c in prior_candles) if prior_candles else last
     recent_low_2h = min(c["low"] for c in candles_15m[-8:]) if len(candles_15m) >= 8 else min(c["low"] for c in candles_15m)
@@ -250,11 +250,11 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     if e21 > e50: score += learner.weight("ema21"); reasons.append("EMA21>EMA50"); keys.append("ema21")
     if e12 > e26: score += learner.weight("impulse"); reasons.append("импульс роста"); keys.append("impulse")
 
-    # 2. RSI
-    if 40 <= r <= w["rsi_hi"]: 
-        score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
-    elif r < 35:
+    # ⚡ 2. RSI БЕЗ СЛЕПЫХ ЗОН
+    if r < 38:
         score += learner.weight("rsi"); reasons.append(f"перепроданность RSI {r:.0f}"); keys.append("rsi")
+    elif 38 <= r <= w["rsi_hi"]:
+        score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
     elif r > w["rsi_hi"]: 
         score -= 1.5; reasons.append(f"перегрев RSI {r:.0f}") 
 
@@ -263,7 +263,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     is_green = last_candle["close"] >= last_candle["open"]
     c_range = last_candle["high"] - last_candle["low"]
     lower_wick = min(last_candle["open"], last_candle["close"]) - last_candle["low"]
-    is_panic_dip = (t["change_pct"] <= -6.0 or r < 35)
+    is_panic_dip = (t["change_pct"] <= -6.0 or r < 38)
 
     if vol_ratio > w["vol_lo"]:
         has_bottom_wick = c_range > 0 and (lower_wick / c_range) >= 0.40
@@ -305,9 +305,14 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         pattern_keys.append(pkey)
         matched_modes.append(pat["mode"])
 
+    # ⚡ 5. ДИНАМИКА 24H: балл за тренд ИЛИ за глубокий дисконт на дне!
     if 0 < t["change_pct"] < w["chg_hi"]:
         score += learner.weight("chg24h")
         reasons.append(f"24ч +{t['change_pct']:.1f}%")
+        keys.append("chg24h")
+    elif t["change_pct"] <= -5.0 and ("reversal" in matched_modes or r < 38):
+        score += learner.weight("chg24h")
+        reasons.append(f"дисконт 24ч {t['change_pct']:.1f}%")
         keys.append("chg24h")
     elif t["change_pct"] >= w["chg_hi"]:
         score -= 1.0
@@ -395,7 +400,6 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
     elif corr < 0.45:
         raw += learner.weight("indep")
 
-    # ⚡ Синхронизация F&G и DefiLlama с основным сканером!
     fng = get_fear_and_greed()
     if fng >= 80: raw -= 0.5
     elif fng <= 25: raw += 0.5
