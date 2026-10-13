@@ -297,20 +297,20 @@ class PaperExchange:
         self.usdt += proceeds - fee_sell
         transferred = 0.0
 
+        # Безопасное отчисление 30% чистой прибыли в фонд (для TOP20 — в монетах, для остальных — в USDT)
         if total_pnl > 0:
-            if tier == "TOP20":
-                target_return = cost + fee_buy
-                qty_to_sell = (target_return / (1 - self.FEE_PCT / 100)) / price
-                qty_kept = pos["qty"] - qty_to_sell
-                
-                self.usdt -= (proceeds - fee_sell) 
-                self.usdt += target_return         
-                
-                if not hasattr(self, 'funding_coins'): self.funding_coins = {}
-                self.funding_coins[sym] = self.funding_coins.get(sym, 0.0) + qty_kept
-                reason += " 🏦"
+            hodl_reserve_usdt = round(total_pnl * 0.30, 4)
+            if tier == "TOP20" and price > 0:
+                qty_kept = min(pos["qty"] * 0.5, hodl_reserve_usdt / price)
+                if qty_kept > 0:
+                    actual_reserved_usdt = round(qty_kept * price, 4)
+                    self.usdt -= actual_reserved_usdt
+                    if not hasattr(self, 'funding_coins'):
+                        self.funding_coins = {}
+                    self.funding_coins[sym] = self.funding_coins.get(sym, 0.0) + qty_kept
+                    reason += " 🏦"
             else:
-                transferred = round(total_pnl * 0.30, 4)
+                transferred = hodl_reserve_usdt
                 self.usdt -= transferred
                 self.funding += transferred
 
