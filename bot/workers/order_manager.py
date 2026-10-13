@@ -44,6 +44,8 @@ class OrderManagerWorker:
 
         equity = paper.equity(tickers)
         thrs = get_thresholds(regime)
+        sec_lim, other_lim = portfolio_limits(equity)
+        sat_limit = learner.satellite_limit()
         news_items = await fetch_news_cache()
 
         risk_mode = getattr(learner, "current_risk_mode", "NORMAL")
@@ -77,13 +79,13 @@ class OrderManagerWorker:
             entry_mode = cand.get("entry_mode", "sniper")
             is_mom = cand.get("is_momentum", False)
 
-            # 2. Защита от мусорного сектора Other
-            if sector == "Other":
-                other_count = sum(1 for p in paper.positions.values() if (p.get("sector") or "Other") == "Other")
-                other_orders = sum(1 for o in paper.orders if (o.get("sector") or "Other") == "Other")
-                if (other_count + other_orders) >= policy["allowed_other_sector_max"]:
-                    logger.debug(f"OrderManager: {sym} пропущен (лимит сектора Other: {policy['allowed_other_sector_max']})")
-                    continue
+            # 2. Общие лимиты диверсификации секторов (без искусственного удушения Other)
+            lim = other_lim if sector == "Other" else sec_lim
+            sector_count = sum(1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector)
+            sector_orders = sum(1 for o in paper.orders if (o.get("sector") or "Other") == sector)
+            if (sector_count + sector_orders) >= lim:
+                logger.debug(f"OrderManager: {sym} пропущен (лимит сектора {sector}: {lim})")
+                continue
 
             # 3. Барьер качества Grade A+ для режима STRICT / CAUTIOUS
             grade = evaluate_setup_grade(cand)
@@ -111,7 +113,7 @@ class OrderManagerWorker:
             a = cand["atr"]
             if a <= 0: continue
 
-            # ⚡ 4. ПОИСК СОПРОТИВЛЕНИЯ СТРОГО ОТНОСИТЕЛЬНО ЦЕНЫ ВХОДА ENTRY
+            # Поиск актуального сопротивления строго относительно цены входа
             all_res = cand.get("signal_values", {}).get("all_res", [])
             res_above_entry = [r for r in all_res if r > entry * 1.0015]
             entry_res = min(res_above_entry) if res_above_entry else cand.get("nearest_res")
@@ -131,7 +133,7 @@ class OrderManagerWorker:
                 logger.info(f"OrderManager: {sym} отклонён -> {rej_reason}")
                 continue
 
-            # 5. Бюджетирование совокупного риска (Portfolio VaR)
+            # 4. Бюджетирование совокупного риска (Portfolio VaR)
             sl_dist_pct = (entry - sl) / entry * 100
             if sl_dist_pct <= 0: continue
 
@@ -159,7 +161,7 @@ class OrderManagerWorker:
             if kind == "satellite":
                 sat_exp = sum(p["qty"] * tickers.get(s, {}).get("last", 0) for s, p in paper.positions.items() if p.get("kind") == "satellite")
                 sat_exp += sum(o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite")
-                if sat_exp >= equity * learner.satellite_limit() / 100:
+                if sat_exp >= equity * sat_limit / 100:
                     continue
 
             qty = size / entry
