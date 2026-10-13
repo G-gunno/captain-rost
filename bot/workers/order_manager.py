@@ -7,21 +7,22 @@ from bot.exchange.paper_exchange import paper
 from bot.strategy.sizing import buy_size, portfolio_limits, tier_limits, entry_offset
 from bot.strategy.scanner import get_thresholds
 from bot.strategy.learner import learner
-from bot.strategy.risk import calc_initial_sl_tp
+from bot.strategy.risk import (calc_initial_sl_tp, get_trade_policy, 
+                                evaluate_setup_grade, calc_total_open_risk_pct)
 from bot.news.cmc import get_coin_name
 from bot.news.rss_news import fetch_news_cache, check_sentiment
 from bot.utils.format import pair_html, corr_txt, usd, fmt_price, fmt_pct
 from bot.core.state import bot_state
 
 class OrderManagerWorker:
-    """Управляет портфелем: предварительная фильтрация новостей, единый риск и сайзинг."""
+    """Управляет портфелем: контроль совокупного риска, Grade A+ и фильтрация структуры."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
         self.signal_queue = self.bus.subscribe("SIGNALS_READY", maxsize=2)
 
     async def run(self):
-        logger.info("💼 Order Manager запущен: предварительная фильтрация новостей и контроль структуры...")
+        logger.info("💼 Order Manager запущен: контроль Portfolio VaR и политик риска...")
         while True:
             try:
                 event = await self.signal_queue.get()
@@ -42,32 +43,32 @@ class OrderManagerWorker:
 
         equity = paper.equity(tickers)
         thrs = get_thresholds(regime)
-        sec_lim, other_lim = portfolio_limits(equity)
-        sat_limit = learner.satellite_limit()
         news_items = await fetch_news_cache()
 
-        logger.info(f"💼 OrderManager: получено кандидатов: {len(candidates)} {[c['symbol'] for c in candidates]}")
+        # ⚡ ТОРГОВАЯ ПОЛИТИКА ТЕКУЩЕГО РЕЖИМА
+        risk_mode = getattr(learner, "current_risk_mode", "NORMAL")
+        policy = get_trade_policy(risk_mode)
+
+        logger.info(f"💼 OrderManager [{risk_mode}]: кандидатов {len(candidates)}, открытый риск {calc_total_open_risk_pct(paper.positions, paper.orders, equity):.2f}% / {policy['max_portfolio_risk_pct']}%")
 
         for cand in candidates:
             sym = cand["symbol"]
             base = sym[:-4]
 
-            # Предварительный фильтр новостей
+            # 1. Предварительный фильтр новостей
             name = await get_coin_name(base)
             neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
             if neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33):
-                logger.info(f"OrderManager: {sym} отклонен ДО выставления -> токсичные новости ({neg}/{mentions})")
+                logger.info(f"OrderManager: {sym} отклонен -> токсичные новости ({neg}/{mentions})")
                 bot_state.set_cooldown(sym, 7200)
                 continue
 
             patterns = cand.get("patterns", [])
             is_accum = "vcp" in patterns
             if bot_state.is_on_cooldown(sym) and not is_accum:
-                logger.debug(f"OrderManager: {sym} пропущен (кулдаун)")
                 continue
 
             if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
-                logger.debug(f"OrderManager: {sym} уже в работе")
                 continue
 
             kind = cand.get("kind", "core")
@@ -75,6 +76,21 @@ class OrderManagerWorker:
             tier = cand.get("tier") or "SMALL"
             entry_mode = cand.get("entry_mode", "sniper")
             is_mom = cand.get("is_momentum", False)
+
+            # ⚡ 2. ЗАЩИТА ОТ МУСОРНОГО СЕКТОРА OTHER
+            if sector == "Other":
+                other_count = sum(1 for p in paper.positions.values() if (p.get("sector") or "Other") == "Other")
+                other_orders = sum(1 for o in paper.orders if (o.get("sector") or "Other") == "Other")
+                if (other_count + other_orders) >= policy["allowed_other_sector_max"]:
+                    logger.debug(f"OrderManager: {sym} пропущен (лимит сектора Other: {policy['allowed_other_sector_max']})")
+                    continue
+
+            # ⚡ 3. БАРЬЕР КАЧЕСТВА GRADE A+ ДЛЯ РЕЖИМА STRICT / CAUTIOUS
+            grade = evaluate_setup_grade(cand)
+            if policy["require_grade_a_for_alt"] and entry_mode in ("reversal", "rocket"):
+                if grade != "A+":
+                    logger.info(f"OrderManager: {sym} пропущен -> режим {risk_mode} требует грейд A+ для {entry_mode} (текущий: {grade})")
+                    continue
 
             thr = thrs.get(entry_mode, 6.0)
             off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], entry_mode, tier=tier, is_accumulation=is_accum)
@@ -97,20 +113,44 @@ class OrderManagerWorker:
 
             res = cand.get("nearest_res")
             res_touches = cand.get("res_touches", 0)
+            min_rr = policy["min_rr_sniper"] if entry_mode == "sniper" else policy["min_rr_alt"]
 
             sl, tp, is_valid, rej_reason = calc_initial_sl_tp(
                 symbol=sym, entry=entry, tier=tier, a=a,
                 sup=sup, sup_touches=sup_touches,
                 res=res, res_touches=res_touches,
-                is_mom=is_mom, entry_mode=entry_mode
+                is_mom=is_mom, entry_mode=entry_mode,
+                min_rr=min_rr
             )
 
             if not is_valid:
                 logger.info(f"OrderManager: {sym} отклонён -> {rej_reason}")
                 continue
 
-            size = buy_size(equity, cand["score"], thr, cand["liquidity"], paper.usdt,
-                            kind=kind, entry_mode=entry_mode)
+            # ⚡ 4. БЮДЖЕТИРОВАНИЕ СОВОКУПНОГО РИСКА (PORTFOLIO VAR)
+            sl_dist_pct = (entry - sl) / entry * 100
+            if sl_dist_pct <= 0: continue
+
+            # Риск на сделку из торговой политики
+            trade_risk_budget_pct = policy["risk_per_trade_core"] if entry_mode == "sniper" else policy["risk_per_trade_alt"]
+            
+            # Проверяем лимит совокупного риска портфеля
+            current_risk_pct = calc_total_open_risk_pct(paper.positions, paper.orders, equity)
+            avail_risk_budget_pct = policy["max_portfolio_risk_pct"] - current_risk_pct
+
+            if avail_risk_budget_pct <= 0.10:
+                logger.debug(f"OrderManager: {sym} пропущен -> лимит совокупного риска {policy['max_portfolio_risk_pct']}% исчерпан")
+                continue
+
+            effective_risk_pct = min(trade_risk_budget_pct, avail_risk_budget_pct)
+            size_by_risk = (equity * (effective_risk_pct / 100.0)) / (sl_dist_pct / 100.0)
+
+            # Базовый сайзинг
+            size_base = buy_size(equity, cand["score"], thr, cand["liquidity"], paper.usdt,
+                                 kind=kind, entry_mode=entry_mode)
+
+            size = min(size_base, size_by_risk, paper.usdt * 0.95, equity * 0.10)
+            size = round(size, 2)
 
             if size < 10:
                 logger.debug(f"OrderManager: {sym} пропущен (размер {size} < 10 USDT)")
@@ -119,66 +159,8 @@ class OrderManagerWorker:
             if kind == "satellite":
                 sat_exp = sum(p["qty"] * tickers.get(s, {}).get("last", 0) for s, p in paper.positions.items() if p.get("kind") == "satellite")
                 sat_exp += sum(o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite")
-                if sat_exp >= equity * sat_limit / 100:
-                    logger.debug(f"OrderManager: {sym} пропущен (лимит сателлитов {sat_limit}%)")
+                if sat_exp >= equity * learner.satellite_limit() / 100:
                     continue
-
-            # Ротация слабых позиций
-            planned_sells, planned_cancels = [], []
-            lim = other_lim if sector == "Other" else sec_lim
-            sector_count = sum(1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector)
-
-            if sector_count >= lim:
-                if is_mom: 
-                    sector_positions = [(s, p) for s, p in paper.positions.items() if (p.get("sector") or "Other") == sector]
-                    if sector_positions:
-                        w_sym, w_pos = min(sector_positions, key=lambda kv: kv[1].get("score", 0))
-                        t_w = tickers.get(w_sym)
-                        if t_w:
-                            weak_pnl = (t_w["last"] - w_pos["avg"]) / w_pos["avg"] * 100
-                            can_rotate = (cand["score"] >= w_pos.get("score", 0) + 1.0 and not w_pos.get("tp1_done") and weak_pnl >= -2.0)
-                            if can_rotate:
-                                planned_sells.append((w_sym, w_pos, t_w["last"], weak_pnl, "РОТАЦИЯ СЕКТОРА 🔄"))
-                            else:
-                                continue
-                else:
-                    logger.debug(f"OrderManager: {sym} пропущен (лимит сектора {sector})")
-                    continue
-
-            proj_pending = sum(o["qty"] * o["price"] for o in paper.orders)
-            proj_usdt = paper.usdt + sum(w_pos["qty"] * last for _, w_pos, last, _, _ in planned_sells)
-
-            if proj_pending + size > proj_usdt:
-                available_orders = [o for o in paper.orders if o not in planned_cancels]
-                if available_orders:
-                    w_o = min(available_orders, key=lambda o: o.get("score", 0))
-                    if cand["score"] >= w_o.get("score", 0) + 1.0:
-                        planned_cancels.append(w_o)
-                        proj_pending -= w_o["qty"] * w_o["price"]
-
-                if is_mom and (proj_pending + size > proj_usdt):
-                    planned_syms = [s[0] for s in planned_sells]
-                    available_pos = [(s, p) for s, p in paper.positions.items() if s not in planned_syms]
-                    if available_pos:
-                        w_sym, w_p = min(available_pos, key=lambda kv: kv[1].get("score", 0))
-                        t_w = tickers.get(w_sym)
-                        if t_w:
-                            pnl = (t_w["last"] - w_p["avg"]) / w_p["avg"] * 100
-                            if cand["score"] >= w_p.get("score", 0) + 1.5 and not w_p.get("tp1_done") and pnl >= -2.0:
-                                planned_sells.append((w_sym, w_p, t_w["last"], pnl, "ОБЩАЯ РОТАЦИЯ 🔄"))
-                                proj_usdt += w_p["qty"] * t_w["last"]
-
-            if proj_pending + size > proj_usdt:
-                logger.debug(f"OrderManager: {sym} пропущен (недостаточно свободных USDT)")
-                continue 
-
-            for w_o in planned_cancels:
-                paper.cancel_order(w_o["id"])
-                self._notify(f"🔄 <b>Ротация ордера</b> · <b>{w_o['symbol'][:-4]}</b> снят\nМесто для <b>{sym[:-4]}</b>")
-
-            for w_sym, w_pos, last, pnl, reason in planned_sells:
-                ex = paper._sell(w_sym, last, reason, regime_now=regime)
-                self._notify(f"🔄 <b>{reason}</b> · <b>{w_sym[:-4]}</b> → <b>{sym[:-4]}</b>\n💵 Освобождено {usd(ex['pnl'])}")
 
             qty = size / entry
             order = paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl, score=cand["score"], reason_keys=cand.get("reason_keys", []))
@@ -191,7 +173,8 @@ class OrderManagerWorker:
                 "nearest_sup": sup,
                 "sup_touches": sup_touches,
                 "sl_state": "SHIELD",
-                "patterns": patterns
+                "patterns": patterns,
+                "grade": grade
             })
             paper.save()
 
@@ -200,12 +183,12 @@ class OrderManagerWorker:
 
             tp_pct = (tp - entry) / entry * 100
             sl_pct = (sl - entry) / entry * 100
-            new_tag = "· 🆕 " if cand.get("is_new") else ""
+            grade_badge = f" [Grade {grade}]" if grade == "A+" else ""
 
-            logger.info(f"OrderManager: 🎯 {sym} ВЫСТАВЛЕН ОРДЕР {entry_mode}: entry=${fmt_price(entry)}, TP=${fmt_price(tp)}, SL=${fmt_price(sl)}")
+            logger.info(f"OrderManager: 🎯 {sym} ОРДЕР {entry_mode}{grade_badge}: entry=${fmt_price(entry)}, TP=${fmt_price(tp)}, SL=${fmt_price(sl)}")
 
             self._notify(
-                f"📋 <b>Ордер</b> {new_tag}· {pair_html(sym, order)}\n"
+                f"📋 <b>Ордер</b> · {pair_html(sym, order)}{grade_badge}\n"
                 f"💵 {usd(size)} · 📥 {fmt_price(entry)} ({off * 100:+.2f}%){corr_txt(cand)}\n"
                 f"🎯 {fmt_price(tp)} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
                 f"⭐ {cand['score']:.1f} · 🧠 {'; '.join(cand['reasons'][:3])}"
