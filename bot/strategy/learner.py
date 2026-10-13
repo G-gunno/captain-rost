@@ -9,7 +9,6 @@ from bot.core.remote_state import download_state, upload_state
 STATE_FILE = Path("storage/learner.json")
 REMOTE_PATH = "learner.json"
 
-# ⚡ Возвращен обучаемый параметр hype (строго 9 ключевых метрик среды)
 KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "indep", "news_pos", "hype"]
 
 PATTERN_NAMES = {
@@ -19,11 +18,6 @@ PATTERN_NAMES = {
     "breakout": "🚀 Импульсный пробой",
     "engulfing": "⚡ Бычье поглощение"
 }
-
-SAT_LIMIT_BASE = 20.0
-SAT_LIMIT_MAX = 30.0
-SAT_LIMIT_MIN = 10.0
-SAT_SIZE_BASE = 2.0
 
 TIERS = ["TOP20", "MID", "SMALL", "MICRO"]
 
@@ -39,7 +33,6 @@ class Learner:
         self.sector_stats = {}
         self.tier_stats = {}
         self.exit_stats = {}
-        self.kind_stats = {}
         self.entry_stats = {}
         self.pattern_stats = {}
         self._last_upload = 0.0
@@ -64,7 +57,6 @@ class Learner:
             self.sector_stats = data.get("sector_stats", {})
             self.tier_stats = data.get("tier_stats", {})
             self.exit_stats = data.get("exit_stats", {})
-            self.kind_stats = data.get("kind_stats", {})
             self.entry_stats = data.get("entry_stats", {})
             self.pattern_stats = data.get("pattern_stats", {})
             logger.info("learner: опыт загружен")
@@ -77,7 +69,6 @@ class Learner:
             "sector_stats": {k: v[-50:] for k, v in self.sector_stats.items()},
             "tier_stats": {k: v[-50:] for k, v in self.tier_stats.items()},
             "exit_stats": {k: v[-50:] for k, v in self.exit_stats.items()},
-            "kind_stats": {k: v[-50:] for k, v in self.kind_stats.items()},
             "entry_stats": {k: v[-50:] for k, v in self.entry_stats.items()},
             "pattern_stats": {k: v[-50:] for k, v in self.pattern_stats.items()},
         }
@@ -94,7 +85,7 @@ class Learner:
         return self.weights.get(key, 1.0)
 
     def record(self, keys, win, pnl_pct=0.0, sector=None, tier=None,
-               exit_type=None, runner_bonus=0.0, kind=None, soft=False, 
+               exit_type=None, runner_bonus=0.0, soft=False, 
                entry_mode=None, patterns=None):
         self.results.append(1 if win else 0)
         self.results = self.results[-200:]
@@ -111,10 +102,6 @@ class Learner:
             eh = self.exit_stats.setdefault(exit_type, [])
             eh.append(round(pnl_pct, 2))
             self.exit_stats[exit_type] = eh[-50:]
-        if kind:
-            kh = self.kind_stats.setdefault(kind, [])
-            kh.append(round(pnl_pct, 2))
-            self.kind_stats[kind] = kh[-50:]
         if entry_mode:
             em_h = self.entry_stats.setdefault(entry_mode, [])
             em_h.append(round(pnl_pct, 2))
@@ -181,21 +168,6 @@ class Learner:
         bias = (wr - 0.5) + max(-0.25, min(0.25, avg * 0.25))
         return round(max(-0.5, min(0.5, bias)), 2)
 
-    def satellite_limit(self):
-        core = self.kind_stats.get("core") or []
-        sat = self.kind_stats.get("satellite") or []
-        if len(core) >= 3 and len(sat) >= 3:
-            avg_core = sum(core) / len(core)
-            avg_sat = sum(sat) / len(sat)
-            if avg_sat > avg_core + 0.5:
-                return SAT_LIMIT_MAX
-            if avg_sat < avg_core - 0.5:
-                return SAT_LIMIT_MIN
-        return SAT_LIMIT_BASE
-
-    def satellite_size_pct(self):
-        return round(SAT_SIZE_BASE * self.satellite_limit() / SAT_LIMIT_BASE, 2)
-
     def reset(self):
         self.weights = {k: 1.0 for k in KEYS}
         self.results = []
@@ -204,7 +176,6 @@ class Learner:
         self.sector_stats = {}
         self.tier_stats = {}
         self.exit_stats = {}
-        self.kind_stats = {}
         self.entry_stats = {}
         self.pattern_stats = {}
         self.save()
@@ -216,7 +187,6 @@ class Learner:
         self.sector_stats = {}
         self.tier_stats = {}
         self.exit_stats = {}
-        self.kind_stats = {}
         self.entry_stats = {}
         self.pattern_stats = {}
         self.save()
