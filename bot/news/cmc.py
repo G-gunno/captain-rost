@@ -11,18 +11,34 @@ from bot.core.remote_state import download_state, upload_state
 
 CMC_BASE = "https://pro-api.coinmarketcap.com"
 
-# ===== БАЗОВЫЙ СЛОВАРЬ СЕКТОРОВ (только оверрид; остальное учится само) =====
+# ===== БАЗОВЫЙ СЛОВАРЬ СЕКТОРОВ =====
 SECTORS = {
+    # L1
     "BTC": "L1", "ETH": "L1", "SOL": "L1", "BNB": "L1", "AVAX": "L1",
     "ADA": "L1", "DOT": "L1", "NEAR": "L1", "APT": "L1", "SUI": "L1",
     "XRP": "L1", "LTC": "L1", "BCH": "L1", "ATOM": "L1", "TON": "L1",
+    "TIA": "L1", "SEI": "L1", "KAS": "L1", "HBAR": "L1", "ICP": "L1",
+    # L2
     "ARB": "L2", "OP": "L2", "STRK": "L2", "POL": "L2", "ZRO": "L2",
-    "UNI": "DeFi", "AAVE": "DeFi", "LINK": "DeFi", "MKR": "DeFi",
-    "CRV": "DeFi", "LDO": "DeFi", "DYDX": "DeFi", "JUP": "DeFi",
+    "ZK": "L2", "BLAST": "L2", "MANTA": "L2",
+    # DeFi & Staking
+    "UNI": "DeFi", "AAVE": "DeFi", "MKR": "DeFi", "CRV": "DeFi",
+    "LDO": "DeFi", "DYDX": "DeFi", "JUP": "DeFi", "ENA": "DeFi",
+    "PENDLE": "DeFi", "JTO": "DeFi", "FLUID": "DeFi", "INJ": "DeFi",
+    # Oracles & Infra
+    "LINK": "Oracle", "PYTH": "Oracle",
+    # Memes
     "DOGE": "Meme", "SHIB": "Meme", "PEPE": "Meme", "BONK": "Meme",
     "WIF": "Meme", "FLOKI": "Meme", "PENGU": "Meme", "TRUMP": "Meme",
+    "POPCAT": "Meme", "BRETT": "Meme",
+    # Gaming
     "AXS": "Gaming", "SAND": "Gaming", "GALA": "Gaming", "NOT": "Gaming",
-    "FET": "AI", "RNDR": "AI", "GRT": "AI", "WLD": "AI", "GRASS": "AI",
+    "BEAM": "Gaming", "IMX": "Gaming",
+    # AI & DePIN
+    "FET": "AI", "RNDR": "AI", "RENDER": "AI", "GRT": "AI", "WLD": "AI",
+    "GRASS": "AI", "TAO": "AI", "IO": "DePIN", "FIL": "Storage", "AR": "Storage",
+    # RWA
+    "ONDO": "RWA",
 }
 
 SECTOR_TAG_MAP = {
@@ -30,8 +46,15 @@ SECTOR_TAG_MAP = {
     "ai-big-data": "AI", "memes": "Meme", "gaming": "Gaming",
     "metaverse": "Gaming", "nft-collectibles": "Gaming",
     "infrastructure": "Infra", "storage": "Storage", "privacy": "Privacy",
-    "real-world-assets": "RWA", "dex": "DEX", "exchange-token": "Exchange",
-    "interoperability": "Infra", "oracle": "Infra",
+    "real-world-assets": "RWA", "rwa": "RWA", "dex": "DEX",
+    "exchange-token": "Exchange", "interoperability": "Infra",
+    "oracle": "Oracle", "oracles": "Oracle", "depin": "DePIN",
+    "distributed-computing": "DePIN", "iot": "DePIN",
+    "yield-farming": "DeFi", "restaking": "DeFi", "liquid-staking": "DeFi",
+    "derivatives": "DeFi", "lending-borrowing": "DeFi",
+    "cross-chain": "Infra", "bridge": "Infra", "modular-blockchain": "L1",
+    "payments": "Payments", "social": "Social", "dao": "DeFi",
+    "telegram-ecosystem": "Gaming",
 }
 
 # ===== КАП-ТИРЫ CMC =====
@@ -56,11 +79,10 @@ def tier_of(rank):
     return "MICRO"
 
 
-# ===== КЭШ СЕКТОРОВ (локально + бэкап в GitHub) =====
 SECTOR_FILE = Path(os.getenv("STORAGE_DIR", "storage")) / "sectors.json"
 SECTOR_REMOTE = "sectors.json"
 _sector_cache = {}
-_missing_sectors_cooldown = {}  # Карантин для неизвестных монет (в ОЗУ)
+_missing_sectors_cooldown = {}
 _last_upload = 0.0
 
 
@@ -72,13 +94,11 @@ def _load_sectors():
     except Exception as e:
         logger.error(f"sectors load error: {e}")
         
-    # Если локального файла нет (свежий деплой) — восстанавливаем из GitHub
     if not _sector_cache:
         data = download_state(SECTOR_REMOTE)
         if isinstance(data, dict) and data:
             _sector_cache = data
             
-    # Очищаем кэш от старых "Other", чтобы дать им второй шанс обновиться
     cleaned = {k: v for k, v in _sector_cache.items() if v != "Other"}
     if len(cleaned) < len(_sector_cache):
         _sector_cache = cleaned
@@ -93,7 +113,6 @@ def _save_sectors():
         SECTOR_FILE.write_text(json.dumps(_sector_cache, ensure_ascii=False))
     except Exception as e:
         logger.error(f"sectors save error: {e}")
-    # Бэкап в GitHub не чаще раза в час
     if time.time() - _last_upload > 3600:
         _last_upload = time.time()
         upload_state(SECTOR_REMOTE, _sector_cache)
@@ -108,7 +127,7 @@ def sector_of(base):
 
 def _tags_to_sector(tags):
     for t in tags or []:
-        s = SECTOR_TAG_MAP.get(t)
+        s = SECTOR_TAG_MAP.get(t.lower())
         if s:
             return s
     return None
@@ -125,7 +144,6 @@ async def get_sectors_for_pool(bases):
         elif b in _sector_cache:
             result[b] = _sector_cache[b]
         elif b in _missing_sectors_cooldown and now - _missing_sectors_cooldown[b] < 86400:
-            # Монета в карантине (спрашивали меньше 24 часов назад)
             result[b] = "Other"
         else:
             need.append(b)
@@ -155,11 +173,9 @@ async def get_sectors_for_pool(bases):
             result[b] = sector
             
             if sector != "Other":
-                # Ура, сектор найден! Сохраняем навсегда в базу
                 _sector_cache[b] = sector
                 learned += 1
             else:
-                # Сектора на CMC еще нет. Отправляем в карантин на 24 часа (в ОЗУ)
                 _missing_sectors_cooldown[b] = now
                 
         if learned:
@@ -172,7 +188,6 @@ async def get_sectors_for_pool(bases):
     return result
 
 
-# ===== РАНГИ CMC (кэш 6 часов) =====
 RANKS_FILE = Path(os.getenv("STORAGE_DIR", "storage")) / "ranks.json"
 _ranks = {"data": {}, "ts": 0.0}
 
@@ -192,7 +207,6 @@ _load_ranks()
 
 
 async def get_ranks_for_pool(bases):
-    """Ранги CMC для пула; обновление раз в 6 часов (1 пакетный запрос)."""
     now = time.time()
     if _ranks["data"] and now - _ranks["ts"] < 21600:
         return {b: _ranks["data"].get(b) for b in bases}
@@ -240,7 +254,6 @@ async def _get(path, params):
         return None
 
 
-# ===== БЕТОННЫЙ КЭШ ИМЕН МОНЕТ (чтобы не жрать лимиты при рестартах) =====
 NAMES_FILE = Path(os.getenv("STORAGE_DIR", "storage")) / "names.json"
 NAMES_REMOTE = "names.json"
 _names_cache = {}
@@ -277,7 +290,6 @@ _load_names()
 
 
 async def fetch_missing_names(symbols):
-    """Массовая загрузка имен монет (пачками по 100). Работает в связке с GitHub."""
     need = [s for s in symbols if s not in _names_cache]
     if not need:
         return
@@ -300,13 +312,11 @@ async def fetch_missing_names(symbols):
                             name = arr[0].get("name", "")
                         elif isinstance(arr, dict):
                             name = arr.get("name", "")
-                        
-                        # Кэшируем даже пустые имена, чтобы больше не спрашивать про них
                         _names_cache[s] = name
                         learned += 1
             except Exception as e:
                 logger.error(f"CMC fetch_missing_names error: {e}")
-            await asyncio.sleep(1.0) # Защита от лимитов (макс 30 зап/мин)
+            await asyncio.sleep(1.0)
             
     if learned:
         _save_names()
@@ -314,11 +324,9 @@ async def fetch_missing_names(symbols):
 
 
 async def get_coin_name(symbol: str) -> str:
-    """Возвращает имя из вечного кэша. Одиночные запросы к API теперь огромная редкость."""
     if symbol in _names_cache:
         return _names_cache[symbol]
         
-    # Запасной план: если монеты вдруг нет в кэше, запрашиваем 1 раз и сохраняем навсегда
     data = await _get("/v1/cryptocurrency/info", {"symbol": symbol})
     name = ""
     if data and "data" in data:
@@ -333,9 +341,7 @@ async def get_coin_name(symbol: str) -> str:
     return name
 
 
-# ===== ПАМЯТЬ ПО МОНЕТАМ (для /learn) =====
 def memory_stats():
-    """Сводка памяти: база + выученные монеты, раскладка по секторам и тирам."""
     sector_counts = {}
     for sec in SECTORS.values():
         sector_counts[sec] = sector_counts.get(sec, 0) + 1
