@@ -2,41 +2,41 @@ from bot.strategy.indicators import atr, find_sr_levels, get_all_sr_levels
 from bot.strategy.shadow import shadow
 
 TIER_SL_FLOOR = {
-    "TOP20": 0.010,  # 1.0%
-    "MID":   0.015,  # 1.5%
-    "SMALL": 0.020,  # 2.0%
-    "MICRO": 0.025,  # 2.5%
+    "TOP20": 0.009,  # 0.9%
+    "MID":   0.012,  # 1.2%
+    "SMALL": 0.015,  # 1.5%
+    "MICRO": 0.020,  # 2.0%
 }
 
+# Реалистичный пол для первого тейка (TP1 50%) на 15m ТФ (остаток 50% идет по 1H уровням)
 TIER_TP_FLOOR = {
-    "TOP20": 0.012,  # 1.2%
-    "MID":   0.020,  # 2.0%
-    "SMALL": 0.025,  # 2.5%
-    "MICRO": 0.028,  # 2.8%
+    "TOP20": 0.010,  # 1.0%
+    "MID":   0.013,  # 1.3%
+    "SMALL": 0.016,  # 1.6%
+    "MICRO": 0.018,  # 1.8%
 }
 
 TIER_MAX_SL = {
     "TOP20": 2.0,   # Макс стоп 2.0%
-    "MID":   2.8,   # Макс стоп 2.8%
-    "SMALL": 3.5,   # Макс стоп 3.5%
-    "MICRO": 4.5,   # Макс стоп 4.5%
+    "MID":   2.6,   # Макс стоп 2.6%
+    "SMALL": 3.2,   # Макс стоп 3.2%
+    "MICRO": 4.0,   # Макс стоп 4.0%
 }
 
 TIER_TRAIL_CONFIG = {
-    "TOP20": {"be_trigger": 0.007, "runner_dist": 0.008, "pre_tp_trigger": 1.5, "pre_tp_dist": 0.006},
-    "MID":   {"be_trigger": 0.010, "runner_dist": 0.013, "pre_tp_trigger": 2.0, "pre_tp_dist": 0.010},
-    "SMALL": {"be_trigger": 0.012, "runner_dist": 0.016, "pre_tp_trigger": 2.2, "pre_tp_dist": 0.012},
-    "MICRO": {"be_trigger": 0.014, "runner_dist": 0.022, "pre_tp_trigger": 2.5, "pre_tp_dist": 0.018},
+    "TOP20": {"be_trigger": 0.007, "runner_dist": 0.008, "pre_tp_trigger": 1.2, "pre_tp_dist": 0.005},
+    "MID":   {"be_trigger": 0.009, "runner_dist": 0.012, "pre_tp_trigger": 1.5, "pre_tp_dist": 0.008},
+    "SMALL": {"be_trigger": 0.011, "runner_dist": 0.015, "pre_tp_trigger": 1.8, "pre_tp_dist": 0.010},
+    "MICRO": {"be_trigger": 0.013, "runner_dist": 0.020, "pre_tp_trigger": 2.0, "pre_tp_dist": 0.014},
 }
 
-# Торговые политики бюджетирования риска (Portfolio VaR) и порогов RR
 TRADE_POLICIES = {
     "STRICT": {
         "max_portfolio_risk_pct": 1.5,
         "risk_per_trade_core": 0.50,
         "risk_per_trade_alt": 0.25,
-        "min_rr_sniper": 1.25,
-        "min_rr_alt": 1.10,
+        "min_rr_sniper": 1.20,
+        "min_rr_alt": 1.05,
         "require_grade_a_for_alt": True,
     },
     "CAUTIOUS": {
@@ -51,7 +51,7 @@ TRADE_POLICIES = {
         "max_portfolio_risk_pct": 3.0,
         "risk_per_trade_core": 1.00,
         "risk_per_trade_alt": 0.75,
-        "min_rr_sniper": 1.10,
+        "min_rr_sniper": 1.05,
         "min_rr_alt": 0.95,
         "require_grade_a_for_alt": False,
     },
@@ -59,7 +59,7 @@ TRADE_POLICIES = {
         "max_portfolio_risk_pct": 5.0,
         "risk_per_trade_core": 1.25,
         "risk_per_trade_alt": 1.00,
-        "min_rr_sniper": 1.05,
+        "min_rr_sniper": 1.00,
         "min_rr_alt": 0.90,
         "require_grade_a_for_alt": False,
     },
@@ -80,13 +80,7 @@ def calc_breakeven_price(avg_price: float, fee_pct: float = 0.10) -> float:
 
 
 def evaluate_setup_grade(cand: dict) -> str:
-    """
-    Оценивает класс сетапа (Grade A+ vs B) по степени схождения факторов (конфлюэнции):
-    - Паттерн Price Action
-    - Подтвержденная опора S/R (>= 2 касаний)
-    - Всплеск объема (>= 1.35x) или MTF-подтверждение
-    - Высокий общий скор (>= 7.2)
-    """
+    """Оценивает класс сетапа (Grade A+ vs B) по степени схождения факторов."""
     confluence = 0
     patterns = cand.get("patterns", [])
     keys = cand.get("reason_keys", [])
@@ -103,7 +97,7 @@ def evaluate_setup_grade(cand: dict) -> str:
     if "mtf_dip" in keys or sv.get("volume", 1.0) >= 1.35:
         confluence += 1
 
-    if cand.get("score", 0.0) >= 7.2:
+    if cand.get("score", 0.0) >= 7.0:
         confluence += 1
 
     return "A+" if confluence >= 3 else "B"
@@ -119,7 +113,6 @@ def calc_total_open_risk_pct(positions: dict, orders: list, equity: float) -> fl
         avg = pos.get("avg", 0.0)
         sl = pos.get("sl", 0.0)
         qty = pos.get("qty", 0.0)
-        # Если стоп ниже цены входа, позиция несет открытый риск
         if avg > sl > 0 and qty > 0:
             total_risk_usdt += (avg - sl) * qty
 
@@ -138,25 +131,27 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
                         is_mom: bool = False, entry_mode: str = "sniper",
                         min_rr: float = None):
     tier = tier or "SMALL"
-    sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.020)
-    tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.028)
-    max_sl_allowed = TIER_MAX_SL.get(tier, 3.5)
+    sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.015)
+    tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.016)
+    max_sl_allowed = TIER_MAX_SL.get(tier, 3.2)
 
     sl_tuning = shadow.sl_mult()
     tp_tuning = shadow.tp_mult()
 
     # 1. Расчет защитного стоп-лосса (SL)
+    # Привязываем стоп к поддержке ТОЛЬКО если она в рабочей ближней зоне (<= 1.8 ATR)
     sl_dist = 0.0
-    if sup and sup_touches >= 2 and sup < entry:
+    if sup and sup_touches >= 2 and sup < entry and (entry - sup) <= 1.8 * a:
         struct_sl = round(sup * 0.997, 8)
-        candidate_dist = entry - struct_sl
+        candidate_dist = max(entry - struct_sl, entry * sl_floor_pct)
         candidate_dist_pct = (candidate_dist / entry) * 100
         if candidate_dist_pct <= max_sl_allowed:
-            sl = struct_sl
             sl_dist = candidate_dist
+            sl = round(entry - sl_dist, 8)
 
+    # Если поддержка далеко внизу — ставим компактный волатильностный стоп по ATR
     if sl_dist <= 0:
-        base_mult = 0.75 if is_mom else (2.0 if entry_mode == "reversal" else 1.2)
+        base_mult = 0.75 if is_mom else (1.55 if entry_mode == "reversal" else 1.15)
         sl_dist_raw = max(base_mult * a * sl_tuning, entry * sl_floor_pct)
         sl_dist = min(sl_dist_raw, entry * (max_sl_allowed / 100.0))
         sl = round(entry - sl_dist, 8)
@@ -164,13 +159,13 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     if sl >= entry or (sl_dist / entry * 100) > max_sl_allowed:
         return None, None, False, "Недопустимая дистанция SL"
 
-    # 2. Расчет тейк-профита (TP)
-    tp_dist_raw = max(2.0 * a * tp_tuning, sl_dist * 1.5, entry * tp_floor_pct)
+    # 2. Расчет первого тейк-профита (TP1 — фиксация 50% и перевод в БУ)
+    tp_dist_raw = max(1.65 * a * tp_tuning, sl_dist * 1.35, entry * tp_floor_pct)
     tp = round(entry + tp_dist_raw, 8)
     if min_rr is None:
-        min_rr = 1.10 if entry_mode == "sniper" else 0.95
+        min_rr = 1.05 if entry_mode == "sniper" else 0.95
 
-    # Сопротивление учитывается только если это капитальная стена (>= 3 касания)
+    # Проверка капитальной стены сопротивления (>= 3 касания)
     if res and res > entry and res_touches >= 3:
         res_dist_pct = (res - entry) / entry * 100
         if res_dist_pct < 0.35:
@@ -182,7 +177,7 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
                 tp = res_cap_tp
                 min_rr = min(min_rr, 0.85)
             else:
-                return None, None, False, f"Капитальная стена не дает забрать даже 0.85x RR (RR={(res_cap_tp - entry)/sl_dist:.2f})"
+                return None, None, False, f"Капитальная стена не дает забрать 0.85x RR (RR={(res_cap_tp - entry)/sl_dist:.2f})"
 
     rr = (tp - entry) / sl_dist
     if tp <= entry or round(rr, 2) < min_rr:
