@@ -21,9 +21,7 @@ def pnl_emoji(x):
     return "🟢" if x > 0.05 else ("🔴" if x < -0.05 else "🟡")
 
 
-# --- ЕДИНЫЙ СТАНДАРТ ОФОРМЛЕНИЯ МОНЕТ ДЛЯ ОТЧЕТОВ ---
 def format_coin(sym, data_obj):
-    kind = "🛰" if data_obj.get("kind") == "satellite" else "🏛"
     mode = "🚀" if data_obj.get("is_momentum") else "🏹"
     tier = data_obj.get("tier")
     em = TIER_EMOJI.get(tier, "") if tier else ""
@@ -33,7 +31,7 @@ def format_coin(sym, data_obj):
     public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
     chart_url = f"{public_url}/chart?symbol={sym}"
     
-    return f"{mode} {kind} <a href='{chart_url}'><b>{base_sym}</b></a>{' ' + em if em else ''} · <i>{sector}</i>"
+    return f"{mode} <a href='{chart_url}'><b>{base_sym}</b></a>{' ' + em if em else ''} · <i>{sector}</i>"
 
 
 async def build_report(period, tz):
@@ -101,21 +99,6 @@ async def build_report(period, tz):
             lines.append(f"   {pnl_emoji(avg)} <i>{s}</i> · {cnt} · ср. {avg:+.2f}%")
     else:
         lines.append("   (нет закрытых сделок)")
-    lines.append("")
-
-    kind_agg = {}
-    for r in trades:
-        kind_agg.setdefault(r.get("kind", "core"), []).append(r["pnl_pct"])
-    lines.append("🏛/🛰 <b>Стиль за период</b>")
-    if kind_agg:
-        for k, label in (("core", "🏛 Core"), ("satellite", "🛰 Сателлиты")):
-            v = kind_agg.get(k)
-            if v:
-                avg = sum(v) / len(v)
-                lines.append(f"   {pnl_emoji(avg)} {label} · {len(v)} · ср. {avg:+.2f}%")
-    else:
-        lines.append("   (нет закрытых сделок)")
-    lines.append(f"   🛰 Лимит сателлитов сейчас: <b>{learner.satellite_limit():.0f}%</b>")
     lines.append("")
 
     if paper.positions:
