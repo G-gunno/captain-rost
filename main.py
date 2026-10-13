@@ -65,7 +65,8 @@ async def webhook_handler(request):
 
 async def chart_handler(request):
     symbol = request.query.get("symbol")
-    interval_str = request.query.get("interval", "15") 
+    # ⚡ По умолчанию часовой таймфрейм 60 для широкого суточного обзора
+    interval_str = request.query.get("interval", "60") 
     
     if not symbol:
         return web.Response(text="Укажите тикер, например ?symbol=LINKUSDT", status=400)
@@ -74,7 +75,7 @@ async def chart_handler(request):
 
     valid_intervals = ["1", "3", "5", "15", "30", "60", "120", "240", "D", "W"]
     if interval_str not in valid_intervals:
-        interval_str = "15"
+        interval_str = "60"
 
     def make_chart():
         try:
@@ -435,18 +436,17 @@ async def cmd_chart(update, context):
                     win_links.append(f"{mode} <a href='{public_url}/chart?symbol={t['symbol']}'><b>{sym}</b></a> ({t['pnl_pct']:+.1f}%)")
                 lines.append("✅ " + " · ".join(win_links))
                 
-            # Убыточные сделки
+            # ⚡ Убыточные сделки: теперь выводится точный процент слива!
             losses = [t for t in trades_in_reg if t["pnl"] <= 0]
             if losses:
                 loss_links = []
                 for t in sorted(losses, key=lambda x: x["pnl_pct"]):
                     sym = t['symbol'][:-4]
                     mode = "🚀" if t.get('entry_mode') == 'rocket' else "🧲" if t.get('entry_mode') == 'reversal' else "🏹"
-                    reason = "EARLY" if t.get("exit_type") == "EARLY" else "SL"
-                    loss_links.append(f"{mode} <a href='{public_url}/chart?symbol={t['symbol']}'><b>{sym}</b></a> ({reason})")
+                    loss_links.append(f"{mode} <a href='{public_url}/chart?symbol={t['symbol']}'><b>{sym}</b></a> ({t['pnl_pct']:+.1f}%)")
                 lines.append("❌ " + " · ".join(loss_links))
                 
-            lines.append("") # Отступ между рыночными блоками
+            lines.append("")
 
         return await reply(update, "\n".join(lines).strip())
         
