@@ -12,7 +12,7 @@ from bot.strategy.indicators import get_all_sr_levels
 LOG_TIMEZONE = "Europe/Moscow" 
 
 class TradeVisualizer:
-    def __init__(self, log_path: str, symbol: str, interval: str = "15"):
+    def __init__(self, log_path: str, symbol: str, interval: str = "60"):
         self.state_path = Path(os.getenv("STORAGE_DIR", "storage")) / "paper_state.json"
         self.symbol = symbol.upper()
         self.base_sym = self.symbol.replace("USDT", "")
@@ -58,20 +58,18 @@ class TradeVisualizer:
             
         data = json.loads(self.state_path.read_text())
         events = [e for e in data.get("chart_events", []) if e.get("sym") == self.symbol]
+        market_history = data.get("market_history", [])
         
         if not events:
             return None
             
         df_ev = pd.DataFrame(events)
-        
-        # Гарантируем наличие аналитических колонок
         for col in ['tp', 'sl', 'sup', 'res']:
             if col not in df_ev.columns:
                 df_ev[col] = None
 
         df_ev['datetime'] = pd.to_datetime(df_ev['ts'], unit='s', utc=True).dt.tz_convert(LOG_TIMEZONE).dt.tz_localize(None)
         
-        # ⚡ 48 часов полной истории без ограничений
         now_ts = int(time.time())
         min_ev_ts = df_ev['ts'].min()
         start_ts = min(min_ev_ts - 7200, now_ts - 48 * 3600)
@@ -119,7 +117,7 @@ class TradeVisualizer:
         for idx, (r_val, r_tch) in enumerate(all_res):
             fig.add_trace(go.Scatter(
                 x=[min_time, max_time], y=[r_val, r_val],
-                mode="lines", name="Сопротивление (15m)",
+                mode="lines", name="Сопротивление",
                 line=dict(color="rgba(233, 30, 99, 0.45)", width=1.0, dash="dot"),
                 hoverinfo="name+y", showlegend=(idx == 0)
             ), row=1, col=1)
@@ -127,12 +125,31 @@ class TradeVisualizer:
         for idx, (s_val, s_tch) in enumerate(all_sup):
             fig.add_trace(go.Scatter(
                 x=[min_time, max_time], y=[s_val, s_val],
-                mode="lines", name="Поддержка (15m)",
+                mode="lines", name="Поддержка",
                 line=dict(color="rgba(33, 150, 243, 0.45)", width=1.0, dash="dot"),
                 hoverinfo="name+y", showlegend=(idx == 0)
             ), row=1, col=1)
 
-        # Потрейдовый анализ
+        # ⚡ ФОНОВАЯ ПОДСВЕТКА ФАЗ РЫНКА (BULL / BEAR / NEUTRAL)
+        if market_history:
+            history_sorted = sorted(market_history, key=lambda x: x.get("ts", 0))
+            for i in range(len(history_sorted)):
+                item = history_sorted[i]
+                t_start_s = pd.to_datetime(item["ts"], unit='s', utc=True).tz_convert(LOG_TIMEZONE).tz_localize(None)
+                if i + 1 < len(history_sorted):
+                    t_end_s = pd.to_datetime(history_sorted[i+1]["ts"], unit='s', utc=True).tz_convert(LOG_TIMEZONE).tz_localize(None)
+                else:
+                    t_end_s = max_time
+
+                if t_end_s < min_time: continue
+                x0_val = max(t_start_s, min_time)
+                x1_val = min(t_end_s, max_time)
+
+                reg = item.get("regime", "neutral")
+                reg_color = "rgba(38, 166, 154, 0.08)" if reg == "bull" else ("rgba(239, 83, 80, 0.08)" if reg == "bear" else "rgba(255, 235, 59, 0.04)")
+                fig.add_vrect(x0=x0_val, x1=x1_val, fillcolor=reg_color, opacity=1.0, layer="below", line_width=0, row=1, col=1)
+
+        # Потрейдовый анализ стопов и тейков
         trade_groups = []
         current_trade = []
         for _, ev in df_ev.sort_values('ts').iterrows():
@@ -153,12 +170,11 @@ class TradeVisualizer:
             if is_active_trade:
                 t_end = max_time
             elif t_start == t_end:
-                t_end = t_start + pd.Timedelta(minutes=15)
+                t_end = t_start + pd.Timedelta(minutes=30)
 
             is_real_trade = 'buy' in tr_df['type'].values
             label_tag = f"Сделка {idx+1}" if is_real_trade else f"Ордер {idx+1}"
 
-            # 1. Траектория Стоп-лосса (SL)
             sl_points = tr_df[tr_df['sl'].notna() & (tr_df['sl'] > 0)]
             if not sl_points.empty:
                 sl_x = list(sl_points['datetime'])
@@ -169,12 +185,11 @@ class TradeVisualizer:
 
                 fig.add_trace(go.Scatter(
                     x=sl_x, y=sl_y,
-                    mode="lines+markers", line=dict(color="rgba(255, 23, 68, 0.8)", width=2.0, shape="hv"),
+                    mode="lines+markers", line=dict(color="rgba(255, 23, 68, 0.85)", width=2.0, shape="hv"),
                     marker=dict(size=4, color="red"), name=f"Стоп ({label_tag})",
                     hoverinfo="text+y", text=[f"🛡 Стоп: {fmt_price(p)}" for p in sl_y]
                 ), row=1, col=1)
 
-            # 2. Траектория Тейк-профита (TP)
             tp_points = tr_df[tr_df['tp'].notna() & (tr_df['tp'] > 0)]
             if not tp_points.empty:
                 tp_x = list(tp_points['datetime'])
@@ -185,39 +200,19 @@ class TradeVisualizer:
 
                 fig.add_trace(go.Scatter(
                     x=tp_x, y=tp_y,
-                    mode="lines+markers", line=dict(color="rgba(0, 230, 118, 0.8)", width=2.0, shape="hv"),
+                    mode="lines+markers", line=dict(color="rgba(0, 230, 118, 0.85)", width=2.0, shape="hv"),
                     marker=dict(size=4, color="green"), name=f"Тейк ({label_tag})",
                     hoverinfo="text+y", text=[f"🎯 Тейк: {fmt_price(p)}" for p in tp_y]
                 ), row=1, col=1)
 
-            # 3. Активные уровни Поддержки и Сопротивления
-            tr_sup = tr_df['sup'].dropna()
-            if not tr_sup.empty and tr_sup.iloc[0] > 0:
-                s_lvl = tr_sup.iloc[0]
-                fig.add_trace(go.Scatter(
-                    x=[t_start, t_end], y=[s_lvl, s_lvl],
-                    mode="lines", line=dict(color="rgba(33, 150, 243, 0.85)", width=2.0, dash="dash"),
-                    name=f"Опора ${fmt_price(s_lvl)} ({label_tag})", hoverinfo="name+y"
-                ), row=1, col=1)
-
-            tr_res = tr_df['res'].dropna()
-            if not tr_res.empty and tr_res.iloc[0] > 0:
-                r_lvl = tr_res.iloc[0]
-                fig.add_trace(go.Scatter(
-                    x=[t_start, t_end], y=[r_lvl, r_lvl],
-                    mode="lines", line=dict(color="rgba(233, 30, 99, 0.85)", width=2.0, dash="dash"),
-                    name=f"Стена ${fmt_price(r_lvl)} ({label_tag})", hoverinfo="name+y"
-                ), row=1, col=1)
-
-        # === 2 СЛОЙ: Объем ===
+        # 2 СЛОЙ: Объем
         fig.add_trace(go.Bar(x=df_kline['datetime'], y=df_kline['volume'], name='Объем', marker_color=colors_vol), row=2, col=1)
 
-        # === 3 СЛОЙ: RSI ===
+        # 3 СЛОЙ: RSI
         fig.add_trace(go.Scatter(x=df_kline['datetime'], y=df_kline['RSI'], mode='lines', name='RSI', line=dict(color='rgba(156, 39, 176, 0.8)', width=1.5)), row=3, col=1)
         fig.add_hline(y=70, line_dash="dash", line_color="rgba(239, 83, 80, 0.5)", row=3, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="rgba(38, 166, 154, 0.5)", row=3, col=1)
 
-        # Маркеры событий
         colors = {
             "order_placed": ("cyan", "line-ew", "Ордер"),
             "order_moved": ("blue", "diamond-open", "Сдвиг"),
