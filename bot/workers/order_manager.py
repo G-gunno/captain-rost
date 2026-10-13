@@ -4,11 +4,11 @@ from loguru import logger
 
 from bot.core.event_bus import EventBus
 from bot.exchange.paper_exchange import paper
-from bot.strategy.sizing import buy_size, portfolio_limits, tier_limits, entry_offset
+from bot.strategy.sizing import buy_size, portfolio_limits, entry_offset
 from bot.strategy.scanner import get_thresholds
 from bot.strategy.learner import learner
 from bot.strategy.risk import (calc_initial_sl_tp, get_trade_policy, 
-                                evaluate_setup_grade, calc_total_open_risk_pct)
+                               evaluate_setup_grade, calc_total_open_risk_pct)
 from bot.strategy.indicators import get_all_sr_levels
 from bot.news.cmc import get_coin_name
 from bot.news.rss_news import fetch_news_cache, check_sentiment
