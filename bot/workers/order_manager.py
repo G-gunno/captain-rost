@@ -45,7 +45,6 @@ class OrderManagerWorker:
         equity = paper.equity(tickers)
         thrs = get_thresholds(regime)
         sec_lim, other_lim = portfolio_limits(equity)
-        sat_limit = learner.satellite_limit()
         news_items = await fetch_news_cache()
 
         risk_mode = getattr(learner, "current_risk_mode", "NORMAL")
@@ -73,13 +72,12 @@ class OrderManagerWorker:
             if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
                 continue
 
-            kind = cand.get("kind", "core")
             sector = cand.get("sector", "Other")
             tier = cand.get("tier") or "SMALL"
             entry_mode = cand.get("entry_mode", "sniper")
             is_mom = cand.get("is_momentum", False)
 
-            # 2. Общие лимиты диверсификации секторов (без искусственного удушения Other)
+            # 2. Общие лимиты диверсификации секторов
             lim = other_lim if sector == "Other" else sec_lim
             sector_count = sum(1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector)
             sector_orders = sum(1 for o in paper.orders if (o.get("sector") or "Other") == sector)
@@ -149,7 +147,7 @@ class OrderManagerWorker:
             size_by_risk = (equity * (effective_risk_pct / 100.0)) / (sl_dist_pct / 100.0)
 
             size_base = buy_size(equity, cand["score"], thr, cand["liquidity"], paper.usdt,
-                                 kind=kind, entry_mode=entry_mode)
+                                 entry_mode=entry_mode)
 
             size = min(size_base, size_by_risk, paper.usdt * 0.95, equity * 0.10)
             size = round(size, 2)
@@ -158,17 +156,11 @@ class OrderManagerWorker:
                 logger.debug(f"OrderManager: {sym} пропущен (размер {size} < 10 USDT)")
                 continue
 
-            if kind == "satellite":
-                sat_exp = sum(p["qty"] * tickers.get(s, {}).get("last", 0) for s, p in paper.positions.items() if p.get("kind") == "satellite")
-                sat_exp += sum(o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite")
-                if sat_exp >= equity * sat_limit / 100:
-                    continue
-
             qty = size / entry
             order = paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl, score=cand["score"], reason_keys=cand.get("reason_keys", []))
             
             order.update({
-                "kind": kind, "sector": sector, "tier": tier, "corr": cand.get("corr"),
+                "sector": sector, "tier": tier, "corr": cand.get("corr"),
                 "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode,
                 "nearest_res": entry_res,
                 "res_touches": res_touches,
