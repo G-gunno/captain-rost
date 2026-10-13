@@ -280,15 +280,6 @@ async def cmd_learn(update, context):
     lines = ["🧠 <b>Обучение бота (ИИ)</b>", ""]
     lines.append("📌 <b>Текущие параметры</b>")
     lines.append(f"🎯 Winrate: <b>{wr:.0%}</b> <i>(за {n} сдел.)</i> · строгость: <b>{learner.threshold_adj:+.1f}</b>")
-    lines.append(f"🛰 Сателлиты: лимит <b>{learner.satellite_limit():.0f}%</b> · размер <b>{learner.satellite_size_pct():.1f}%</b>")
-    
-    core_hist, sat_hist = learner.kind_stats.get("core") or [], learner.kind_stats.get("satellite") or []
-    if core_hist or sat_hist:
-        lines.append("\n🏛/🛰 <b>Стиль торговли</b> <i>(последние 50 сдел.)</i>")
-        if core_hist:
-            lines.append(f"   🏛 Core: {len(core_hist)} сдел. · wr {sum(1 for p in core_hist if p > 0)/len(core_hist):.0%} · ср. {sum(core_hist)/len(core_hist):+.2f}%")
-        if sat_hist:
-            lines.append(f"   🛰 Сателлиты: {len(sat_hist)} сдел. · wr {sum(1 for p in sat_hist if p > 0)/len(sat_hist):.0%} · ср. {sum(sat_hist)/len(sat_hist):+.2f}%")
 
     lines.append("\n🧭 <b>Где деньги</b>")
     if learner.sector_stats:
@@ -548,6 +539,7 @@ async def cmd_status(update, context):
         exp_str = "—" if exp is None else f"{pnl_emoji(exp)} <b>{exp:+.2f}</b> {'🎯' if exp > 0 else '❌'}"
         rf_str = "—" if rf is None else "∞" if rf == float("inf") else f"{rf:.1f} {'🎯' if rf >= 2 else ('⚠️' if rf >= 1 else '❌')}"
         msg.append(f"💹 {exp_str} · 🔄 RF: <b>{rf_str}</b>")
+        msg.append(f"⏱ PnL за 24 часа: {pnl_emoji(metrics_24h['total_pnl'])} <b>{usd(metrics_24h['total_pnl'])}</b>\n")
 
         sat_exposure = sum(p["qty"] * prices.get(s, {}).get("last", 0) for s, p in paper.positions.items() if p.get("kind") == "satellite") + sum(o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite")
         msg.append(f"🛰 Сателлиты: <b>{sat_exposure / eq * 100 if eq else 0:.1f}%</b> / {learner.satellite_limit():.0f}%")
