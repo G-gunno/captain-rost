@@ -145,7 +145,6 @@ class PaperExchange:
                     pos["score"] = order.get("score", 0)
                     pos["reason_keys"] = order.get("reason_keys", [])
                     pos["patterns"] = order.get("patterns", [])
-                    pos["kind"] = order.get("kind", "core")
                     pos["sector"] = self._resolve_sector(order["symbol"], order.get("sector"))
                     pos["tier"] = order.get("tier")
                     pos["regime_entry"] = order.get("regime")
@@ -206,7 +205,6 @@ class PaperExchange:
 
         sector = self._resolve_sector(sym, pos.get("sector"))
         tier = pos.get("tier")
-        kind = pos.get("kind", "core")
         entry_mode = pos.get("entry_mode", "rocket" if pos.get("is_momentum") else "sniper")
 
         pos["qty"] -= qty_part
@@ -219,7 +217,6 @@ class PaperExchange:
             "exit_type": "TP1",
             "sector": sector,
             "tier": tier,
-            "kind": kind,
             "is_momentum": pos.get("is_momentum", False),
             "entry_mode": entry_mode,
             "regime": pos.get("regime_entry", "neutral"),
@@ -242,7 +239,6 @@ class PaperExchange:
             "transferred": transferred,
             "sector": sector,
             "tier": tier,
-            "kind": kind,
             "is_momentum": pos.get("is_momentum", False),
             "entry_mode": entry_mode,
         }
@@ -287,15 +283,13 @@ class PaperExchange:
 
         sector = self._resolve_sector(sym, pos.get("sector"))
         tier = pos.get("tier")
-        kind = pos.get("kind", "core")
         entry_mode = pos.get("entry_mode", "rocket" if pos.get("is_momentum") else "sniper")
         
         try:
-            # ⚡ Передаем активные паттерны в модуль обучения
             learner.record(pos.get("reason_keys", []), total_pnl > 0,
                            total_pnl_pct, sector=sector, tier=tier,
                            exit_type=exit_type, runner_bonus=runner_bonus,
-                           kind=kind, soft=soft, entry_mode=entry_mode,
+                           soft=soft, entry_mode=entry_mode,
                            patterns=pos.get("patterns", []))
         except Exception as e:
             logger.error(f"learner record error: {e}")
@@ -323,7 +317,7 @@ class PaperExchange:
         self.realized.append({
             "symbol": sym, "pnl": round(total_pnl, 4), "pnl_pct": round(total_pnl_pct, 2),
             "reason": reason, "time": int(time.time()), "exit_type": exit_type,
-            "sector": sector, "tier": tier, "kind": kind,
+            "sector": sector, "tier": tier,
             "is_momentum": pos.get("is_momentum", False),
             "entry_mode": entry_mode,
             "patterns": pos.get("patterns", []),
@@ -338,7 +332,7 @@ class PaperExchange:
             "symbol": sym, "price": price, "pnl": total_pnl,
             "pnl_pct": total_pnl_pct, "reason": reason, "transferred": transferred,
             "exit_type": exit_type, "runner_bonus": runner_bonus,
-            "sector": sector, "tier": tier, "kind": kind,
+            "sector": sector, "tier": tier,
             "is_momentum": pos.get("is_momentum", False),
             "entry_mode": entry_mode
         }
