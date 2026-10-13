@@ -29,10 +29,11 @@ STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
                 "RLUSD", "PYUSD", "EURI", "USDS", "USD0", "FRAX",
                 "LUSD", "GUSD", "XUSD", "USDX", "CUSD", "SUSD"}
 
+# Правильная градация порогов по фазам рынка: в BULL входы легче, в BEAR — строже по всем фронтам
 BASE_THRESHOLDS = {
-    "bull": {"rocket": 6.0, "sniper": 5.5, "reversal": 5.5},
+    "bull": {"rocket": 6.0, "sniper": 5.5, "reversal": 5.2},
     "neutral": {"rocket": 6.5, "sniper": 6.0, "reversal": 5.4},
-    "bear": {"rocket": 7.0, "sniper": 6.5, "reversal": 5.2},
+    "bear": {"rocket": 7.0, "sniper": 6.5, "reversal": 5.8},
 }
 
 TIER_CORR_LIMITS = {
@@ -120,13 +121,9 @@ def is_post_pump_dump(candles_15m: list) -> tuple:
 
 
 def raw_max_score(regime):
-    """
-    Калиброванный эталон нормализации (~10.5 баллов).
-    Исключает двойной счет взаимоисключающих факторов.
-    """
     m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
     m += max(learner.weight("indep"), learner.weight("news_pos"), learner.weight("hype"))
-    m += 3.5  # Паттерн Price Action / опора S/R
+    m += 3.5
     return m
 
 
@@ -166,6 +163,7 @@ async def get_regime():
     else:
         raw_regime = "neutral"
 
+    breadth_bull = False
     tickers = await market_data.get_tickers()
     if tickers:
         tradable = [s for s, t in tickers.items() if is_tradable(s) and t["quote_volume"] >= 500_000]
@@ -175,9 +173,11 @@ async def get_regime():
 
             if breadth_pct >= 45.0:
                 _regime_tracker["breadth_streak"] += 1
-                if _regime_tracker["breadth_streak"] >= 2 and raw_regime == "neutral":
-                    raw_regime = "bull"
-                    logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые (подтверждено 2-й цикл). Переход в 'bull'.")
+                if _regime_tracker["breadth_streak"] >= 2:
+                    breadth_bull = True
+                    if raw_regime == "neutral":
+                        raw_regime = "bull"
+                        logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые (подтверждено 2-й цикл). Переход в 'bull'.")
                 elif _regime_tracker["breadth_streak"] == 1 and raw_regime == "neutral":
                     logger.info(f"Market Breadth: {breadth_pct:.1f}% альтов зеленые (цикл 1/2). Ожидание подтверждения для BULL.")
             else:
@@ -188,12 +188,12 @@ async def get_regime():
 
     if stable_trend == "bull" and raw_regime == "neutral":
         raw_regime = "bull"
-    elif stable_trend == "bear" and raw_regime == "bull":
+    elif stable_trend == "bear" and raw_regime == "bull" and not breadth_bull:
         raw_regime = "neutral" 
 
-    if fng < 40 and raw_regime == "bull":
+    if fng < 35 and raw_regime == "bull":
         raw_regime = "neutral" 
-    elif fng > 75 and raw_regime == "bear":
+    elif fng > 78 and raw_regime == "bear":
         raw_regime = "neutral" 
 
     regime = raw_regime
@@ -262,7 +262,7 @@ async def fetch_new_listings():
     return out
 
 
-def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
+def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_patterns=None, saved_mode=None):
     closes = [c["close"] for c in candles_15m]
     last = closes[-1]
     e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
@@ -272,7 +272,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
 
     vols = [c["volume"] for c in candles_15m]
     base_vol = sum(vols[-22:-2]) / 20 if len(vols) > 22 else (sum(vols) / max(1, len(vols)))
-    # Учитываем максимум из текущей и только что закрытой свечи, чтобы не терять сигнал на 1-й минуте бара
     eff_vol = max(vols[-1], vols[-2]) if len(vols) >= 2 else vols[-1]
     vol_ratio = eff_vol / base_vol if base_vol else 1.0
 
@@ -331,7 +330,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 4.0
             reasons.append(f"FOMO-перегрев (+{dist_from_ema/a15:.1f} ATR от EMA21)")
 
-    # 4. Триггеры Price Action
+    # 4. Триггеры Price Action (с памятью для уже выставленных ордеров)
     detected_patterns = detect_patterns(candles_15m, a15, e50, e21, recent_high)
     matched_modes = []
     pattern_keys = []
@@ -343,6 +342,17 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         reasons.append(f"{pat['name']} (+{p_bonus:.1f})")
         pattern_keys.append(pkey)
         matched_modes.append(pat["mode"])
+
+    # Если проверяется активный лимитный ордер, сохраняем его стартовый паттерн, пока сетап жив
+    if saved_patterns:
+        base_bonuses = {"pinbar": 2.5, "divergence": 2.5, "vcp": 3.0, "breakout": 3.0, "engulfing": 2.0}
+        for sp in saved_patterns:
+            if sp not in pattern_keys:
+                p_bonus = base_bonuses.get(sp, 2.5) * learner.pattern_multiplier(sp)
+                score += p_bonus
+                pattern_keys.append(sp)
+        if saved_mode and saved_mode not in matched_modes:
+            matched_modes.append(saved_mode)
 
     # 5. Динамика 24h
     if 0 < t["change_pct"] < w["chg_hi"]:
@@ -399,12 +409,11 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 1.0
             reasons.append("MTF: ловушка (даунтренд)")
 
-        is_rev_candidate = ("pinbar" in pattern_keys or "divergence" in pattern_keys)
+        is_rev_candidate = ("pinbar" in pattern_keys or "divergence" in pattern_keys or "reversal" in matched_modes)
         if last_1h < e21_1h and not is_open_pos and not is_rev_candidate:
             score -= 3.5
             reasons.append(f"1H даунтренд (цена < EMA21_1H ${fmt_price(e21_1h)})")
 
-    # Первичная воронка структуры: опора обязана быть близко к цене ИЛИ должен быть паттерн Price Action
     has_structure = (
         sup_is_near or
         len(pattern_keys) > 0 or
@@ -435,14 +444,19 @@ def normalize(raw, regime):
     return round(max(0.0, min(SCORE_MAX, raw / rm * SCORE_MAX)), 2)
 
 
-async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_open_pos=False):
+async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_open_pos=False, saved_patterns=None, saved_mode=None):
     candles_15m = await market_data.get_kline(sym, "15", 120)
     candles_1h = await market_data.get_kline(sym, "60", 250)
 
     if len(candles_15m) < 60 or len(candles_1h) < 60:
         return None, candles_15m
 
-    raw, _, keys_live, sv_live = score_symbol(candles_15m, candles_1h, t, regime, is_open_pos)
+    raw, _, keys_live, sv_live = score_symbol(
+        candles_15m, candles_1h, t, regime,
+        is_open_pos=is_open_pos,
+        saved_patterns=saved_patterns,
+        saved_mode=saved_mode
+    )
 
     base = sym[:-4]
     sectors_map = await get_sectors_for_pool([base])
