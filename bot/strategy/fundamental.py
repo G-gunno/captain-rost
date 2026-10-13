@@ -4,18 +4,17 @@ import asyncio
 import httpx
 from loguru import logger
 
-# Глобальный кэш фундаментальных данных
 _cache = {
     "stablecoins": {"trend": "neutral", "ts": 0},
     "hot_sectors": {"data": [], "ts": 0},
-    "fear_and_greed": {"value": 50, "ts": 0}  # <-- НОВОЕ
+    "fear_and_greed": {"value": 50, "ts": 0}
 }
 
-CACHE_TTL = 3600  # Обновлять раз в 1 час
+CACHE_TTL = 3600
 
 
 async def _fetch_stablecoin_flows():
-    """Анализирует приток/отток стейблкоинов (DefiLlama - Бесплатно)."""
+    """Анализирует приток/отток стейблкоинов (DefiLlama)."""
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.get("https://stablecoins.llama.fi/stablecoincharts/all")
@@ -25,9 +24,10 @@ async def _fetch_stablecoin_flows():
             week_ago = data[-8]["totalCirculatingUSD"]["peggedUSD"]
             change_pct = (today - week_ago) / week_ago * 100
             
-            if change_pct > 0.5:
+            # Реальный макро-тренд фиксируем только при значимом сдвиге ликвидности (> 1.0% / < -1.5%)
+            if change_pct >= 1.0:
                 _cache["stablecoins"]["trend"] = "bull"
-            elif change_pct < -0.5:
+            elif change_pct <= -1.5:
                 _cache["stablecoins"]["trend"] = "bear"
             else:
                 _cache["stablecoins"]["trend"] = "neutral"
@@ -38,7 +38,7 @@ async def _fetch_stablecoin_flows():
 
 
 async def _fetch_defillama_sectors():
-    """Смотрит, куда перетекает TVL по чейнам/секторам (DefiLlama - Бесплатно)."""
+    """Смотрит, куда перетекает TVL по чейнам/секторам."""
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.get("https://api.llama.fi/v2/chains")
@@ -62,7 +62,7 @@ async def _fetch_defillama_sectors():
 
 
 async def _fetch_fear_and_greed():
-    """Запрашивает индекс Страха и Жадности (Alternative.me - Бесплатно, без ключа)."""
+    """Запрашивает индекс Страха и Жадности."""
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get("https://api.alternative.me/fng/?limit=1")
@@ -74,10 +74,7 @@ async def _fetch_fear_and_greed():
         logger.debug(f"Fear & Greed API error: {e}")
 
 
-# ================= ПУБЛИЧНЫЕ МЕТОДЫ =================
-
 async def fetch_macro_data():
-    """Единый метод обновления всех макро-метрик (вызывается Data Feeder'ом)."""
     await asyncio.gather(
         _fetch_stablecoin_flows(),
         _fetch_defillama_sectors(),
@@ -94,10 +91,7 @@ def get_fear_and_greed():
     return _cache["fear_and_greed"]["value"]
 
 
-# ================= ON-DEMAND ПРОВЕРКИ =================
-
 async def check_coinglass_liquidation_threat(symbol):
-    """Проверяет риск сквиза по Coinglass (Требуется COINGLASS_API_KEY)."""
     api_key = os.getenv("COINGLASS_API_KEY")
     if not api_key:
         return False
@@ -109,7 +103,6 @@ async def check_coinglass_liquidation_threat(symbol):
             r = await c.get("https://open-api.coinglass.com/public/v2/indicator/long_short_ratio", 
                             params={"symbol": base, "time_type": "h1"}, headers=headers)
         data = r.json().get("data", [])
-        # Если лонгистов подавляющее большинство (кэф > 3.0), маркетмейкер побреет их вниз.
         if data and data[-1].get("longShortRatio", 1.0) > 3.0:
             return True 
     except Exception as e:
