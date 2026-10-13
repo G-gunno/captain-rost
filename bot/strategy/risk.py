@@ -1,6 +1,8 @@
 from bot.strategy.indicators import atr, find_sr_levels, get_all_sr_levels
 from bot.strategy.shadow import shadow
 
+FEE_SPOT_PCT = 0.10  # Bybit Spot Taker/Maker fee 0.1%
+
 TIER_SL_FLOOR = {
     "TOP20": 0.010,  # 1.0%
     "MID":   0.015,  # 1.5%
@@ -23,16 +25,125 @@ TIER_MAX_SL = {
 }
 
 TIER_TRAIL_CONFIG = {
-    "TOP20": {"be_trigger": 0.007, "runner_dist": 0.008, "pre_tp_trigger": 1.5, "pre_tp_dist": 0.006},
-    "MID":   {"be_trigger": 0.010, "runner_dist": 0.013, "pre_tp_trigger": 2.0, "pre_tp_dist": 0.010},
-    "SMALL": {"be_trigger": 0.012, "runner_dist": 0.016, "pre_tp_trigger": 2.2, "pre_tp_dist": 0.012},
-    "MICRO": {"be_trigger": 0.014, "runner_dist": 0.022, "pre_tp_trigger": 2.5, "pre_tp_dist": 0.018},
+    "TOP20": {"be_trigger": 0.006, "runner_dist": 0.008, "pre_tp_trigger": 1.5, "pre_tp_dist": 0.006},
+    "MID":   {"be_trigger": 0.009, "runner_dist": 0.013, "pre_tp_trigger": 2.0, "pre_tp_dist": 0.010},
+    "SMALL": {"be_trigger": 0.011, "runner_dist": 0.016, "pre_tp_trigger": 2.2, "pre_tp_dist": 0.012},
+    "MICRO": {"be_trigger": 0.013, "runner_dist": 0.022, "pre_tp_trigger": 2.5, "pre_tp_dist": 0.018},
 }
+
+# ⚡ ИНСТИТУЦИОНАЛЬНЫЕ ТОРГОВЫЕ ПОЛИТИКИ (Trade Policy)
+TRADE_POLICIES = {
+    "STRICT": {
+        "max_portfolio_risk_pct": 1.5,    # Макс. суммарный открытый риск портфеля 1.5%
+        "risk_per_trade_core": 0.50,       # 0.5% на снайперскую сделку
+        "risk_per_trade_alt": 0.25,        # 0.25% на альтернативную сделку (Grade A+)
+        "min_rr_sniper": 1.5,
+        "min_rr_alt": 1.3,
+        "allowed_other_sector_max": 1,     # Не более 1 щиткоина
+        "require_grade_a_for_alt": True,   # Ножи и ракеты ТОЛЬКО Grade A+
+    },
+    "CAUTIOUS": {
+        "max_portfolio_risk_pct": 2.0,
+        "risk_per_trade_core": 0.75,
+        "risk_per_trade_alt": 0.50,
+        "min_rr_sniper": 1.35,
+        "min_rr_alt": 1.2,
+        "allowed_other_sector_max": 1,
+        "require_grade_a_for_alt": True,
+    },
+    "NORMAL": {
+        "max_portfolio_risk_pct": 3.0,
+        "risk_per_trade_core": 1.00,
+        "risk_per_trade_alt": 0.75,
+        "min_rr_sniper": 1.25,
+        "min_rr_alt": 1.1,
+        "allowed_other_sector_max": 2,
+        "require_grade_a_for_alt": False,
+    },
+    "AGGRESSIVE": {
+        "max_portfolio_risk_pct": 5.0,
+        "risk_per_trade_core": 1.25,
+        "risk_per_trade_alt": 1.00,
+        "min_rr_sniper": 1.1,
+        "min_rr_alt": 1.0,
+        "allowed_other_sector_max": 3,
+        "require_grade_a_for_alt": False,
+    },
+}
+
+
+def calc_breakeven_price(avg_p: float, fee_pct: float = FEE_SPOT_PCT) -> float:
+    """Точный математический расчет безубытка с учетом обеих спотовых комиссий."""
+    fee_rate = fee_pct / 100.0
+    return round(avg_p * ((1.0 + fee_rate) / (1.0 - fee_rate)), 8)
+
+
+def get_trade_policy(mode: str) -> dict:
+    return TRADE_POLICIES.get(mode, TRADE_POLICIES["NORMAL"])
+
+
+def evaluate_setup_grade(cand: dict) -> str:
+    """
+    Оценка качества сетапа (Grade A+ vs Grade B).
+    Grade A+ требует высокой конфлюэнции (сочетания независимых факторов).
+    """
+    mode = cand.get("entry_mode", "sniper")
+    patterns = cand.get("patterns", [])
+    sup_touches = cand.get("sup_touches", 0)
+    vol_ratio = cand.get("signal_values", {}).get("volume", 1.0)
+    rsi_val = cand.get("signal_values", {}).get("rsi", 50.0)
+    tier = cand.get("tier", "SMALL")
+
+    if mode == "reversal":
+        # Комбо для идеального разворота
+        has_pattern = ("pinbar" in patterns or "divergence" in patterns)
+        has_level = (cand.get("nearest_sup") is not None and sup_touches >= 2)
+        has_exhaustion = (rsi_val <= 36 or vol_ratio >= 1.5)
+        if has_pattern and has_level and has_exhaustion:
+            return "A+"
+        return "B"
+
+    elif mode == "rocket":
+        # Комбо для истинного пробоя
+        is_high_cap = tier in ("TOP20", "MID")
+        has_breakout = ("breakout" in patterns and vol_ratio >= 2.0)
+        not_overheated = (rsi_val <= 75)
+        if is_high_cap and has_breakout and not_overheated:
+            return "A+"
+        return "B"
+
+    else:  # sniper
+        has_structure = (cand.get("nearest_sup") is not None and sup_touches >= 2)
+        has_action = ("vcp" in patterns or "engulfing" in patterns or "pinbar" in patterns)
+        if has_structure and has_action and vol_ratio >= 1.2:
+            return "A+"
+        return "A" if (has_structure or has_action) else "B"
+
+
+def calc_total_open_risk_pct(positions: dict, orders: list, equity: float) -> float:
+    """Расчет суммарного совокупного открытого риска портфеля (Portfolio VaR)."""
+    if equity <= 0:
+        return 0.0
+    total_risk_usd = 0.0
+    for sym, pos in positions.items():
+        qty = pos.get("qty", 0.0)
+        avg = pos.get("avg", 0.0)
+        sl = pos.get("sl", 0.0)
+        if avg > sl > 0:
+            total_risk_usd += qty * (avg - sl)
+    for o in orders:
+        qty = o.get("qty", 0.0)
+        price = o.get("price", 0.0)
+        sl = o.get("sl", 0.0)
+        if price > sl > 0:
+            total_risk_usd += qty * (price - sl)
+    return round((total_risk_usd / equity) * 100, 2)
 
 
 def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float, 
                         sup: float, sup_touches: int, res: float, res_touches: int,
-                        is_mom: bool = False, entry_mode: str = "sniper"):
+                        is_mom: bool = False, entry_mode: str = "sniper",
+                        min_rr: float = 1.25):
     tier = tier or "SMALL"
     sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.020)
     tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.028)
@@ -61,9 +172,8 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
         return None, None, False, "Недопустимая дистанция SL"
 
     # 2. Расчет первичного тейк-профита (TP1)
-    tp_dist_raw = max(2.0 * a * tp_tuning, sl_dist * 1.5, entry * tp_floor_pct)
+    tp_dist_raw = max(2.0 * a * tp_tuning, sl_dist * min_rr, entry * tp_floor_pct)
     tp = round(entry + tp_dist_raw, 8)
-    min_rr = 1.35 if entry_mode == "sniper" else 1.1
 
     if res and res > entry:
         res_dist_pct = (res - entry) / entry * 100
@@ -74,7 +184,6 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
         if res_cap_tp < tp:
             if (res_cap_tp - entry) / sl_dist >= 1.0:
                 tp = res_cap_tp
-                min_rr = 1.0
             else:
                 return None, None, False, "Стена не дает забрать даже 1.0x RR"
 
@@ -101,7 +210,7 @@ def update_position_sl(pos: dict, max_p: float) -> tuple:
     """
     Машина состояний стоп-лосса:
     SHIELD -> BREAKEVEN -> PROFIT_LOCK -> TRAILING_RUNNER
-    Полностью защищена от float-дребезга (IEEE 754) и повторных ложных срабатываний.
+    Безубыток считается строго по формуле биржевой комиссии.
     """
     avg_p = pos.get("avg", 0.0)
     if avg_p <= 0:
@@ -115,7 +224,8 @@ def update_position_sl(pos: dict, max_p: float) -> tuple:
     current_state = pos.get("sl_state", "SHIELD")
     new_state = current_state
 
-    breakeven = round(avg_p * 1.0025, 8)
+    # ⚡ Расчёт строгого безубытка по формуле комиссии Bybit
+    breakeven = calc_breakeven_price(avg_p, FEE_SPOT_PCT)
     profit_pct = (max_p - avg_p) / avg_p * 100
 
     # 1. Трейлинг раннера (после взятия TP1)
@@ -129,7 +239,7 @@ def update_position_sl(pos: dict, max_p: float) -> tuple:
         if profit_pct >= cfg["pre_tp_trigger"]:
             new_state = "PROFIT_LOCK"
             new_sl = max(new_sl, round(max_p * (1 - cfg["pre_tp_dist"]), 8))
-        # 3. До TP1: ранний перевод в безубыток
+        # 3. До TP1: перевод в строгий БУ
         elif max_p >= avg_p * (1 + cfg["be_trigger"]):
             if new_sl < breakeven:
                 new_state = "BREAKEVEN"
@@ -137,7 +247,6 @@ def update_position_sl(pos: dict, max_p: float) -> tuple:
 
     new_sl = round(new_sl, 8)
 
-    # Защита от бесконечного цикла: фиксируем изменение ТОЛЬКО при реальном росте цены
     if (new_sl > current_sl + 1e-7) or (new_state != current_state and new_sl >= current_sl):
         tag_map = {
             "SHIELD": "🛡 Защита",
