@@ -81,7 +81,7 @@ class ExecutionRiskWorker:
             if not t: continue
             last = t["last"]
 
-            # ⚡ СТОП-ЛОСС ИСПОЛНЯЕТСЯ СТРОГО ПО ВЫСТАВЛЕННОЙ ЦЕНЕ pos["sl"]!
+            # ⚡ СТОП-ЛОСС ИСПОЛНЯЕТСЯ СТРОГО ПО ВЫСТАВЛЕННОЙ ЦЕНЕ pos["sl"] БЕЗ ПРОСКАЛЬЗЫВАНИЯ!
             if last <= pos["sl"]:
                 sl_exec_price = pos["sl"]
                 ex = paper._sell(sym, sl_exec_price, "SL 🛡", regime_now=bot_state.current_regime)
@@ -103,7 +103,7 @@ class ExecutionRiskWorker:
                     paper.log_event(sym, "tp1", pos["tp"], f"TP1 (+{ex['pnl_pct']:.1f}%)", mode="TP1 🎯", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                     shadow.mark_success(sym)
 
-                    # Перевод в точный БУ по формуле комиссии и подъем раннера
+                    # Перевод в строгий безубыток по формуле биржевой комиссии
                     candles_15m = await market_data.get_kline(sym, "15", 120)
                     candles_1h = await market_data.get_kline(sym, "60", 250)
                     pos["tp"] = calc_runner_target(sym, last, candles_15m, candles_1h)
@@ -163,6 +163,7 @@ class ExecutionRiskWorker:
                 pos["max_sl"] = new_sl
                 state_changed = True
 
+                # Анти-спам: отправляем уведомление только при реальном изменении цены или статуса
                 if new_sl_str != old_sl_str or new_state != old_state:
                     pos["_last_notified_sl_str"] = new_sl_str
                     pos["_last_notified_sl_state"] = new_state
