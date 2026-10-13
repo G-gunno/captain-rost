@@ -29,10 +29,114 @@ TIER_TRAIL_CONFIG = {
     "MICRO": {"be_trigger": 0.014, "runner_dist": 0.022, "pre_tp_trigger": 2.5, "pre_tp_dist": 0.018},
 }
 
+# Торговые политики бюджетирования риска (Portfolio VaR) и порогов RR
+TRADE_POLICIES = {
+    "STRICT": {
+        "max_portfolio_risk_pct": 1.5,
+        "risk_per_trade_core": 0.50,
+        "risk_per_trade_alt": 0.25,
+        "min_rr_sniper": 1.25,
+        "min_rr_alt": 1.10,
+        "require_grade_a_for_alt": True,
+    },
+    "CAUTIOUS": {
+        "max_portfolio_risk_pct": 2.0,
+        "risk_per_trade_core": 0.75,
+        "risk_per_trade_alt": 0.50,
+        "min_rr_sniper": 1.15,
+        "min_rr_alt": 1.00,
+        "require_grade_a_for_alt": True,
+    },
+    "NORMAL": {
+        "max_portfolio_risk_pct": 3.0,
+        "risk_per_trade_core": 1.00,
+        "risk_per_trade_alt": 0.75,
+        "min_rr_sniper": 1.10,
+        "min_rr_alt": 0.95,
+        "require_grade_a_for_alt": False,
+    },
+    "AGGRESSIVE": {
+        "max_portfolio_risk_pct": 5.0,
+        "risk_per_trade_core": 1.25,
+        "risk_per_trade_alt": 1.00,
+        "min_rr_sniper": 1.05,
+        "min_rr_alt": 0.90,
+        "require_grade_a_for_alt": False,
+    },
+}
+
+
+def get_trade_policy(risk_mode: str = "NORMAL") -> dict:
+    return TRADE_POLICIES.get(risk_mode, TRADE_POLICIES["NORMAL"])
+
+
+def calc_breakeven_price(avg_price: float, fee_pct: float = 0.10) -> float:
+    """Точный математический безубыток с учетом двойной комиссии Bybit + микро-запас."""
+    if avg_price <= 0:
+        return 0.0
+    f = fee_pct / 100.0
+    be = avg_price * (1.0 + f) / (1.0 - f) * 1.0005
+    return round(be, 8)
+
+
+def evaluate_setup_grade(cand: dict) -> str:
+    """
+    Оценивает класс сетапа (Grade A+ vs B) по степени схождения факторов (конфлюэнции):
+    - Паттерн Price Action
+    - Подтвержденная опора S/R (>= 2 касаний)
+    - Всплеск объема (>= 1.35x) или MTF-подтверждение
+    - Высокий общий скор (>= 7.2)
+    """
+    confluence = 0
+    patterns = cand.get("patterns", [])
+    keys = cand.get("reason_keys", [])
+    sv = cand.get("signal_values", {})
+
+    if len(patterns) >= 2:
+        confluence += 2
+    elif len(patterns) == 1:
+        confluence += 1
+
+    if cand.get("sup_touches", 0) >= 2 or "support_bounce" in keys:
+        confluence += 1
+
+    if "mtf_dip" in keys or sv.get("volume", 1.0) >= 1.35:
+        confluence += 1
+
+    if cand.get("score", 0.0) >= 7.2:
+        confluence += 1
+
+    return "A+" if confluence >= 3 else "B"
+
+
+def calc_total_open_risk_pct(positions: dict, orders: list, equity: float) -> float:
+    """Считает текущий открытый риск портфеля (Portfolio VaR) по активным стопам."""
+    if equity <= 0:
+        return 0.0
+    total_risk_usdt = 0.0
+
+    for pos in positions.values():
+        avg = pos.get("avg", 0.0)
+        sl = pos.get("sl", 0.0)
+        qty = pos.get("qty", 0.0)
+        # Если стоп ниже цены входа, позиция несет открытый риск
+        if avg > sl > 0 and qty > 0:
+            total_risk_usdt += (avg - sl) * qty
+
+    for o in orders:
+        price = o.get("price", 0.0)
+        sl = o.get("sl", 0.0)
+        qty = o.get("qty", 0.0)
+        if price > sl > 0 and qty > 0:
+            total_risk_usdt += (price - sl) * qty
+
+    return round((total_risk_usdt / equity) * 100.0, 3)
+
 
 def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float, 
                         sup: float, sup_touches: int, res: float, res_touches: int,
-                        is_mom: bool = False, entry_mode: str = "sniper"):
+                        is_mom: bool = False, entry_mode: str = "sniper",
+                        min_rr: float = None):
     tier = tier or "SMALL"
     sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.020)
     tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.028)
@@ -63,10 +167,10 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     # 2. Расчет тейк-профита (TP)
     tp_dist_raw = max(2.0 * a * tp_tuning, sl_dist * 1.5, entry * tp_floor_pct)
     tp = round(entry + tp_dist_raw, 8)
-    min_rr = 1.1 if entry_mode == "sniper" else 0.9
+    if min_rr is None:
+        min_rr = 1.10 if entry_mode == "sniper" else 0.95
 
-    # ⚡ ВАЖНЫЙ ФИКС: Сопротивление учитывается ТОЛЬКО если это сильный уровень (>= 3 касания)
-    # Обычные локальные тени на 15m не должны душить расчетный тейк-профит!
+    # Сопротивление учитывается только если это капитальная стена (>= 3 касания)
     if res and res > entry and res_touches >= 3:
         res_dist_pct = (res - entry) / entry * 100
         if res_dist_pct < 0.35:
@@ -74,10 +178,9 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
 
         res_cap_tp = round(res * 0.997, 8)
         if res_cap_tp < tp:
-            # Если стена ближе расчетного тейка, поджимаем TP только если RR остается адекватным
             if (res_cap_tp - entry) / sl_dist >= 0.85:
                 tp = res_cap_tp
-                min_rr = 0.85
+                min_rr = min(min_rr, 0.85)
             else:
                 return None, None, False, f"Капитальная стена не дает забрать даже 0.85x RR (RR={(res_cap_tp - entry)/sl_dist:.2f})"
 
@@ -113,7 +216,7 @@ def update_position_sl(pos: dict, max_p: float) -> tuple:
     current_state = pos.get("sl_state", "SHIELD")
     new_state = current_state
 
-    breakeven = round(avg_p * 1.0025, 8)
+    breakeven = calc_breakeven_price(avg_p)
     profit_pct = (max_p - avg_p) / avg_p * 100
 
     if pos.get("tp1_done"):
