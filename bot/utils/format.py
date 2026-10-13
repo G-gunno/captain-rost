@@ -34,8 +34,6 @@ def corr_txt(d) -> str:
     return f" · ₿ {v:.2f}" if v is not None else ""
 
 def format_coin(sym: str, data_obj: dict) -> str:
-    kind_tag = "🛰" if data_obj.get("kind") == "satellite" else "🏛"
-    
     emode = data_obj.get("entry_mode", "")
     if emode == "reversal": mode_tag = "🧲"
     elif emode == "rocket" or data_obj.get("is_momentum"): mode_tag = "🚀"
@@ -49,7 +47,6 @@ def format_coin(sym: str, data_obj: dict) -> str:
     public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
     chart_url = f"{public_url}/chart?symbol={base_sym}USDT"
     
-    return f"{mode_tag} {kind_tag} <a href='{chart_url}'><b>{base_sym}</b></a>{' ' + em if em else ''} · <i>{sector}</i>"
+    return f"{mode_tag} <a href='{chart_url}'><b>{base_sym}</b></a>{' ' + em if em else ''} · <i>{sector}</i>"
 
-# Алиас для обратной совместимости старого кода и новых воркеров
 pair_html = format_coin
