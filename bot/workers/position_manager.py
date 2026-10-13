@@ -17,7 +17,7 @@ from bot.utils.format import pair_html, usd, fmt_price, fmt_pct, pnl_emoji
 from bot.core.state import bot_state
 
 class PositionManagerWorker:
-    """Управление позициями: безопасная охрана и синхронный пересчет ордеров со стопами."""
+    """Управление позициями: безопасная охрана, инвалидация протухших ордеров и синхронный реквот."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -152,7 +152,7 @@ class PositionManagerWorker:
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🤬📰 (⏸️ 2ч)")
                 continue
 
-            score_now, candles = await live_score(sym, t, regime, btc_ret, news_items)
+            score_now, candles = await live_score(sym, t, regime, btc_ret, news_items, deriv_t=deriv_tickers.get(sym))
             if score_now is None: continue
 
             closes = [c["close"] for c in candles]
@@ -166,6 +166,16 @@ class PositionManagerWorker:
             patterns = order.get("patterns", [])
             is_accum = "vcp" in patterns
             thr = thrs.get(entry_mode, 6.0)
+
+            # ⚡ Отмена протухшей лимитки при деградации скора или сломе тренда
+            trend_broken_order = (entry_mode != "reversal" and t["last"] < e50 * 0.995 and e21 < e50)
+            if score_now < (thr - 1.2) or trend_broken_order:
+                paper.cancel_order(order["id"])
+                inv_reason = "слом тренда до входа" if trend_broken_order else f"сетап ослаб ({score_now:.1f})"
+                paper.log_event(sym, "cancel", t["last"], inv_reason, tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
+                bot_state.set_cooldown(sym, 300)
+                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 📉 {inv_reason}")
+                continue
 
             if t["last"] > order["price"] + 2.0 * a: 
                 paper.cancel_order(order["id"])
@@ -186,7 +196,8 @@ class PositionManagerWorker:
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
 
-            nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles)
+            candles_1h = await market_data.get_kline(sym, "60", 250)
+            nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles, candles_1h)
             live_sup = nearest_sup if (nearest_sup and sup_touches >= 2) else order.get("nearest_sup")
             live_sup_touches = sup_touches if (nearest_sup and sup_touches >= 2) else order.get("sup_touches", 2 if order.get("nearest_sup") else 0)
 
@@ -210,8 +221,7 @@ class PositionManagerWorker:
                     action_type = "hunt_up"
                     price_icon = "⬆️"
 
-            # Ищем актуальные сопротивления и касания строго выше target_price
-            all_res, all_sup = get_all_sr_levels(candles)
+            all_res, all_sup = get_all_sr_levels(candles, candles_1h)
             res_above_target = [(r[0], r[1]) for r in all_res if r[0] > target_price * 1.0015]
             if res_above_target:
                 res_above_target.sort(key=lambda x: x[0])
@@ -250,6 +260,3 @@ class PositionManagerWorker:
                 msg_desc = "подтяжка к сжатию/базе" if action_type == "hunt_up" else f"сдвиг на {dev_pct:.2f}%"
                 paper.log_event(sym, "order_moved", order["price"], f"Сдвиг: {action_type}", tp=order["tp"], sl=order["sl"], sup=entry_sup, res=entry_res)
                 self._notify(f"📐 <b>Сдвиг {price_icon}</b> · {pair_html(sym, order)}\n📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · 🛡 SL {fmt_price(order['sl'])} · {msg_desc}")
-
-            elif not is_valid and action_type:
-                pass
