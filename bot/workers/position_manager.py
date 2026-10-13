@@ -152,7 +152,15 @@ class PositionManagerWorker:
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🤬📰 (⏸️ 2ч)")
                 continue
 
-            score_now, candles = await live_score(sym, t, regime, btc_ret, news_items, deriv_t=deriv_tickers.get(sym))
+            entry_mode = order.get("entry_mode", "sniper")
+            patterns = order.get("patterns", [])
+
+            score_now, candles = await live_score(
+                sym, t, regime, btc_ret, news_items,
+                deriv_t=deriv_tickers.get(sym),
+                saved_patterns=patterns,
+                saved_mode=entry_mode
+            )
             if score_now is None: continue
 
             closes = [c["close"] for c in candles]
@@ -161,13 +169,11 @@ class PositionManagerWorker:
             if a <= 0: continue
 
             order_age = current_time - order["created"]
-            entry_mode = order.get("entry_mode", "sniper")
             tier = order.get("tier") or "SMALL"
-            patterns = order.get("patterns", [])
             is_accum = "vcp" in patterns
             thr = thrs.get(entry_mode, 6.0)
 
-            # ⚡ Отмена протухшей лимитки при деградации скора или сломе тренда
+            # ⚡ Отмена протухшей лимитки при деградации контекста или сломе тренда
             trend_broken_order = (entry_mode != "reversal" and t["last"] < e50 * 0.995 and e21 < e50)
             if score_now < (thr - 1.2) or trend_broken_order:
                 paper.cancel_order(order["id"])
