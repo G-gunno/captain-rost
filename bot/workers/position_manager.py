@@ -9,7 +9,7 @@ from bot.strategy.scanner import live_score, get_thresholds, _returns
 from bot.strategy.indicators import atr, ema, find_sr_levels
 from bot.strategy.learner import learner
 from bot.strategy.shadow import shadow
-from bot.strategy.risk import calc_initial_sl_tp, calc_runner_target
+from bot.strategy.risk import calc_initial_sl_tp, calc_runner_target, get_trade_policy
 from bot.news.cmc import get_coin_name
 from bot.news.rss_news import fetch_news_cache, check_sentiment
 from bot.strategy.sizing import entry_offset
@@ -17,7 +17,7 @@ from bot.utils.format import pair_html, usd, fmt_price, fmt_pct, pnl_emoji
 from bot.core.state import bot_state
 
 class PositionManagerWorker:
-    """Управление позициями: охрана без ложных SL_REGIME, лестничный Runner и безопасная охота."""
+    """Управление позициями: охрана без ложных SL_REGIME, лестничный Runner и разблокированная охота."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -25,7 +25,7 @@ class PositionManagerWorker:
         self.current_regime = "neutral"
 
     async def run(self):
-        logger.info("🛡 Position Manager запущен: охрана позиций без SL_REGIME и безопасные реквоты...")
+        logger.info("🛡 Position Manager запущен: охрана позиций и динамический реквот ордеров...")
         asyncio.create_task(self._regime_updater())
 
         while True:
@@ -71,6 +71,7 @@ class PositionManagerWorker:
         news_items = await fetch_news_cache()
         regime = self.current_regime
         thrs = get_thresholds(regime)
+        policy = get_trade_policy(new_mode)
         current_time = int(time.time())
 
         # 1. Проверка открытых позиций
@@ -107,7 +108,6 @@ class PositionManagerWorker:
             trend_broken = (last < e50 and e21 < (e50 * 0.998))
             pos_age = current_time - pos.get("entry_time", current_time)
 
-            # ⚡ ТОЛЬКО подтвержденный слом тренда по конкретной монете (без выхода по SL_REGIME!)
             should_exit_early = False
             if pos_age >= 900 and not is_toxic:
                 if entry_mode != "reversal" and trend_broken:
@@ -123,21 +123,20 @@ class PositionManagerWorker:
                 self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · {reason}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                 continue
 
-            # ⚡ ЛЕСТНИЧНЫЙ БЕСКОНЕЧНЫЙ TP_RUNNER: подъем цели под следующее сопротивление
+            # Лестничный Runner
             if pos.get("tp1_done") and last >= (pos["tp"] - 0.4 * a):
                 candles_1h = await market_data.get_kline(sym, "60", 250)
                 next_target = calc_runner_target(sym, last, candles, candles_1h)
                 if next_target > pos["tp"]:
                     old_tp = pos["tp"]
                     pos["tp"] = next_target
-                    # Подтягиваем стоп-лосс под старый пробитый тейк
                     pos["sl"] = max(pos["sl"], old_tp * 0.997)
                     pos["sl_state"] = "TRAILING_RUNNER"
                     paper.save()
                     paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP Runner поднят", mode="TP поднят 🎯", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                     self._notify(f"🎯 <b>TP Runner поднят</b> · {pair_html(sym, pos)}\n🎯 Новая цель: {fmt_price(pos['tp'])} · 🛡 Стоп: {fmt_price(pos['sl'])}")
 
-        # 2. Проверка неисполненных ордеров (Охота и реквоты)
+        # 2. Проверка неисполненных ордеров (Охота и динамический сдвиг)
         for order in list(paper.orders):
             sym = order["symbol"]
             t = tickers.get(sym)
@@ -165,10 +164,11 @@ class PositionManagerWorker:
             order_age = current_time - order["created"]
             entry_mode = order.get("entry_mode", "sniper")
             tier = order.get("tier") or "SMALL"
-            is_accum = "accumulation" in order.get("reason_keys", [])
+            patterns = order.get("patterns", [])
+            is_accum = "vcp" in patterns
             thr = thrs.get(entry_mode, 6.0)
 
-            # Отмена если цена улетела вверх
+            # Отмена если цена улетела далеко без нас
             if t["last"] > order["price"] + 2.0 * a: 
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Улетела без нас", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
@@ -195,34 +195,36 @@ class PositionManagerWorker:
             live_res = nearest_res if (nearest_res and res_touches >= 2) else order.get("nearest_res")
             live_res_touches = res_touches if (nearest_res and res_touches >= 2) else order.get("res_touches", 2 if order.get("nearest_res") else 0)
 
-            # ⚡ ПРАВИЛА ОХОТЫ
+            # ⚡ РАЗБЛОКИРОВАННАЯ ОХОТА И СДВИГ ОРДЕРОВ
             action_type = None
             price_icon = ""
             dev_pct = abs(ideal_price - old_price) / old_price * 100
 
-            # 1. Зона заморозки: если цена ближе 0.35 ATR, ордер заблокирован от сдвига вниз!
-            in_freeze_zone = abs(t["last"] - old_price) <= (0.35 * a) or (abs(t["last"] - old_price) / old_price * 100) <= 0.35
+            # Зона заморозки разблокирована: замораживаем только при близости <= 0.15% (исполнение в упор)
+            in_freeze_zone = abs(t["last"] - old_price) <= (0.15 * a) or (abs(t["last"] - old_price) / old_price * 100) <= 0.15
 
-            # 2. Охота вниз: только плавный пересчет волатильности, не убегая от цены и не уходя под плиту!
-            if ideal_price < old_price and dev_pct >= 0.5 and not in_freeze_zone:
+            # 1. Охота вниз: плавный сдвиг за остывающей волатильностью, не сползая под поддержку
+            if ideal_price < old_price and dev_pct >= 0.35 and not in_freeze_zone:
                 if not (live_sup and ideal_price < live_sup * 1.0015):
                     order["price"] = ideal_price
                     action_type = "correct"
                     price_icon = "⬇️"
 
-            # 3. Охота вверх: разрешена ТОЛЬКО в сужении VCP при тихом накоплении!
-            elif ideal_price > old_price and dev_pct >= 0.3:
-                if is_accum and t["last"] <= (e50 * 1.012):
+            # 2. Охота вверх: разрешена при накоплении VCP или плавной подтяжке снайпера к тренду
+            elif ideal_price > old_price and dev_pct >= 0.30 and not in_freeze_zone:
+                can_shift_up = (is_accum and t["last"] <= (e50 * 1.012)) or (entry_mode == "sniper" and t["last"] <= (e21 * 1.008))
+                if can_shift_up:
                     order["price"] = ideal_price
-                    action_type = "hunt_vcp"
+                    action_type = "hunt_up"
                     price_icon = "⬆️"
 
-            # Пересчет уровней SL/TP через risk модуль с сохраненными касаниями
+            min_rr = policy["min_rr_sniper"] if entry_mode == "sniper" else policy["min_rr_alt"]
             sl, tp, is_valid, _ = calc_initial_sl_tp(
                 symbol=sym, entry=order["price"], tier=tier, a=a,
                 sup=live_sup, sup_touches=live_sup_touches,
                 res=live_res, res_touches=live_res_touches,
-                is_mom=(entry_mode == "rocket"), entry_mode=entry_mode
+                is_mom=(entry_mode == "rocket"), entry_mode=entry_mode,
+                min_rr=min_rr
             )
 
             if is_valid:
@@ -237,7 +239,7 @@ class PositionManagerWorker:
             if action_type:
                 order["created"] = current_time
                 paper.save()
-                msg_desc = "подтяжка к сжатию (VCP)" if action_type == "hunt_vcp" else f"сдвиг на {dev_pct:.2f}%"
+                msg_desc = "подтяжка к сжатию/базе" if action_type == "hunt_up" else f"сдвиг на {dev_pct:.2f}%"
                 paper.log_event(sym, "order_moved", order["price"], f"Сдвиг: {action_type}", tp=order["tp"], sl=order["sl"], sup=live_sup, res=live_res)
                 self._notify(f"📐 <b>Сдвиг {price_icon}</b> · {pair_html(sym, order)}\n📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · {msg_desc}")
             else:
