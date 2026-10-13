@@ -1,4 +1,3 @@
-# Формат: (Equity, Floor (Base Min), Ceiling (Base Max))
 from bot.strategy.learner import learner
 
 TIERS = [
@@ -11,28 +10,25 @@ TIERS = [
     (10000, 200, 1000),
 ]
 
-# Границы отступа для стандартного отката (Sniper Pullback)
 TIER_OFFSET_BOUNDS = {
-    "TOP20": (-0.0035, -0.0010),  # 🐋 Киты: -0.10% ... -0.35% (высокая ликвидность, спред)
-    "MID":   (-0.0065, -0.0020),  # 🐘 Слоны: -0.20% ... -0.65%
-    "SMALL": (-0.0100, -0.0035),  # 🐅 Тигры: -0.35% ... -1.00% (умеренный откат)
-    "MICRO": (-0.0160, -0.0060),  # 🐭 Мыши: -0.60% ... -1.60% (ловля теней в тонком стакане)
+    "TOP20": (-0.0035, -0.0010),
+    "MID":   (-0.0065, -0.0020),
+    "SMALL": (-0.0100, -0.0035),
+    "MICRO": (-0.0160, -0.0060),
 }
 
-# Специальные границы для паттерна Накопления (Тихая консолидация на EMA50)
 TIER_ACCUM_BOUNDS = {
-    "TOP20": (-0.0015, -0.0005),  # 🐋 Киты: в спред / -0.05% ... -0.15%
-    "MID":   (-0.0030, -0.0010),  # 🐘 Слоны: -0.10% ... -0.30%
-    "SMALL": (-0.0045, -0.0015),  # 🐅 Тигры: -0.15% ... -0.45%
-    "MICRO": (-0.0065, -0.0025),  # 🐭 Мыши: -0.25% ... -0.65%
+    "TOP20": (-0.0015, -0.0005),
+    "MID":   (-0.0030, -0.0010),
+    "SMALL": (-0.0045, -0.0015),
+    "MICRO": (-0.0065, -0.0025),
 }
 
-# Границы для импульсных ракет (Momentum / Rocket)
 TIER_ROCKET_BOUNDS = {
-    "TOP20": (-0.0020, -0.0005),  # -0.05% ... -0.20%
-    "MID":   (-0.0035, -0.0010),  # -0.10% ... -0.35%
-    "SMALL": (-0.0050, -0.0020),  # -0.20% ... -0.50%
-    "MICRO": (-0.0080, -0.0035),  # -0.35% ... -0.80%
+    "TOP20": (-0.0020, -0.0005),
+    "MID":   (-0.0035, -0.0010),
+    "SMALL": (-0.0050, -0.0020),
+    "MICRO": (-0.0080, -0.0035),
 }
 
 def tier_limits(equity):
@@ -50,32 +46,23 @@ def portfolio_limits(equity):
     if equity <= 5000: return 10, 12
     return 12, 15
 
-def buy_size(equity, score, thr, liquidity, free_usdt, kind="core", entry_mode="sniper"):
+def buy_size(equity, score, thr, liquidity, free_usdt, entry_mode="sniper"):
     base_min, base_max = tier_limits(equity)
     score_range = 10.0 - thr
     strength = 0.0 if score_range <= 0 else max(0.0, min(1.0, (score - thr) / score_range))
 
-    if kind == "satellite":
-        sat_base = max(base_min, equity * (learner.satellite_size_pct() / 100.0))
-        sat_max = sat_base * 1.5
-        size = sat_base + (sat_max - sat_base) * strength
-        max_allowed = sat_max
-    else:
-        size = base_min + (base_max - base_min) * strength
-        max_allowed = base_max
+    size = base_min + (base_max - base_min) * strength
+    max_allowed = base_max
 
     if liquidity < 500_000:
         size = base_min
 
-    # Половинный критерий Келли по стратегиям (Half-Kelly)
     kelly = learner.kelly_multiplier(entry_mode)
     if kelly is not None:
         size *= (0.5 + 0.5 * kelly)
 
     min_allowed = 10.0 if (kelly is not None and kelly < 0.3) else base_min
     size = max(min_allowed, min(size, max_allowed))
-    
-    # ⚡ Жесткий лимит концентрации: не более 10% от депо в одну сделку (было 0.20)
     size = min(size, free_usdt * 0.95, equity * 0.10)
 
     return round(size, 2)
@@ -87,17 +74,14 @@ def entry_offset(score, thr, regime, atr_pct, entry_mode="sniper", tier="SMALL",
     surplus = max(0.0, score - thr)
     strength_alpha = min(1.0, surplus / 2.5)
 
-    # 1. РАКЕТА (Momentum): вход вплотную к цене
     if entry_mode == "rocket":
         bounds = TIER_ROCKET_BOUNDS.get(tier, TIER_ROCKET_BOUNDS["SMALL"])
         raw = -atr_pct / 100 * 0.20 * (1.0 - strength_alpha * 0.4)
         return max(bounds[0], min(bounds[1], raw))
 
-    # 2. РЕВЕРСАЛ (Ловец дна): вход в спред на отскоке
     if entry_mode == "reversal":
         return max(0.0, min(0.0030, atr_pct / 100 * 0.15))
 
-    # 3. НАКОПЛЕНИЕ (Консолидация на EMA50):
     if is_accumulation:
         bounds = TIER_ACCUM_BOUNDS.get(tier, TIER_ACCUM_BOUNDS["SMALL"])
         base_accum_target = -atr_pct / 100 * 0.20
@@ -106,7 +90,6 @@ def entry_offset(score, thr, regime, atr_pct, entry_mode="sniper", tier="SMALL",
             target *= 1.2
         return max(bounds[0], min(bounds[1], target))
 
-    # 4. СТАНДАРТНЫЙ СНАЙПЕР (Pullback по тренду):
     bounds = TIER_OFFSET_BOUNDS.get(tier, TIER_OFFSET_BOUNDS["SMALL"])
     base_pullback = -atr_pct / 100 * 0.45
 
