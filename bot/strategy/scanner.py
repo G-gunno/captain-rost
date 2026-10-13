@@ -108,7 +108,6 @@ def is_post_pump_dump(candles_15m: list) -> tuple:
     if pump_magnitude >= 12.0:
         last_close = recent_16[-1]["close"]
         retrace = (highest - last_close) / (highest - lowest)
-        # Откатили на 35%+ от пампа и продолжаем сливаться
         if retrace >= 0.35:
             return True, f"пост-памп дамп (всплеск +{pump_magnitude:.1f}%, слив {retrace*100:.0f}%)"
     return False, ""
@@ -393,7 +392,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 3.5
             reasons.append(f"1H даунтренд (цена < EMA21_1H ${fmt_price(e21_1h)})")
 
-    # ⚡ СТРУКТУРНЫЙ ЯКОРЬ: монета не должна висеть в пустоте
     has_structure = (nearest_sup is not None and sup_touches >= 2) or ("vcp" in pattern_keys) or ("breakout" in pattern_keys)
 
     signal_values = {
@@ -456,6 +454,7 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
         if pos_news > neg:
             raw += learner.weight("news_pos")
         elif mentions >= 2:
+            # ⚡ Синхронизировано: используем обучаемый вес hype вместо захардкоженного числа
             raw += learner.weight("hype")
 
     score10 = normalize(raw, regime)
@@ -557,7 +556,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
             if len(candles_15m) < 60 or len(candles_1h) < 60: return None
 
-            # ⚡ 1. ПРОВЕРКА ПОСТ-ПАМПА
             is_post_pump, pp_reason = is_post_pump_dump(candles_15m)
             if is_post_pump:
                 return None
@@ -569,7 +567,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
             score, reasons, keys, signal_values = score_symbol(candles_15m, candles_1h, tickers[sym], regime)
 
-            # ⚡ 2. LOCATION FIRST: монета обязана иметь опору под ценой
             if not signal_values.get("has_structure"):
                 return None
 
