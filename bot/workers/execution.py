@@ -6,7 +6,7 @@ from bot.exchange.paper_exchange import paper
 from bot.exchange.market_data import market_data
 from bot.utils.format import pair_html, usd, fmt_price, fmt_pct, pnl_emoji
 from bot.strategy.shadow import shadow
-from bot.strategy.risk import update_position_sl, calc_runner_target
+from bot.strategy.risk import update_position_sl, calc_runner_target, calc_breakeven_price
 
 class ExecutionRiskWorker:
     """Критический воркер исполнения ордеров, машины состояний SL и фиксации TP."""
@@ -81,11 +81,12 @@ class ExecutionRiskWorker:
             if not t: continue
             last = t["last"]
 
-            # SL
+            # ⚡ СТОП-ЛОСС ИСПОЛНЯЕТСЯ СТРОГО ПО ВЫСТАВЛЕННОЙ ЦЕНЕ pos["sl"]!
             if last <= pos["sl"]:
-                ex = paper._sell(sym, last, "SL 🛡", regime_now=bot_state.current_regime)
+                sl_exec_price = pos["sl"]
+                ex = paper._sell(sym, sl_exec_price, "SL 🛡", regime_now=bot_state.current_regime)
                 ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"
-                paper.log_event(sym, ev_type, last, "SL 🛡", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                paper.log_event(sym, ev_type, sl_exec_price, "SL 🛡", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                 bot_state.set_cooldown(sym, 420)
                 self.bus.publish("NOTIFY", {
                     "text": f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · SL 🛡\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}",
@@ -99,16 +100,16 @@ class ExecutionRiskWorker:
                     half = pos["qty"] / 2
                     ex = paper.sell_partial(sym, half, pos["tp"], "TP1 🎯")
                     pos["tp1_done"] = True
-                    paper.log_event(sym, "tp1", last, f"TP1 (+{ex['pnl_pct']:.1f}%)", mode="TP1 🎯", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                    paper.log_event(sym, "tp1", pos["tp"], f"TP1 (+{ex['pnl_pct']:.1f}%)", mode="TP1 🎯", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                     shadow.mark_success(sym)
 
-                    # Перевод в безубыток и расчет цели для Runner через уровни старшего ТФ
+                    # Перевод в точный БУ по формуле комиссии и подъем раннера
                     candles_15m = await market_data.get_kline(sym, "15", 120)
                     candles_1h = await market_data.get_kline(sym, "60", 250)
                     pos["tp"] = calc_runner_target(sym, last, candles_15m, candles_1h)
 
                     pos["sl_state"] = "BREAKEVEN"
-                    pos["sl"] = max(pos["sl"], round(pos["avg"] * 1.0025, 8))
+                    pos["sl"] = max(pos["sl"], calc_breakeven_price(pos["avg"]))
                     pos["_last_notified_sl_str"] = fmt_price(pos["sl"])
                     pos["_last_notified_sl_state"] = "BREAKEVEN"
                     state_changed = True
@@ -136,8 +137,9 @@ class ExecutionRiskWorker:
                             "urgent": False
                         })
                     else:
-                        ex = paper._sell(sym, last, "TP ✅", regime_now=bot_state.current_regime)
-                        paper.log_event(sym, "tp_runner", last, f"TP RUNNER (+{ex['pnl_pct']:.1f}%)", mode="TP RUNNER 🚀", tp=last, sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                        tp_exec_price = pos["tp"]
+                        ex = paper._sell(sym, tp_exec_price, "TP ✅", regime_now=bot_state.current_regime)
+                        paper.log_event(sym, "tp_runner", tp_exec_price, f"TP RUNNER (+{ex['pnl_pct']:.1f}%)", mode="TP RUNNER 🚀", tp=tp_exec_price, sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                         shadow.mark_success(sym)
                         bot_state.set_cooldown(sym, 180)
                         self.bus.publish("NOTIFY", {
@@ -146,7 +148,7 @@ class ExecutionRiskWorker:
                         })
                 continue
 
-            # ⚡ ТРЕЙЛИНГ И МАШИНА СОСТОЯНИЙ СТОПА (С АНТИ-СПАМ ЗАЩИТОЙ)
+            # Трейлинг и обновление стопа
             max_p = max(pos.get("max_price", last), last)
             pos["max_price"] = max_p
 
@@ -161,7 +163,6 @@ class ExecutionRiskWorker:
                 pos["max_sl"] = new_sl
                 state_changed = True
 
-                # ⚡ АНТИ-СПАМ: Уведомляем ТОЛЬКО если отображаемая цена или статус реально изменились!
                 if new_sl_str != old_sl_str or new_state != old_state:
                     pos["_last_notified_sl_str"] = new_sl_str
                     pos["_last_notified_sl_state"] = new_state
