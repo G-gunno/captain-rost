@@ -31,48 +31,44 @@ TIER_TRAIL_CONFIG = {
     "MICRO": {"be_trigger": 0.013, "runner_dist": 0.022, "pre_tp_trigger": 2.5, "pre_tp_dist": 0.018},
 }
 
+# ⚡ ТОРГОВЫЕ ПОЛИТИКИ (Без искусственных ограничений на Other!)
 TRADE_POLICIES = {
     "STRICT": {
         "max_portfolio_risk_pct": 1.5,
         "risk_per_trade_core": 0.50,
         "risk_per_trade_alt": 0.25,
-        "min_rr_sniper": 1.5,
-        "min_rr_alt": 1.3,
-        "allowed_other_sector_max": 1,
+        "min_rr_sniper": 1.35,
+        "min_rr_alt": 1.15,
         "require_grade_a_for_alt": True,
     },
     "CAUTIOUS": {
         "max_portfolio_risk_pct": 2.0,
         "risk_per_trade_core": 0.75,
         "risk_per_trade_alt": 0.50,
-        "min_rr_sniper": 1.35,
-        "min_rr_alt": 1.2,
-        "allowed_other_sector_max": 1,
+        "min_rr_sniper": 1.25,
+        "min_rr_alt": 1.10,
         "require_grade_a_for_alt": True,
     },
     "NORMAL": {
         "max_portfolio_risk_pct": 3.0,
         "risk_per_trade_core": 1.00,
         "risk_per_trade_alt": 0.75,
-        "min_rr_sniper": 1.25,
-        "min_rr_alt": 1.1,
-        "allowed_other_sector_max": 2,
+        "min_rr_sniper": 1.20,
+        "min_rr_alt": 1.05,
         "require_grade_a_for_alt": False,
     },
     "AGGRESSIVE": {
         "max_portfolio_risk_pct": 5.0,
         "risk_per_trade_core": 1.25,
         "risk_per_trade_alt": 1.00,
-        "min_rr_sniper": 1.1,
-        "min_rr_alt": 1.0,
-        "allowed_other_sector_max": 3,
+        "min_rr_sniper": 1.10,
+        "min_rr_alt": 1.00,
         "require_grade_a_for_alt": False,
     },
 }
 
 
 def calc_breakeven_price(avg_p: float, fee_pct: float = FEE_SPOT_PCT) -> float:
-    """Точный математический расчет безубытка с учетом обеих спотовых комиссий."""
     fee_rate = fee_pct / 100.0
     return round(avg_p * ((1.0 + fee_rate) / (1.0 - fee_rate)), 8)
 
@@ -135,11 +131,7 @@ def calc_total_open_risk_pct(positions: dict, orders: list, equity: float) -> fl
 def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float, 
                         sup: float, sup_touches: int, res: float, res_touches: int,
                         is_mom: bool = False, entry_mode: str = "sniper",
-                        min_rr: float = 1.25):
-    """
-    Расчет SL и TP без микро-стопов.
-    Стоп обязан быть не ближе минимального пола волатильности (sl_floor_pct и 1.2 ATR).
-    """
+                        min_rr: float = 1.20):
     tier = tier or "SMALL"
     sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.020)
     tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.028)
@@ -149,7 +141,6 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     tp_tuning = shadow.tp_mult()
 
     base_mult = 0.75 if is_mom else (2.0 if entry_mode == "reversal" else 1.2)
-    # Минимальная безопасная дистанция стопа (пол шума)
     min_sl_dist = max(base_mult * a * sl_tuning, entry * sl_floor_pct)
     max_sl_dist = entry * (max_sl_allowed / 100.0)
 
@@ -160,9 +151,6 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
         candidate_dist = entry - struct_sl
         if candidate_dist > max_sl_dist:
             return None, None, False, f"Опора слишком далеко ({candidate_dist/entry*100:.2f}% > {max_sl_allowed}%)"
-        
-        # ⚡ ЗАЩИТА ОТ МИКРО-СТОПОВ:
-        # Если опора слишком близко, стоп ставится глубже неё, но НЕ ближе min_sl_dist!
         sl_dist = max(candidate_dist, min_sl_dist)
     else:
         sl_dist = min_sl_dist
