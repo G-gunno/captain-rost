@@ -120,13 +120,13 @@ def is_post_pump_dump(candles_15m: list) -> tuple:
 
 
 def raw_max_score(regime):
+    """
+    Калиброванный эталон нормализации (~10.5 баллов).
+    Исключает двойной счет взаимоисключающих факторов.
+    """
     m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
-    m += learner.weight("indep")
-    m += learner.weight("news_pos")
-    m += learner.weight("hype")
-    m += 3.0
-    m += 1.5
-    m += 0.5
+    m += max(learner.weight("indep"), learner.weight("news_pos"), learner.weight("hype"))
+    m += 3.5  # Паттерн Price Action / опора S/R
     return m
 
 
@@ -271,10 +271,12 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     a15 = atr(candles_15m)
 
     vols = [c["volume"] for c in candles_15m]
-    base_vol = sum(vols[-21:-1]) / 20 if len(vols) > 21 else (sum(vols) / max(1, len(vols)))
-    vol_ratio = vols[-1] / base_vol if base_vol else 1.0
+    base_vol = sum(vols[-22:-2]) / 20 if len(vols) > 22 else (sum(vols) / max(1, len(vols)))
+    # Учитываем максимум из текущей и только что закрытой свечи, чтобы не терять сигнал на 1-й минуте бара
+    eff_vol = max(vols[-1], vols[-2]) if len(vols) >= 2 else vols[-1]
+    vol_ratio = eff_vol / base_vol if base_vol else 1.0
 
-    prior_candles = candles_15m[-25:-1] if len(candles_15m) >= 25 else candles_15m[:-1]
+    prior_candles = candles_15m[-26:-2] if len(candles_15m) >= 26 else candles_15m[:-1]
     recent_high = max(c["high"] for c in prior_candles) if prior_candles else last
     recent_low_2h = min(c["low"] for c in candles_15m[-8:]) if len(candles_15m) >= 8 else min(c["low"] for c in candles_15m)
 
@@ -286,7 +288,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     if e21 > e50: score += learner.weight("ema21"); reasons.append("EMA21>EMA50"); keys.append("ema21")
     if e12 > e26: score += learner.weight("impulse"); reasons.append("импульс роста"); keys.append("impulse")
 
-    # 2. RSI
+    # 2. RSI без слепых зон
     if r < 38:
         score += learner.weight("rsi"); reasons.append(f"перепроданность RSI {r:.0f}"); keys.append("rsi")
     elif 38 <= r <= w["rsi_hi"]:
@@ -296,7 +298,8 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
 
     # 3. Объем
     last_candle = candles_15m[-1]
-    is_green = last_candle["close"] >= last_candle["open"]
+    prev_candle = candles_15m[-2]
+    is_green = last_candle["close"] >= last_candle["open"] or (vols[-2] > vols[-1] and prev_candle["close"] >= prev_candle["open"])
     c_range = last_candle["high"] - last_candle["low"]
     lower_wick = min(last_candle["open"], last_candle["close"]) - last_candle["low"]
     is_panic_dip = (t["change_pct"] <= -6.0 or r < 38)
@@ -357,21 +360,24 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     if t["quote_volume"] < 500_000:
         score -= 1.0
 
-    # 6. S/R уровни
+    # 6. Уровни S/R
     nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_15m, candles_1h)
     
-    if nearest_res and res_touches >= 2 and a15 > 0 and not is_open_pos:
+    if nearest_res and res_touches >= 3 and a15 > 0 and not is_open_pos:
         dist_to_res = nearest_res - last
-        if dist_to_res < 0.8 * a15 or (dist_to_res / last * 100) < 0.7:
-            score -= 4.0
-            reasons.append(f"в упор к стене ${fmt_price(nearest_res)} ({res_touches}x)")
+        if dist_to_res < 0.5 * a15 or (dist_to_res / last * 100) < 0.35:
+            score -= 3.5
+            reasons.append(f"в упор к капитальной стене ${fmt_price(nearest_res)} ({res_touches}x)")
 
-    if nearest_sup and sup_touches >= 2 and a15 > 0 and not is_open_pos:
+    sup_is_near = False
+    if nearest_sup and sup_touches >= 2 and a15 > 0:
         dist_to_sup = last - nearest_sup
-        if dist_to_sup < 1.2 * a15 and last >= nearest_sup and last > closes[-2]:
-            score += 1.5
-            reasons.append(f"отскок от поддержки ${fmt_price(nearest_sup)} ({sup_touches}x)")
-            keys.append("support_bounce")
+        if 0 <= dist_to_sup <= 2.0 * a15:
+            sup_is_near = True
+            if not is_open_pos and (last > closes[-2] or "reversal" in matched_modes):
+                score += 1.5
+                reasons.append(f"опора на поддержку ${fmt_price(nearest_sup)} ({sup_touches}x)")
+                keys.append("support_bounce")
 
     if candles_1h and len(candles_1h) >= 25:
         closes_1h = [c["close"] for c in candles_1h]
@@ -398,8 +404,9 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 3.5
             reasons.append(f"1H даунтренд (цена < EMA21_1H ${fmt_price(e21_1h)})")
 
+    # Первичная воронка структуры: опора обязана быть близко к цене ИЛИ должен быть паттерн Price Action
     has_structure = (
-        (nearest_sup is not None and sup_touches >= 2) or
+        sup_is_near or
         len(pattern_keys) > 0 or
         ("support_bounce" in keys) or
         ("mtf_dip" in keys)
