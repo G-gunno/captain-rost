@@ -93,23 +93,37 @@ def is_tradable(symbol):
 
 def is_post_pump_dump(candles_15m: list) -> tuple:
     """
-    ⚡ ФИЛЬТР ПОСТ-ПАМП (Защита от сценария AVA).
-    Если за последние 4 часа монета взлетела на >= 12% и сейчас стекает с хая — запрет покупок!
+    ⚡ ИСПРАВЛЕННЫЙ ФИЛЬТР ПОСТ-ПАМП:
+    Проверяет, был ли реальный взлёт от минимума к пику (>= 12%),
+    после которого начался агрессивный слив (откат >= 40%).
     """
     if not candles_15m or len(candles_15m) < 16:
         return False, ""
-    recent_16 = candles_15m[-16:]
-    highest = max(c["high"] for c in recent_16)
-    lowest = min(c["low"] for c in recent_16)
-    if lowest <= 0:
-        return False, ""
+    recent = candles_15m[-16:]
+    
+    high_val = -1.0
+    high_idx = -1
+    low_val = float("inf")
+    low_idx = -1
 
-    pump_magnitude = (highest - lowest) / lowest * 100
-    if pump_magnitude >= 12.0:
-        last_close = recent_16[-1]["close"]
-        retrace = (highest - last_close) / (highest - lowest)
-        if retrace >= 0.35:
-            return True, f"пост-памп дамп (всплеск +{pump_magnitude:.1f}%, слив {retrace*100:.0f}%)"
+    for idx, c in enumerate(recent):
+        if c["high"] > high_val:
+            high_val = c["high"]
+            high_idx = idx
+        if c["low"] < low_val:
+            low_val = c["low"]
+            low_idx = idx
+
+    # Минимум обязан предшествовать максимуму (памп вверх)
+    if low_idx < high_idx and low_val > 0:
+        pump_magnitude = (high_val - low_val) / low_val * 100
+        # Мощный взлет, пик уже позади (минимум 1-2 свечи назад)
+        if pump_magnitude >= 12.0 and high_idx <= len(recent) - 2:
+            last_close = recent[-1]["close"]
+            dump_depth = (high_val - last_close) / (high_val - low_val)
+            if dump_depth >= 0.40:
+                return True, f"пост-памп дамп (+{pump_magnitude:.1f}%, слив {dump_depth*100:.0f}%)"
+
     return False, ""
 
 
@@ -118,9 +132,9 @@ def raw_max_score(regime):
     m += learner.weight("indep")
     m += learner.weight("news_pos")
     m += learner.weight("hype")
-    m += 3.0   # Паттерн Price Action
-    m += 1.5   # Уровень S/R
-    m += 0.5   # Макро
+    m += 3.0
+    m += 1.5
+    m += 0.5
     return m
 
 
@@ -280,7 +294,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     if e21 > e50: score += learner.weight("ema21"); reasons.append("EMA21>EMA50"); keys.append("ema21")
     if e12 > e26: score += learner.weight("impulse"); reasons.append("импульс роста"); keys.append("impulse")
 
-    # 2. RSI без слепых зон
+    # 2. RSI
     if r < 38:
         score += learner.weight("rsi"); reasons.append(f"перепроданность RSI {r:.0f}"); keys.append("rsi")
     elif 38 <= r <= w["rsi_hi"]:
@@ -322,7 +336,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 4.0
             reasons.append(f"FOMO-перегрев (+{dist_from_ema/a15:.1f} ATR от EMA21)")
 
-    # 4. СЛОЙ 2: АВТОНОМНЫЕ ТРИГГЕРЫ PRICE ACTION
+    # 4. Триггеры Price Action
     detected_patterns = detect_patterns(candles_15m, a15, e50, e21, recent_high)
     matched_modes = []
     pattern_keys = []
@@ -335,7 +349,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         pattern_keys.append(pkey)
         matched_modes.append(pat["mode"])
 
-    # 5. ДИНАМИКА 24H: балл за тренд ИЛИ за глубокий дисконт на дне
+    # 5. Динамика 24h
     if 0 < t["change_pct"] < w["chg_hi"]:
         score += learner.weight("chg24h")
         reasons.append(f"24ч +{t['change_pct']:.1f}%")
@@ -351,7 +365,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     if t["quote_volume"] < 500_000:
         score -= 1.0
 
-    # 6. МУЛЬТИТАЙМФРЕЙМ УРОВНИ S/R (LOCATION FIRST)
+    # 6. S/R уровни
     nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_15m, candles_1h)
     
     if nearest_res and res_touches >= 2 and a15 > 0 and not is_open_pos:
@@ -392,7 +406,13 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 3.5
             reasons.append(f"1H даунтренд (цена < EMA21_1H ${fmt_price(e21_1h)})")
 
-    has_structure = (nearest_sup is not None and sup_touches >= 2) or ("vcp" in pattern_keys) or ("breakout" in pattern_keys)
+    # ⚡ СМЯГЧЁННАЯ СТРУКТУРА: опора горизонтальная, отскок от EMA50 или понятный паттерн
+    has_structure = (
+        (nearest_sup is not None and sup_touches >= 2) or
+        len(pattern_keys) > 0 or
+        ("support_bounce" in keys) or
+        ("mtf_dip" in keys)
+    )
 
     confirmed_res, confirmed_sup = get_all_sr_levels(candles_15m, candles_1h)
     
@@ -458,7 +478,6 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
         if pos_news > neg:
             raw += learner.weight("news_pos")
         elif mentions >= 2:
-            # ⚡ Синхронизировано: используем обучаемый вес hype вместо захардкоженного числа
             raw += learner.weight("hype")
 
     score10 = normalize(raw, regime)
