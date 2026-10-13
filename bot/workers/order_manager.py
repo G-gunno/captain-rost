@@ -9,7 +9,6 @@ from bot.strategy.scanner import get_thresholds
 from bot.strategy.learner import learner
 from bot.strategy.risk import (calc_initial_sl_tp, get_trade_policy, 
                                 evaluate_setup_grade, calc_total_open_risk_pct)
-from bot.strategy.indicators import get_all_sr_levels
 from bot.news.cmc import get_coin_name
 from bot.news.rss_news import fetch_news_cache, check_sentiment
 from bot.utils.format import pair_html, corr_txt, usd, fmt_price, fmt_pct
@@ -111,11 +110,20 @@ class OrderManagerWorker:
             a = cand["atr"]
             if a <= 0: continue
 
-            # Поиск актуального сопротивления строго относительно цены входа
+            # Поиск актуального сопротивления и его касаний относительно цены входа
             all_res = cand.get("signal_values", {}).get("all_res", [])
-            res_above_entry = [r for r in all_res if r > entry * 1.0015]
-            entry_res = min(res_above_entry) if res_above_entry else cand.get("nearest_res")
-            res_touches = 2 if entry_res else 0
+            res_above_entry = []
+            for r_item in all_res:
+                r_val, r_tch = r_item if isinstance(r_item, (list, tuple)) else (r_item, 2)
+                if r_val > entry * 1.0015:
+                    res_above_entry.append((r_val, r_tch))
+
+            if res_above_entry:
+                res_above_entry.sort(key=lambda x: x[0])
+                entry_res, res_touches = res_above_entry[0]
+            else:
+                entry_res = cand.get("nearest_res")
+                res_touches = cand.get("res_touches", 0)
 
             min_rr = policy["min_rr_sniper"] if entry_mode == "sniper" else policy["min_rr_alt"]
 
