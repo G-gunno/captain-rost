@@ -9,6 +9,7 @@ from bot.strategy.scanner import get_thresholds
 from bot.strategy.learner import learner
 from bot.strategy.risk import (calc_initial_sl_tp, get_trade_policy, 
                                 evaluate_setup_grade, calc_total_open_risk_pct)
+from bot.strategy.indicators import get_all_sr_levels
 from bot.news.cmc import get_coin_name
 from bot.news.rss_news import fetch_news_cache, check_sentiment
 from bot.utils.format import pair_html, corr_txt, usd, fmt_price, fmt_pct
@@ -45,7 +46,6 @@ class OrderManagerWorker:
         thrs = get_thresholds(regime)
         news_items = await fetch_news_cache()
 
-        # ⚡ ТОРГОВАЯ ПОЛИТИКА ТЕКУЩЕГО РЕЖИМА
         risk_mode = getattr(learner, "current_risk_mode", "NORMAL")
         policy = get_trade_policy(risk_mode)
 
@@ -77,7 +77,7 @@ class OrderManagerWorker:
             entry_mode = cand.get("entry_mode", "sniper")
             is_mom = cand.get("is_momentum", False)
 
-            # ⚡ 2. ЗАЩИТА ОТ МУСОРНОГО СЕКТОРА OTHER
+            # 2. Защита от мусорного сектора Other
             if sector == "Other":
                 other_count = sum(1 for p in paper.positions.values() if (p.get("sector") or "Other") == "Other")
                 other_orders = sum(1 for o in paper.orders if (o.get("sector") or "Other") == "Other")
@@ -85,7 +85,7 @@ class OrderManagerWorker:
                     logger.debug(f"OrderManager: {sym} пропущен (лимит сектора Other: {policy['allowed_other_sector_max']})")
                     continue
 
-            # ⚡ 3. БАРЬЕР КАЧЕСТВА GRADE A+ ДЛЯ РЕЖИМА STRICT / CAUTIOUS
+            # 3. Барьер качества Grade A+ для режима STRICT / CAUTIOUS
             grade = evaluate_setup_grade(cand)
             if policy["require_grade_a_for_alt"] and entry_mode in ("reversal", "rocket"):
                 if grade != "A+":
@@ -111,14 +111,18 @@ class OrderManagerWorker:
             a = cand["atr"]
             if a <= 0: continue
 
-            res = cand.get("nearest_res")
-            res_touches = cand.get("res_touches", 0)
+            # ⚡ 4. ПОИСК СОПРОТИВЛЕНИЯ СТРОГО ОТНОСИТЕЛЬНО ЦЕНЫ ВХОДА ENTRY
+            all_res = cand.get("signal_values", {}).get("all_res", [])
+            res_above_entry = [r for r in all_res if r > entry * 1.0015]
+            entry_res = min(res_above_entry) if res_above_entry else cand.get("nearest_res")
+            res_touches = 2 if entry_res else 0
+
             min_rr = policy["min_rr_sniper"] if entry_mode == "sniper" else policy["min_rr_alt"]
 
             sl, tp, is_valid, rej_reason = calc_initial_sl_tp(
                 symbol=sym, entry=entry, tier=tier, a=a,
                 sup=sup, sup_touches=sup_touches,
-                res=res, res_touches=res_touches,
+                res=entry_res, res_touches=res_touches,
                 is_mom=is_mom, entry_mode=entry_mode,
                 min_rr=min_rr
             )
@@ -127,25 +131,21 @@ class OrderManagerWorker:
                 logger.info(f"OrderManager: {sym} отклонён -> {rej_reason}")
                 continue
 
-            # ⚡ 4. БЮДЖЕТИРОВАНИЕ СОВОКУПНОГО РИСКА (PORTFOLIO VAR)
+            # 5. Бюджетирование совокупного риска (Portfolio VaR)
             sl_dist_pct = (entry - sl) / entry * 100
             if sl_dist_pct <= 0: continue
 
-            # Риск на сделку из торговой политики
             trade_risk_budget_pct = policy["risk_per_trade_core"] if entry_mode == "sniper" else policy["risk_per_trade_alt"]
-            
-            # Проверяем лимит совокупного риска портфеля
             current_risk_pct = calc_total_open_risk_pct(paper.positions, paper.orders, equity)
             avail_risk_budget_pct = policy["max_portfolio_risk_pct"] - current_risk_pct
 
             if avail_risk_budget_pct <= 0.10:
-                logger.debug(f"OrderManager: {sym} пропущен -> лимит совокупного риска {policy['max_portfolio_risk_pct']}% исчерпан")
+                logger.debug(f"OrderManager: {sym} пропущен -> лимит риска {policy['max_portfolio_risk_pct']}% исчерпан")
                 continue
 
             effective_risk_pct = min(trade_risk_budget_pct, avail_risk_budget_pct)
             size_by_risk = (equity * (effective_risk_pct / 100.0)) / (sl_dist_pct / 100.0)
 
-            # Базовый сайзинг
             size_base = buy_size(equity, cand["score"], thr, cand["liquidity"], paper.usdt,
                                  kind=kind, entry_mode=entry_mode)
 
@@ -168,7 +168,7 @@ class OrderManagerWorker:
             order.update({
                 "kind": kind, "sector": sector, "tier": tier, "corr": cand.get("corr"),
                 "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode,
-                "nearest_res": res,
+                "nearest_res": entry_res,
                 "res_touches": res_touches,
                 "nearest_sup": sup,
                 "sup_touches": sup_touches,
@@ -179,7 +179,7 @@ class OrderManagerWorker:
             paper.save()
 
             reasons_html = "<br>".join([f"• {r}" for r in cand.get("reasons", [])])
-            paper.log_event(sym, "order_placed", entry, text=reasons_html, mode=entry_mode, tp=tp, sl=sl, sup=sup, res=res)
+            paper.log_event(sym, "order_placed", entry, text=reasons_html, mode=entry_mode, tp=tp, sl=sl, sup=sup, res=entry_res)
 
             tp_pct = (tp - entry) / entry * 100
             sl_pct = (sl - entry) / entry * 100
