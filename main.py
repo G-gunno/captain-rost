@@ -469,7 +469,6 @@ async def cmd_status(update, context):
             msg.append(f"🔒 В ордерах: <b>{usd(locked_usdt)}</b>")
         msg.append(f"🏦 Накопления USDT: <b>{usd(paper.funding)}</b>")
 
-        # Оценка HODL-монет отдельной строкой (без суммирования с фиатом)
         active_coins = {s: q for s, q in getattr(paper, "funding_coins", {}).items() if q > 0.000001}
         if active_coins:
             coins_val = sum(q * prices.get(s, {}).get("last", 0) for s, q in active_coins.items())
@@ -541,11 +540,7 @@ async def cmd_status(update, context):
         msg.append(f"💹 {exp_str} · 🔄 RF: <b>{rf_str}</b>")
         msg.append(f"⏱ PnL за 24 часа: {pnl_emoji(metrics_24h['total_pnl'])} <b>{usd(metrics_24h['total_pnl'])}</b>\n")
 
-        sat_exposure = sum(p["qty"] * prices.get(s, {}).get("last", 0) for s, p in paper.positions.items() if p.get("kind") == "satellite") + sum(o["qty"] * o["price"] for o in paper.orders if o.get("kind") == "satellite")
-        msg.append(f"🛰 Сателлиты: <b>{sat_exposure / eq * 100 if eq else 0:.1f}%</b> / {learner.satellite_limit():.0f}%")
-        msg.append(f"⏱ PnL за 24 часа: {pnl_emoji(metrics_24h['total_pnl'])} <b>{usd(metrics_24h['total_pnl'])}</b>\n")
-
-        # === ФИКС РАССИНХРОНА И ВЫВОД МАТРИЦЫ ПОРОГОВ ===
+        # === ВЫВОД МАТРИЦЫ ПОРОГОВ ===
         regime = bot_state.current_regime
         thrs = SCAN_SUMMARY.get("thrs") or get_thresholds(regime)
         
@@ -558,7 +553,6 @@ async def cmd_status(update, context):
         
         msg.append(f"₿ <b>${fmt_price(btc_price)}</b> · {regime_str} · {fng_emoji} F&G: {fng}")
         msg.append(f"🎯 Пороги: 🚀 <b>{thrs['rocket']:.2f}</b> | 🏹 <b>{thrs['sniper']:.2f}</b> | 🧲 <b>{thrs['reversal']:.2f}</b>")
-        # ================================
         
         if SCAN_SUMMARY.get("text"): msg.append(f"🔎 {SCAN_SUMMARY['text']}")
         wr, n = learner.winrate()
