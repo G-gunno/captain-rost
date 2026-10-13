@@ -30,7 +30,6 @@ STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
                 "RLUSD", "PYUSD", "EURI", "USDS", "USD0", "FRAX",
                 "LUSD", "GUSD", "XUSD", "USDX", "CUSD", "SUSD"}
 
-# ⚡ Согласованная матрица порогов под математику 2-слойного движка
 BASE_THRESHOLDS = {
     "bull": {"rocket": 6.0, "sniper": 5.5, "reversal": 5.5},
     "neutral": {"rocket": 6.5, "sniper": 6.0, "reversal": 5.4},
@@ -60,6 +59,7 @@ def _init_regime_tracker():
                 _regime_tracker["bull_start_ts"] = float(h.get("ts", 0))
         _regime_tracker["prev_regime"] = paper.market_history[-1].get("regime", "neutral")
 
+
 def get_thresholds(regime):
     now = time.time()
     bull_start = _regime_tracker.get("bull_start_ts", 0.0)
@@ -79,6 +79,7 @@ def get_thresholds(regime):
         "reversal": round(max(0.0, min(SCORE_MAX - 0.5, base["reversal"] + adj + t.get("nudge_reversal", 0.0))), 2),
     }
 
+
 def is_tradable(symbol):
     if not symbol.endswith("USDT"):
         return False
@@ -89,17 +90,44 @@ def is_tradable(symbol):
         return False
     return True
 
+
+def is_post_pump_dump(candles_15m: list) -> tuple:
+    """
+    ⚡ ФИЛЬТР ПОСТ-ПАМП (Защита от сценария AVA).
+    Если за последние 4 часа монета взлетела на >= 12% и сейчас стекает с хая — запрет покупок!
+    """
+    if not candles_15m or len(candles_15m) < 16:
+        return False, ""
+    recent_16 = candles_15m[-16:]
+    highest = max(c["high"] for c in recent_16)
+    lowest = min(c["low"] for c in recent_16)
+    if lowest <= 0:
+        return False, ""
+
+    pump_magnitude = (highest - lowest) / lowest * 100
+    if pump_magnitude >= 12.0:
+        last_close = recent_16[-1]["close"]
+        retrace = (highest - last_close) / (highest - lowest)
+        # Откатили на 35%+ от пампа и продолжаем сливаться
+        if retrace >= 0.35:
+            return True, f"пост-памп дамп (всплеск +{pump_magnitude:.1f}%, слив {retrace*100:.0f}%)"
+    return False, ""
+
+
 def raw_max_score(regime):
     m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
     m += learner.weight("indep")
     m += learner.weight("news_pos")
-    m += 3.0   # Максимальный вес ключевого триггера паттерна
+    m += learner.weight("hype")
+    m += 3.0   # Паттерн Price Action
     m += 1.5   # Уровень S/R
-    m += 0.5   # Макро / Сектор
+    m += 0.5   # Макро
     return m
+
 
 def _returns(closes):
     return [(b - a) / a for a, b in zip(closes, closes[1:]) if a]
+
 
 def _corr(a, b):
     n = min(len(a), len(b))
@@ -113,6 +141,7 @@ def _corr(a, b):
     if va <= 0 or vb <= 0:
         return 0.0
     return cov / (va * vb) ** 0.5
+
 
 async def get_regime():
     now = time.time()
@@ -183,6 +212,7 @@ async def get_regime():
     _regime_tracker["prev_regime"] = regime
     return regime, {"btc": last, "ema50": e50, "ema200": e200}
 
+
 async def fetch_new_listings():
     now = time.time()
     if _instruments_cache["data"] is not None and now - _instruments_cache["ts"] < 3600:
@@ -226,6 +256,7 @@ async def fetch_new_listings():
             out.append((sym, (now_ms - launch) / 3600000))
     return out
 
+
 def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     closes = [c["close"] for c in candles_15m]
     last = closes[-1]
@@ -250,7 +281,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     if e21 > e50: score += learner.weight("ema21"); reasons.append("EMA21>EMA50"); keys.append("ema21")
     if e12 > e26: score += learner.weight("impulse"); reasons.append("импульс роста"); keys.append("impulse")
 
-    # ⚡ 2. RSI БЕЗ СЛЕПЫХ ЗОН
+    # 2. RSI без слепых зон
     if r < 38:
         score += learner.weight("rsi"); reasons.append(f"перепроданность RSI {r:.0f}"); keys.append("rsi")
     elif 38 <= r <= w["rsi_hi"]:
@@ -292,7 +323,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 4.0
             reasons.append(f"FOMO-перегрев (+{dist_from_ema/a15:.1f} ATR от EMA21)")
 
-    # ⚡ 4. СЛОЙ 2: АВТОНОМНЫЕ ТРИГГЕРЫ PRICE ACTION
+    # 4. СЛОЙ 2: АВТОНОМНЫЕ ТРИГГЕРЫ PRICE ACTION
     detected_patterns = detect_patterns(candles_15m, a15, e50, e21, recent_high)
     matched_modes = []
     pattern_keys = []
@@ -305,7 +336,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         pattern_keys.append(pkey)
         matched_modes.append(pat["mode"])
 
-    # ⚡ 5. ДИНАМИКА 24H: балл за тренд ИЛИ за глубокий дисконт на дне!
+    # 5. ДИНАМИКА 24H: балл за тренд ИЛИ за глубокий дисконт на дне
     if 0 < t["change_pct"] < w["chg_hi"]:
         score += learner.weight("chg24h")
         reasons.append(f"24ч +{t['change_pct']:.1f}%")
@@ -321,6 +352,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
     if t["quote_volume"] < 500_000:
         score -= 1.0
 
+    # 6. МУЛЬТИТАЙМФРЕЙМ УРОВНИ S/R (LOCATION FIRST)
     nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_15m, candles_1h)
     
     if nearest_res and res_touches >= 2 and a15 > 0 and not is_open_pos:
@@ -361,6 +393,9 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 3.5
             reasons.append(f"1H даунтренд (цена < EMA21_1H ${fmt_price(e21_1h)})")
 
+    # ⚡ СТРУКТУРНЫЙ ЯКОРЬ: монета не должна висеть в пустоте
+    has_structure = (nearest_sup is not None and sup_touches >= 2) or ("vcp" in pattern_keys) or ("breakout" in pattern_keys)
+
     signal_values = {
         "rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio,
         "nearest_res": nearest_res, "res_touches": res_touches,
@@ -368,14 +403,17 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
         "recent_high": recent_high,
         "recent_low_2h": recent_low_2h,
         "matched_modes": matched_modes,
-        "patterns": pattern_keys
+        "patterns": pattern_keys,
+        "has_structure": has_structure
     }
     return score, reasons, keys, signal_values
+
 
 def normalize(raw, regime):
     rm = raw_max_score(regime)
     if rm <= 0: return 0.0
     return round(max(0.0, min(SCORE_MAX, raw / rm * SCORE_MAX)), 2)
+
 
 async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_open_pos=False):
     candles_15m = await market_data.get_kline(sym, "15", 120)
@@ -418,7 +456,7 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
         if pos_news > neg:
             raw += learner.weight("news_pos")
         elif mentions >= 2:
-            raw += 0.5
+            raw += learner.weight("hype")
 
     score10 = normalize(raw, regime)
 
@@ -439,6 +477,7 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
 
     score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)    
     return score10, candles_15m
+
 
 async def scan(regime, tickers, deriv_tickers, limit=20):
     tradable = [s for s, t in tickers.items() if is_tradable(s) and t["quote_volume"] >= 200_000 and t["last"] > 0]
@@ -518,12 +557,21 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
             if len(candles_15m) < 60 or len(candles_1h) < 60: return None
 
+            # ⚡ 1. ПРОВЕРКА ПОСТ-ПАМПА
+            is_post_pump, pp_reason = is_post_pump_dump(candles_15m)
+            if is_post_pump:
+                return None
+
             a = atr(candles_15m)
             last_price = tickers[sym]["last"]
             atr_pct = (a / last_price) * 100 if last_price else 0
             if a <= 0 or atr_pct < 0.25: return None
 
             score, reasons, keys, signal_values = score_symbol(candles_15m, candles_1h, tickers[sym], regime)
+
+            # ⚡ 2. LOCATION FIRST: монета обязана иметь опору под ценой
+            if not signal_values.get("has_structure"):
+                return None
 
             base = sym[:-4]
             sector = sectors_map.get(base, "Other")
@@ -578,7 +626,9 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 reasons.append(f"позитивный новостной фон ({pos_news})")
                 keys.append("news_pos")
             elif mentions >= 2:
-                score += 0.5
+                score += learner.weight("hype")
+                reasons.append(f"медиа-хайп ({mentions} упом.)")
+                keys.append("hype")
 
             score10 = (score / raw_max * SCORE_MAX) if raw_max > 0 else 0.0
 
