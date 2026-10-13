@@ -186,12 +186,11 @@ class PositionManagerWorker:
             ideal_price = t["last"] * (1 + off)
             old_price = order["price"]
 
-            # Определение поддержки
             nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles)
             live_sup = nearest_sup if (nearest_sup and sup_touches >= 2) else order.get("nearest_sup")
             live_sup_touches = sup_touches if (nearest_sup and sup_touches >= 2) else order.get("sup_touches", 2 if order.get("nearest_sup") else 0)
 
-            # ⚡ 3. БЕЗОПАСНАЯ ОХОТА: СНАЧАЛА ПРОВЕРКА ЦЕЛЕВОЙ ЦЕНЫ БЕЗ МУТАЦИИ ОРДЕРА
+            # 3. Безопасная охота без мутации ордера до проверки валидности
             target_price = old_price
             action_type = None
             price_icon = ""
@@ -211,33 +210,38 @@ class PositionManagerWorker:
                     action_type = "hunt_up"
                     price_icon = "⬆️"
 
-            # Ищем актуальные сопротивления СТРОГО ВЫШЕ target_price (новой точки входа)
+            # Ищем актуальные сопротивления и касания строго выше target_price
             all_res, all_sup = get_all_sr_levels(candles)
-            res_above_target = [r[0] for r in all_res if r[0] > target_price * 1.0015]
-            entry_res = min(res_above_target) if res_above_target else None
-            entry_res_touches = 2 if entry_res else 0
+            res_above_target = [(r[0], r[1]) for r in all_res if r[0] > target_price * 1.0015]
+            if res_above_target:
+                res_above_target.sort(key=lambda x: x[0])
+                entry_res, entry_res_touches = res_above_target[0]
+            else:
+                entry_res, entry_res_touches = None, 0
 
-            sup_below_target = [s[0] for s in all_sup if s[0] < target_price * 0.9985]
-            entry_sup = max(sup_below_target) if sup_below_target else live_sup
+            sup_below_target = [(s[0], s[1]) for s in all_sup if s[0] < target_price * 0.9985]
+            if sup_below_target:
+                sup_below_target.sort(key=lambda x: x[0], reverse=True)
+                entry_sup, entry_sup_touches = sup_below_target[0]
+            else:
+                entry_sup, entry_sup_touches = live_sup, live_sup_touches
 
             min_rr = policy["min_rr_sniper"] if entry_mode == "sniper" else policy["min_rr_alt"]
             
-            # Пересчитываем SL и TP строго под target_price
             sl, tp, is_valid, _ = calc_initial_sl_tp(
                 symbol=sym, entry=target_price, tier=tier, a=a,
-                sup=entry_sup, sup_touches=live_sup_touches,
+                sup=entry_sup, sup_touches=entry_sup_touches,
                 res=entry_res, res_touches=entry_res_touches,
                 is_mom=(entry_mode == "rocket"), entry_mode=entry_mode,
                 min_rr=min_rr
             )
 
-            # ⚡ ЕСЛИ СЕТАП ВАЛИДЕН: СИНХРОННО ОБНОВЛЯЕМ ЦЕНУ, СТОП И ТЕЙК
             if is_valid and action_type:
                 order["price"] = target_price
                 order["sl"] = sl
                 order["tp"] = tp
                 order["nearest_sup"] = entry_sup
-                order["sup_touches"] = live_sup_touches
+                order["sup_touches"] = entry_sup_touches
                 order["nearest_res"] = entry_res
                 order["res_touches"] = entry_res_touches
                 order["created"] = current_time
@@ -248,5 +252,4 @@ class PositionManagerWorker:
                 self._notify(f"📐 <b>Сдвиг {price_icon}</b> · {pair_html(sym, order)}\n📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · 🛡 SL {fmt_price(order['sl'])} · {msg_desc}")
 
             elif not is_valid and action_type:
-                # Если сдвиг ломает соотношение риск/прибыль, оставляем прежний ордер без изменений
                 pass
