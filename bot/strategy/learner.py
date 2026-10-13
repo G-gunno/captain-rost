@@ -9,8 +9,8 @@ from bot.core.remote_state import download_state, upload_state
 STATE_FILE = Path("storage/learner.json")
 REMOTE_PATH = "learner.json"
 
-# Чистые базовые метрики контекста рынка (строго 8 параметров)
-KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "indep", "news_pos"]
+# ⚡ Возвращен обучаемый параметр hype (строго 9 ключевых метрик среды)
+KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "indep", "news_pos", "hype"]
 
 PATTERN_NAMES = {
     "pinbar": "🔨 Пин-бар выкупа (Spring)",
@@ -35,6 +35,7 @@ class Learner:
         self.weights = {k: 1.0 for k in KEYS}
         self.results = []
         self.threshold_adj = 0.0
+        self.current_risk_mode = "NORMAL"
         self.sector_stats = {}
         self.tier_stats = {}
         self.exit_stats = {}
@@ -55,12 +56,8 @@ class Learner:
             data = download_state(REMOTE_PATH)
         if data:
             loaded_weights = data.get("weights", {})
-            # Очищаем старые ключи паттернов из эквалайзера, оставляя только базовые метрики
             for k in KEYS:
-                if k in loaded_weights:
-                    self.weights[k] = loaded_weights[k]
-                else:
-                    self.weights[k] = 1.0
+                self.weights[k] = loaded_weights.get(k, 1.0)
 
             self.results = data.get("results", [])
             self.threshold_adj = float(data.get("threshold_adj", 0))
@@ -70,7 +67,7 @@ class Learner:
             self.kind_stats = data.get("kind_stats", {})
             self.entry_stats = data.get("entry_stats", {})
             self.pattern_stats = data.get("pattern_stats", {})
-            logger.info("learner: опыт загружен (2-слойная архитектура активна)")
+            logger.info("learner: опыт загружен")
 
     def save(self):
         payload = {
@@ -123,7 +120,6 @@ class Learner:
             em_h.append(round(pnl_pct, 2))
             self.entry_stats[entry_mode] = em_h[-50:]
 
-        # ⚡ Автономная запись результативности паттернов
         if patterns:
             for p in patterns:
                 ph = self.pattern_stats.setdefault(p, [])
@@ -142,12 +138,10 @@ class Learner:
         if soft and not win:
             delta *= 0.5
 
-        # Корректируем ТОЛЬКО базовые метрики контекста
         for k in keys:
             if k in self.weights:
                 self.weights[k] = round(min(1.7, max(0.3, self.weights[k] + delta)), 3)
 
-        # Эквалайзер сохраняет баланс базовой корзины (строго сумма 8.0)
         target = float(len(self.weights))
         cur = sum(self.weights.values())
         if cur > 0:
@@ -158,11 +152,9 @@ class Learner:
             }
 
         self.save()
-        logger.info(f"learner: win={win} pnl={pnl_pct:+.2f}% delta={delta:+.3f} "
-                    f"keys={keys} patterns={patterns} sector={sector} tier={tier}")
+        logger.info(f"learner: win={win} pnl={pnl_pct:+.2f}% delta={delta:+.3f} keys={keys}")
 
     def pattern_multiplier(self, pattern_key: str) -> float:
-        """Динамический множитель силы паттерна: от 0.60x до 1.40x."""
         hist = self.pattern_stats.get(pattern_key) or []
         if len(hist) < 3:
             return 1.0
@@ -208,6 +200,7 @@ class Learner:
         self.weights = {k: 1.0 for k in KEYS}
         self.results = []
         self.threshold_adj = 0.0
+        self.current_risk_mode = "NORMAL"
         self.sector_stats = {}
         self.tier_stats = {}
         self.exit_stats = {}
@@ -227,7 +220,7 @@ class Learner:
         self.entry_stats = {}
         self.pattern_stats = {}
         self.save()
-        logger.info("learner: статистика сброшена (веса сохранены)")
+        logger.info("learner: статистика сброшена")
 
     def winrate(self):
         last = self.results[-20:]
@@ -237,14 +230,17 @@ class Learner:
         adj = 0.0
         enough = total_trades >= 3  
         if enough and profit_factor is not None:
-            if profit_factor < 0.5:
+            if profit_factor < 0.6:
                 adj += 1.5
             elif profit_factor < 1.0:
                 adj += 0.5
             elif profit_factor > 1.5 and max_dd_pct and max_dd_pct < 8:
                 adj -= 0.5
-        if max_dd_pct and max_dd_pct > 15:
+        if max_dd_pct and max_dd_pct > 12:
+            adj += 1.0
+        elif max_dd_pct and max_dd_pct > 8:
             adj += 0.5
+
         if adj >= 1.5:
             mode = "STRICT"
         elif adj >= 0.5:
@@ -276,7 +272,7 @@ class Learner:
         wr, n = self.winrate()
         top = sorted(self.weights.items(), key=lambda kv: kv[1], reverse=True)[:3]
         txt = ", ".join(f"{k} {v:.2f}" for k, v in top[:3])
-        return f"wr {wr:.0%} ({n}) · топ: {txt} · строгость {self.threshold_adj:+.1f}"
+        return f"wr {wr:.0%} ({n}) · топ: {txt} · режим: {self.current_risk_mode}"
 
     def kelly_multiplier(self, mode):
         hist = self.entry_stats.get(mode) or []
