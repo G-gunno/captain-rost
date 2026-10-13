@@ -20,7 +20,6 @@ from bot.utils.format import fmt_price
 SCAN_SUMMARY = {"text": "", "thrs": {}, "ts": 0}
 FILTERED_BY_NEWS = []
 
-SAT_ATR_PCT = 1.2
 SCORE_MAX = 10.0
 
 _instruments_cache = {"data": None, "ts": 0}
@@ -92,11 +91,6 @@ def is_tradable(symbol):
 
 
 def is_post_pump_dump(candles_15m: list) -> tuple:
-    """
-    ⚡ ИСПРАВЛЕННЫЙ ФИЛЬТР ПОСТ-ПАМП:
-    Проверяет, был ли реальный взлёт от минимума к пику (>= 12%),
-    после которого начался агрессивный слив (откат >= 40%).
-    """
     if not candles_15m or len(candles_15m) < 16:
         return False, ""
     recent = candles_15m[-16:]
@@ -114,10 +108,8 @@ def is_post_pump_dump(candles_15m: list) -> tuple:
             low_val = c["low"]
             low_idx = idx
 
-    # Минимум обязан предшествовать максимуму (памп вверх)
     if low_idx < high_idx and low_val > 0:
         pump_magnitude = (high_val - low_val) / low_val * 100
-        # Мощный взлет, пик уже позади (минимум 1-2 свечи назад)
         if pump_magnitude >= 12.0 and high_idx <= len(recent) - 2:
             last_close = recent[-1]["close"]
             dump_depth = (high_val - last_close) / (high_val - low_val)
@@ -406,7 +398,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
             score -= 3.5
             reasons.append(f"1H даунтренд (цена < EMA21_1H ${fmt_price(e21_1h)})")
 
-    # ⚡ СМЯГЧЁННАЯ СТРУКТУРА: опора горизонтальная, отскок от EMA50 или понятный паттерн
     has_structure = (
         (nearest_sup is not None and sup_touches >= 2) or
         len(pattern_keys) > 0 or
@@ -608,8 +599,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 reasons.append(f"независима от BTC (corr {corr:.2f})")
                 keys.append("indep")
 
-            kind = "satellite" if atr_pct >= SAT_ATR_PCT else "core"
-
             if fng >= 80:  
                 score -= 0.5
                 reasons.append(f"F&G перегрев ({fng}): -0.5")
@@ -679,7 +668,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 "reason_keys": keys, "atr": a, "last": last_price,
                 "liquidity": tickers[sym]["quote_volume"],
                 "corr": round(corr, 2), "atr_pct": round(atr_pct, 2),
-                "kind": kind, "sector": sector, "tier": tier,
+                "sector": sector, "tier": tier,
                 "signal_values": signal_values,
                 "patterns": signal_values.get("patterns", []),
                 "is_momentum": (entry_mode == "rocket"),
