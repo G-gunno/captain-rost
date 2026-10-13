@@ -7,7 +7,7 @@ from loguru import logger
 
 from bot.exchange.market_data import market_data
 from bot.exchange.paper_exchange import paper
-from bot.strategy.indicators import ema, rsi, atr, find_sr_levels
+from bot.strategy.indicators import ema, rsi, atr, find_sr_levels, get_all_sr_levels
 from bot.strategy.learner import learner
 from bot.strategy.shadow import shadow
 from bot.strategy.patterns import detect_patterns
@@ -394,10 +394,14 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False):
 
     has_structure = (nearest_sup is not None and sup_touches >= 2) or ("vcp" in pattern_keys) or ("breakout" in pattern_keys)
 
+    confirmed_res, confirmed_sup = get_all_sr_levels(candles_15m, candles_1h)
+    
     signal_values = {
         "rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio,
         "nearest_res": nearest_res, "res_touches": res_touches,
         "nearest_sup": nearest_sup, "sup_touches": sup_touches,
+        "all_res": [c[0] for c in confirmed_res],
+        "all_sup": [c[0] for c in confirmed_sup],
         "recent_high": recent_high,
         "recent_low_2h": recent_low_2h,
         "matched_modes": matched_modes,
