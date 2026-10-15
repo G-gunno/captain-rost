@@ -1,5 +1,7 @@
-from bot.strategy.indicators import atr, find_sr_levels, get_all_sr_levels
+from bot.strategy.indicators import atr, ema, rsi, get_all_sr_levels
 from bot.strategy.shadow import shadow
+from bot.strategy.learner import learner
+from bot.utils.format import sl_emoji
 
 TIER_SL_FLOOR = {
     "TOP20": 0.009,  # 0.9%
@@ -8,7 +10,6 @@ TIER_SL_FLOOR = {
     "MICRO": 0.020,  # 2.0%
 }
 
-# Реалистичный пол для первого тейка (TP1 50%) на 15m ТФ (остаток 50% идет по 1H уровням)
 TIER_TP_FLOOR = {
     "TOP20": 0.010,  # 1.0%
     "MID":   0.013,  # 1.3%
@@ -17,17 +18,18 @@ TIER_TP_FLOOR = {
 }
 
 TIER_MAX_SL = {
-    "TOP20": 2.0,   # Макс стоп 2.0%
-    "MID":   2.6,   # Макс стоп 2.6%
-    "SMALL": 3.2,   # Макс стоп 3.2%
-    "MICRO": 4.0,   # Макс стоп 4.0%
+    "TOP20": 2.2,
+    "MID":   2.8,
+    "SMALL": 3.4,
+    "MICRO": 4.2,
 }
 
+# Блок 1.1: Ранний прыжок be_trigger ликвидирован!
 TIER_TRAIL_CONFIG = {
-    "TOP20": {"be_trigger": 0.007, "runner_dist": 0.008, "pre_tp_trigger": 1.2, "pre_tp_dist": 0.005},
-    "MID":   {"be_trigger": 0.009, "runner_dist": 0.012, "pre_tp_trigger": 1.5, "pre_tp_dist": 0.008},
-    "SMALL": {"be_trigger": 0.011, "runner_dist": 0.015, "pre_tp_trigger": 1.8, "pre_tp_dist": 0.010},
-    "MICRO": {"be_trigger": 0.013, "runner_dist": 0.020, "pre_tp_trigger": 2.0, "pre_tp_dist": 0.014},
+    "TOP20": {"runner_dist": 0.009, "lock_trigger_pct": 1.8, "lock_dist": 0.006},
+    "MID":   {"runner_dist": 0.012, "lock_trigger_pct": 2.2, "lock_dist": 0.008},
+    "SMALL": {"runner_dist": 0.015, "lock_trigger_pct": 2.6, "lock_dist": 0.010},
+    "MICRO": {"runner_dist": 0.020, "lock_trigger_pct": 3.0, "lock_dist": 0.014},
 }
 
 TRADE_POLICIES = {
@@ -80,7 +82,10 @@ def calc_breakeven_price(avg_price: float, fee_pct: float = 0.10) -> float:
 
 
 def evaluate_setup_grade(cand: dict) -> str:
-    """Оценивает класс сетапа (Grade A+ vs B) по степени схождения факторов."""
+    """
+    Блок 6.2: Оценивает класс сетапа (Grade A+ [💎] vs B) с учетом текущей серии побед/поражений A+.
+    При серии неудач по A+ (streak <= -2) планка схождения факторов повышается с 3 до 4.
+    """
     confluence = 0
     patterns = cand.get("patterns", [])
     keys = cand.get("reason_keys", [])
@@ -91,7 +96,9 @@ def evaluate_setup_grade(cand: dict) -> str:
     elif len(patterns) == 1:
         confluence += 1
 
-    if cand.get("sup_touches", 0) >= 2 or "support_bounce" in keys:
+    if cand.get("sup_touches", 0) >= 3:
+        confluence += 2
+    elif cand.get("sup_touches", 0) >= 2 or "support_bounce" in keys:
         confluence += 1
 
     if "mtf_dip" in keys or sv.get("volume", 1.0) >= 1.35:
@@ -100,7 +107,8 @@ def evaluate_setup_grade(cand: dict) -> str:
     if cand.get("score", 0.0) >= 7.0:
         confluence += 1
 
-    return "A+" if confluence >= 3 else "B"
+    req_confluence = 4 if getattr(learner, "grade_a_streak", 0) <= -2 else 3
+    return "A+" if confluence >= req_confluence else "B"
 
 
 def calc_total_open_risk_pct(positions: dict, orders: list, equity: float) -> float:
@@ -126,46 +134,75 @@ def calc_total_open_risk_pct(positions: dict, orders: list, equity: float) -> fl
     return round((total_risk_usdt / equity) * 100.0, 3)
 
 
-def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float, 
+def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
                         sup: float, sup_touches: int, res: float, res_touches: int,
                         is_mom: bool = False, entry_mode: str = "sniper",
-                        min_rr: float = None):
+                        min_rr: float = None, recent_low_6: float = None,
+                        ema50: float = None, e21_1h: float = None, e50_1h: float = None):
+    """
+    Блок 3: Умная постановка первичного Стоп-лосса:
+    1. Wick Low Protection: первичный стоп ставится ниже минимального хвоста последних 5-6 свечей (recent_low_6 * 0.997).
+    2. Запрет ставить стоп НА линию EMA 50 в аптренде: уходит под EMA 50 с запасом (EMA 50 - 0.6 * ATR).
+    3. Для контртрендового reversal (когда 1H EMA21 < EMA50) учитывается потолок 1H EMA 21.
+    """
     tier = tier or "SMALL"
     sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.015)
     tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.016)
-    max_sl_allowed = TIER_MAX_SL.get(tier, 3.2)
+    max_sl_allowed = TIER_MAX_SL.get(tier, 3.4)
 
     sl_tuning = shadow.sl_mult()
     tp_tuning = shadow.tp_mult()
 
-    # 1. Расчет защитного стоп-лосса (SL)
-    # Привязываем стоп к поддержке ТОЛЬКО если она в рабочей ближней зоне (<= 1.8 ATR)
+    # 1. Базовый расчет SL от поддержки или ATR
     sl_dist = 0.0
     if sup and sup_touches >= 2 and sup < entry and (entry - sup) <= 1.8 * a:
         struct_sl = round(sup * 0.997, 8)
         candidate_dist = max(entry - struct_sl, entry * sl_floor_pct)
-        candidate_dist_pct = (candidate_dist / entry) * 100
-        if candidate_dist_pct <= max_sl_allowed:
+        if (candidate_dist / entry) * 100 <= max_sl_allowed:
             sl_dist = candidate_dist
             sl = round(entry - sl_dist, 8)
 
-    # Если поддержка далеко внизу — ставим компактный волатильностный стоп по ATR
     if sl_dist <= 0:
-        base_mult = 0.75 if is_mom else (1.55 if entry_mode == "reversal" else 1.15)
+        base_mult = 0.85 if is_mom else (1.55 if entry_mode == "reversal" else 1.20)
         sl_dist_raw = max(base_mult * a * sl_tuning, entry * sl_floor_pct)
         sl_dist = min(sl_dist_raw, entry * (max_sl_allowed / 100.0))
         sl = round(entry - sl_dist, 8)
 
+    # Блок 3.1: Защита от постановки стопа внутри тени (Wick Low Protection)
+    if recent_low_6 and recent_low_6 > 0 and recent_low_6 < entry:
+        wick_safe_sl = round(recent_low_6 * 0.997, 8)
+        if wick_safe_sl < sl:
+            wick_dist_pct = (entry - wick_safe_sl) / entry * 100
+            if wick_dist_pct <= max_sl_allowed:
+                sl = wick_safe_sl
+                sl_dist = entry - sl
+
+    # Блок 3.2: Запрет ставить стоп НА линию EMA 50 в аптренде (буфер EMA 50 - 0.6 * ATR)
+    if ema50 and ema50 > 0 and entry > ema50:
+        ema50_safe_sl = round(ema50 - 0.6 * a, 8)
+        if sl > ema50_safe_sl and abs(sl - ema50) <= 0.6 * a:
+            ema_dist_pct = (entry - ema50_safe_sl) / entry * 100
+            if ema_dist_pct <= max_sl_allowed:
+                sl = ema50_safe_sl
+                sl_dist = entry - sl
+
     if sl >= entry or (sl_dist / entry * 100) > max_sl_allowed:
         return None, None, False, "Недопустимая дистанция SL"
 
-    # 2. Расчет первого тейк-профита (TP1 — фиксация 50% и перевод в БУ)
+    # 2. Расчет первого тейк-профита (TP1)
     tp_dist_raw = max(1.65 * a * tp_tuning, sl_dist * 1.35, entry * tp_floor_pct)
     tp = round(entry + tp_dist_raw, 8)
     if min_rr is None:
         min_rr = 1.05 if entry_mode == "sniper" else 0.95
 
-    # Проверка капитальной стены сопротивления (>= 3 касания)
+    # Если контртрендовый отскок (reversal при 1H даунтренде) — ограничиваем TP разумной крышей 1H EMA 21
+    if entry_mode == "reversal" and e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry * 1.008:
+        cap_1h = round(e21_1h * 0.998, 8)
+        if cap_1h < tp and (cap_1h - entry) / sl_dist >= 0.85:
+            tp = cap_1h
+            min_rr = min(min_rr, 0.85)
+
+    # Проверка капитальной стены сопротивления (>= 3 разнесенных касания)
     if res and res > entry and res_touches >= 3:
         res_dist_pct = (res - entry) / entry * 100
         if res_dist_pct < 0.35:
@@ -186,24 +223,80 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     return sl, tp, True, "OK"
 
 
-def calc_runner_target(symbol: str, current_price: float, candles_15m: list, candles_1h: list = None) -> float:
+def calc_runner_target(symbol: str, current_price: float, candles_15m: list, candles_1h: list = None, pos: dict = None) -> tuple:
+    """
+    Блок 1.2 и 1.3: Расчет потолка «Дышащего Коридора» (Зеленая линия TP):
+    Возвращает (new_tp, can_expand_tp, phase_reason).
+    - На свече кульминации (RSI > 75 или отрыв > 3.5 ATR от EMA50) ЗАПРЕЩЕНО отодвигать тейк вверх (фиксация на пике PONS!).
+    - В контртренде 1H (reversal при 1H EMA21 < EMA50) потолок прижимается к 1H EMA 21 (кейс QNT).
+    - В фазе разгона аптренда (EMA21 > EMA50) потолок расширяется: EMA21 + (2.5..3.5)*ATR.
+    """
+    if not candles_15m or len(candles_15m) < 25:
+        return round(current_price * 1.03, 8), True, "static"
+
+    closes = [c["close"] for c in candles_15m]
+    e21 = ema(closes, 21)[-1]
+    e50 = ema(closes, 50)[-1]
+    r15 = rsi(closes)
+    a15 = atr(candles_15m)
+
+    # 1. Проверка кульминации / перегрева (Фаза 5 таблицы)
+    dist_from_e50_atr = ((current_price - e50) / a15) if a15 > 0 else 0.0
+    if r15 > 75 or dist_from_e50_atr > 3.5:
+        climax_tp = round(max(current_price, candles_15m[-1]["high"]) * 1.001, 8)
+        return climax_tp, False, "climax_freeze"
+
+    # 2. Проверка контртрендового потолка 1H EMA 21 (Фаза 3 таблицы — кейс QNT)
+    entry_mode = (pos or {}).get("entry_mode", "sniper")
+    if candles_1h and len(candles_1h) >= 50:
+        closes_1h = [c["close"] for c in candles_1h]
+        e21_1h = ema(closes_1h, 21)[-1]
+        e50_1h = ema(closes_1h, 50)[-1]
+        if entry_mode == "reversal" and e21_1h < e50_1h and current_price < e50_1h:
+            if e21_1h > current_price * 1.005:
+                return round(e21_1h * 0.998, 8), False, "1h_ema21_cap"
+
+    # 3. Проверка полки / проторговки (Фаза 4 таблицы — затухание ATR в боковике)
+    recent_box = (max(c["high"] for c in candles_15m[-6:]) - min(c["low"] for c in candles_15m[-6:])) / current_price if current_price > 0 else 0.0
+    if recent_box <= 0.015 and e21 <= e50 * 1.001:
+        old_tp = (pos or {}).get("tp", current_price * 1.02)
+        return round(max(old_tp, current_price * 1.012), 8), False, "shelf_freeze"
+
+    # 4. Фаза разгона тренда (Фаза 2 таблицы: EMA21 > EMA50 -> расширение вверх)
     all_res, _ = get_all_sr_levels(candles_15m, candles_1h)
-    
-    res_above = [r[0] for r in all_res if r[0] > current_price * 1.010]
+    res_above = [r[0] for r in all_res if r[0] > current_price * 1.012 and r[1] >= 3]
+
+    mult_atr = 3.2 if (e21 > e50 and r15 >= 58) else 2.5
+    corridor_ceiling = e21 + mult_atr * a15
+    target = max(corridor_ceiling, current_price + 2.2 * a15, current_price * 1.025)
+
     if res_above:
         res_above.sort()
-        return round(res_above[0] * 0.997, 8)
+        wall = res_above[0] * 0.997
+        if wall > current_price * 1.015:
+            target = min(target, wall)
 
-    a = atr(candles_15m)
-    return round(current_price + max(2.5 * a, current_price * 0.035), 8)
+    return round(target, 8), True, "trend_expand"
 
 
-def update_position_sl(pos: dict, max_p: float) -> tuple:
+def update_position_sl(pos: dict, max_p: float, last_price: float = None, candles_15m: list = None) -> tuple:
+    """
+    Блок 1: Механика «Дышащего Коридора» (Красная линия SL — асимметричный храповик).
+    - Полный отказ от раннего прыжка в БУ на +0.8%!
+    - Стоп никогда не опускается вниз: SL_new = max(SL_old, candidate_sl).
+    - Индивидуальная опора по стратегиям:
+      * sniper 🏹 -> под EMA 50 - 0.8 * ATR
+      * rocket 🚀 -> под EMA 21 - 0.6 * ATR
+      * reversal 🧲 -> до пробоя EMA 50 держит базовый стоп под опорой; после TP1 / закрепления над EMA 50 включает храповик.
+    - В фазе перегрева (RSI > 75 или отрыв > 3.5 ATR) пересаживается ближе к цене под EMA 21 - 0.4 * ATR.
+    """
     avg_p = pos.get("avg", 0.0)
     if avg_p <= 0:
         return False, pos.get("sl"), pos.get("sl_state", "SHIELD"), ""
 
+    last_p = last_price or max_p
     tier = pos.get("tier") or "SMALL"
+    entry_mode = pos.get("entry_mode", "sniper")
     cfg = TIER_TRAIL_CONFIG.get(tier, TIER_TRAIL_CONFIG["SMALL"])
 
     current_sl = round(float(pos.get("sl", 0.0)), 8)
@@ -214,30 +307,74 @@ def update_position_sl(pos: dict, max_p: float) -> tuple:
     breakeven = calc_breakeven_price(avg_p)
     profit_pct = (max_p - avg_p) / avg_p * 100
 
+    # Обновляем кэшированные метрики свечей внутри позиции, если переданы свечи
+    if candles_15m and len(candles_15m) >= 50:
+        closes = [c["close"] for c in candles_15m]
+        pos["_ema21"] = ema(closes, 21)[-1]
+        pos["_ema50"] = ema(closes, 50)[-1]
+        pos["_atr15"] = atr(candles_15m)
+        pos["_rsi15"] = rsi(closes)
+
+    e21 = pos.get("_ema21", 0.0)
+    e50 = pos.get("_ema50", 0.0)
+    a15 = pos.get("_atr15", 0.0)
+    r15 = pos.get("_rsi15", 50.0)
+
+    is_climax = (r15 > 75) or (a15 > 0 and e50 > 0 and (last_p - e50) > 3.5 * a15)
+
+    # 1. Расчет структурного храповика по EMA (если индикаторы известны)
+    ema_ratchet_sl = 0.0
+    if a15 > 0 and e21 > 0 and e50 > 0:
+        if is_climax and profit_pct >= 1.2:
+            # Фаза 4: Кульминация / Перегрев — зажимаем стоп под быструю EMA 21
+            ema_ratchet_sl = e21 - 0.45 * a15
+        elif entry_mode == "rocket":
+            # Ракета 🚀 — опора под быструю EMA 21
+            if last_p > e21:
+                ema_ratchet_sl = e21 - 0.65 * a15
+        elif entry_mode == "sniper":
+            # Снайпер 🏹 — опора под трендовую EMA 50
+            if last_p > e50:
+                ema_ratchet_sl = e50 - 0.80 * a15
+        elif entry_mode == "reversal":
+            # Ловец дна 🧲 — двухфазный режим: храповик включается только после закрепления над EMA 50 или взятия TP1
+            if pos.get("tp1_done") or (last_p > e50 and e21 >= e50 * 0.998):
+                ema_ratchet_sl = e50 - 0.80 * a15
+
+        # Никогда не ставим храповик выше текущей рыночной цены минус минимальный зазор
+        if ema_ratchet_sl >= last_p * 0.996:
+            ema_ratchet_sl = last_p * 0.995
+
+    # 2. Логика после взятия TP1 (Runner бежит по коридору)
     if pos.get("tp1_done"):
-        new_state = "TRAILING_RUNNER"
         runner_trail = round(max_p * (1 - cfg["runner_dist"]), 8)
-        min_runner_sl = round(avg_p * 1.005, 8)
-        new_sl = max(new_sl, runner_trail, min_runner_sl)
+        candidate = max(breakeven, runner_trail, ema_ratchet_sl)
+        if candidate > new_sl:
+            new_sl = candidate
+        new_state = "TRAILING_RUNNER" if new_sl > breakeven * 1.003 else "BREAKEVEN"
+
+    # 3. Логика до TP1 (БЕЗ раннего подброса в БУ на +0.8%!)
     else:
-        if profit_pct >= cfg["pre_tp_trigger"]:
-            new_state = "PROFIT_LOCK"
-            new_sl = max(new_sl, round(max_p * (1 - cfg["pre_tp_dist"]), 8))
-        elif max_p >= avg_p * (1 + cfg["be_trigger"]):
-            if new_sl < breakeven:
+        # Храповик под EMA может плавно поднимать стоп снизу по мере роста тренда
+        if ema_ratchet_sl > new_sl and profit_pct >= 0.8:
+            new_sl = ema_ratchet_sl
+            if new_sl >= breakeven * 1.003:
+                new_state = "PROFIT_LOCK"
+            elif new_sl >= breakeven:
                 new_state = "BREAKEVEN"
-                new_sl = breakeven
+
+        # Если цена уже дала сильный разгон (>= lock_trigger_pct, например +2.2%..+3.0%) или кульминацию — запираем профит
+        if profit_pct >= cfg["lock_trigger_pct"] or (is_climax and profit_pct >= 1.5):
+            lock_sl = round(max_p * (1 - cfg["lock_dist"]), 8)
+            candidate = max(breakeven, lock_sl, ema_ratchet_sl)
+            if candidate > new_sl:
+                new_sl = candidate
+                new_state = "PROFIT_LOCK" if new_sl > breakeven * 1.002 else "BREAKEVEN"
 
     new_sl = round(new_sl, 8)
 
     if (new_sl > current_sl + 1e-7) or (new_state != current_state and new_sl >= current_sl):
-        tag_map = {
-            "SHIELD": "🛡 Защита",
-            "BREAKEVEN": "🔒 БУ",
-            "PROFIT_LOCK": "💼 Профит-лок",
-            "TRAILING_RUNNER": f"📈 Трейлинг ({tier})"
-        }
-        tag_desc = tag_map.get(new_state, "Трейлинг")
+        tag_desc = sl_emoji(new_state)
         return True, new_sl, new_state, tag_desc
 
     return False, current_sl, current_state, ""
