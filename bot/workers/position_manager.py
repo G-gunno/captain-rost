@@ -9,15 +9,19 @@ from bot.strategy.scanner import live_score, get_thresholds, _returns
 from bot.strategy.indicators import atr, ema, find_sr_levels, get_all_sr_levels
 from bot.strategy.learner import learner
 from bot.strategy.shadow import shadow
-from bot.strategy.risk import calc_initial_sl_tp, calc_runner_target, get_trade_policy
+from bot.strategy.risk import calc_initial_sl_tp, calc_runner_target, update_position_sl, get_trade_policy
 from bot.news.cmc import get_coin_name
 from bot.news.rss_news import fetch_news_cache, check_sentiment
 from bot.strategy.sizing import entry_offset
-from bot.utils.format import pair_html, usd, fmt_price, fmt_pct, pnl_emoji
+from bot.utils.format import (
+    pair_html, format_coin_compact, sl_emoji, grade_badge,
+    usd, fmt_price, fmt_pct, pnl_emoji
+)
 from bot.core.state import bot_state
 
+
 class PositionManagerWorker:
-    """Управление позициями: безопасная охрана, инвалидация протухших ордеров и синхронный реквот."""
+    """Управление позициями: Дышащий Коридор по свечам 15m/1H, Зона Заморозки лимиток и защита ордеров на базе."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -25,7 +29,7 @@ class PositionManagerWorker:
         self.current_regime = "neutral"
 
     async def run(self):
-        logger.info("🛡 Position Manager запущен: охрана позиций и динамический реквот ордеров...")
+        logger.info("🛡 Position Manager запущен: Дышащий Коридор и Freeze Zone для ордеров...")
         asyncio.create_task(self._regime_updater())
 
         while True:
@@ -54,7 +58,8 @@ class PositionManagerWorker:
     async def _maintenance_cycle(self):
         tickers = await market_data.get_tickers()
         deriv_tickers = await market_data.get_derivatives_tickers()
-        if not tickers: return
+        if not tickers:
+            return
 
         btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
         btc_ret = _returns([c["close"] for c in btc_candles])
@@ -74,17 +79,22 @@ class PositionManagerWorker:
         policy = get_trade_policy(new_mode)
         current_time = int(time.time())
 
-        # 1. Проверка открытых позиций
+        # =====================================================================
+        # 1. ПРОВЕРКА ОТКРЫТЫХ ПОЗИЦИЙ И ОБНОВЛЕНИЕ «ДЫШАЩЕГО КОРИДОРА»
+        # =====================================================================
         for sym, pos in list(paper.positions.items()):
             t = tickers.get(sym)
-            if not t: continue
+            if not t:
+                continue
 
             score_pos, candles = await live_score(sym, t, regime, btc_ret, news_items, deriv_t=deriv_tickers.get(sym), is_open_pos=True)
-            if score_pos is None: continue
+            if score_pos is None or not candles:
+                continue
 
             closes = [c["close"] for c in candles]
             a = atr(candles)
-            if a <= 0: continue
+            if a <= 0:
+                continue
 
             last = t["last"]
             pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
@@ -101,11 +111,11 @@ class PositionManagerWorker:
                     reason = "✂📰 Новости"
                     ex = paper._sell(sym, last, reason, regime_now=regime)
                     paper.log_event(sym, "sell", last, f"Новости {neg}/{mentions}", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
-                    self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · {reason} {neg}/{mentions}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
+                    self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)}{grade_badge(ex)} · {reason} {neg}/{mentions}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                     continue
 
             entry_mode = pos.get("entry_mode", "sniper")
-            trend_broken = (last < e50 and e21 < (e50 * 0.998))
+            trend_broken = (last < e50 * 0.996 and e21 < (e50 * 0.997))
             pos_age = current_time - pos.get("entry_time", current_time)
 
             should_exit_early = False
@@ -115,31 +125,58 @@ class PositionManagerWorker:
 
             if should_exit_early:
                 reason = "🪫 Слом тренда" if pnl_pct > 0 else "✂️📉 Слом тренда"
-                bot_state.set_cooldown(sym, 420)
                 ex = paper._sell(sym, last, reason, regime_now=regime)
                 ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"
                 paper.log_event(sym, ev_type, last, reason, tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
-                if ex["pnl"] > 0: shadow.mark_success(sym)
-                self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · {reason}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
+                bot_state.record_trade_exit(sym, ex["pnl_pct"], last, is_sl=(ex["pnl_pct"] < -0.15))
+                if ex["pnl"] > 0:
+                    shadow.mark_success(sym)
+                self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)}{grade_badge(ex)} · {reason}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                 continue
 
-            if pos.get("tp1_done") and last >= (pos["tp"] - 0.4 * a):
+            # Обновляем свечной контекст и храповик SL по Дышащему Коридору
+            max_p = max(pos.get("max_price", last), last)
+            pos["max_price"] = max_p
+            sl_updated, new_sl, new_state, tag_emoji = update_position_sl(pos, max_p, last_price=last, candles_15m=candles)
+            if sl_updated:
+                old_sl_str = pos.get("_last_notified_sl_str") or fmt_price(pos.get("sl", 0.0))
+                new_sl_str = fmt_price(new_sl)
+                old_state = pos.get("_last_notified_sl_state") or pos.get("sl_state", "SHIELD")
+                pos["sl"] = new_sl
+                pos["sl_state"] = new_state
+                pos["max_sl"] = new_sl
+                paper.save()
+                paper.log_event(sym, "sl_moved", pos["sl"], tag_emoji, tp=pos.get("tp"), sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+
+                last_notify_ts = float(pos.get("_last_sl_notify_ts", 0.0))
+                if new_sl_str != old_sl_str and ((current_time - last_notify_ts >= 180) or new_state != old_state):
+                    pos["_last_notified_sl_str"] = new_sl_str
+                    pos["_last_notified_sl_state"] = new_state
+                    pos["_last_sl_notify_ts"] = current_time
+                    coin_compact = format_coin_compact(sym, pos)
+                    self._notify(f"🛡 SL поднят по {coin_compact} до {new_sl_str} ({tag_emoji})")
+
+            # Динамический потолок TP🏃🏻‍➡️ (расширение при разгоне, заморозка на полке/кульминации)
+            if pos.get("tp1_done") and last >= (pos["tp"] - 0.5 * a):
                 candles_1h = await market_data.get_kline(sym, "60", 250)
-                next_target = calc_runner_target(sym, last, candles, candles_1h)
-                if next_target > pos["tp"]:
+                next_target, can_expand, _ = calc_runner_target(sym, last, candles, candles_1h, pos=pos)
+                if can_expand and next_target > pos["tp"] * 1.006:
                     old_tp = pos["tp"]
                     pos["tp"] = next_target
-                    pos["sl"] = max(pos["sl"], old_tp * 0.997)
+                    pos["sl"] = max(pos["sl"], round(old_tp * 0.995, 8))
                     pos["sl_state"] = "TRAILING_RUNNER"
                     paper.save()
-                    paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP Runner поднят", mode="TP поднят 🎯", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
-                    self._notify(f"🎯 <b>TP Runner поднят</b> · {pair_html(sym, pos)}\n🎯 Новая цель: {fmt_price(pos['tp'])} · 🛡 Стоп: {fmt_price(pos['sl'])}")
+                    paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP🏃🏻‍➡️ поднят", mode="TP🏃🏻‍➡️", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                    self._notify(f"TP🏃🏻‍➡️ <b>Потолок коридора поднят</b> · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · 🛡📈 {fmt_price(pos['sl'])}")
 
-        # 2. Проверка неисполненных ордеров
+        # =====================================================================
+        # 2. ПРОВЕРКА НЕИСПОЛНЕННЫХ ОРДЕРОВ (ЗАЩИТА БАЗЫ И ЗОНА ЗАМОРОЗКИ)
+        # =====================================================================
         for order in list(paper.orders):
             sym = order["symbol"]
             t = tickers.get(sym)
-            if not t: continue
+            if not t:
+                continue
 
             base = sym[:-4]
             name = await get_coin_name(base)
@@ -149,7 +186,7 @@ class PositionManagerWorker:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Токсичные новости", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 7200)
-                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🤬📰 (⏸️ 2ч)")
+                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ (новости)")
                 continue
 
             entry_mode = order.get("entry_mode", "sniper")
@@ -161,40 +198,60 @@ class PositionManagerWorker:
                 saved_patterns=patterns,
                 saved_mode=entry_mode
             )
-            if score_now is None: continue
+            if score_now is None or not candles:
+                continue
 
             closes = [c["close"] for c in candles]
             e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
             a = atr(candles)
-            if a <= 0: continue
+            if a <= 0:
+                continue
 
             order_age = current_time - order["created"]
             tier = order.get("tier") or "SMALL"
             is_accum = "vcp" in patterns
             thr = thrs.get(entry_mode, 6.0)
+            init_score = order.get("initial_score", order.get("score", thr))
 
-            # ⚡ Отмена протухшей лимитки при деградации контекста или сломе тренда
-            trend_broken_order = (entry_mode != "reversal" and t["last"] < e50 * 0.995 and e21 < e50)
-            if score_now < (thr - 1.2) or trend_broken_order:
+            # Блок 2.6: Защита лимитных ордеров на базе (кейс AVA в 19:30 перед выстрелом)
+            # Если ордер стоит под проторговкой, а цена держится над EMA50 и структура тренда жива — не отменяем!
+            base_intact = (entry_mode != "reversal" and t["last"] >= e50 * 0.996 and e21 >= e50 * 0.996)
+            trend_broken_order = (entry_mode != "reversal" and t["last"] < e50 * 0.990 and e21 < e50 * 0.997)
+
+            if trend_broken_order:
                 paper.cancel_order(order["id"])
-                inv_reason = "слом тренда до входа" if trend_broken_order else f"сетап ослаб ({score_now:.1f})"
-                paper.log_event(sym, "cancel", t["last"], inv_reason, tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
+                paper.log_event(sym, "cancel", t["last"], f"Умер ({init_score:.1f}-{score_now:.1f})", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 300)
-                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 📉 {inv_reason}")
+                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ ({init_score:.1f}-{score_now:.1f})")
                 continue
 
-            if t["last"] > order["price"] + 2.0 * a: 
+            if not base_intact and score_now < (thr - 1.5):
+                paper.cancel_order(order["id"])
+                paper.log_event(sym, "cancel", t["last"], f"Ослаб ({score_now:.1f})", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
+                bot_state.set_cooldown(sym, 300)
+                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🪫📉 ({score_now:.1f})")
+                continue
+
+            if t["last"] > order["price"] + 2.2 * a:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Улетела без нас", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 300)
-                self._notify(f"⚠ Снят · {pair_html(sym, order)} · 🚀 Улетела без нас (отмена погони)")
+                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🚀👋🏻")
                 continue
 
             if order_age > 7200:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Тайм-аут 2ч", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 420)
-                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ⏳ (⏸️ 7м)")
+                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ ({init_score:.1f}-{score_now:.1f})")
+                continue
+
+            # =================================================================
+            # Блок 1.4: УКРОЩЕНИЕ «МИКРО-ОХОТЫ» ОРДЕРОВ (ЗОНА ЗАМОРОЗКИ / DEEP)
+            # Запрет сдвига чаще чем раз в 8 минут (480с) и при отклонении < 0.38%
+            # =================================================================
+            last_move_ts = order.get("last_move_ts", order["created"])
+            if (current_time - last_move_ts) < 480:
                 continue
 
             atr_pct = a / t["last"] * 100
@@ -207,25 +264,27 @@ class PositionManagerWorker:
             live_sup = nearest_sup if (nearest_sup and sup_touches >= 2) else order.get("nearest_sup")
             live_sup_touches = sup_touches if (nearest_sup and sup_touches >= 2) else order.get("sup_touches", 2 if order.get("nearest_sup") else 0)
 
-            # 3. Безопасная охота без мутации ордера до проверки валидности
             target_price = old_price
             action_type = None
             price_icon = ""
             dev_pct = abs(ideal_price - old_price) / old_price * 100
-            in_freeze_zone = abs(t["last"] - old_price) <= (0.15 * a) or (abs(t["last"] - old_price) / old_price * 100) <= 0.15
+            in_freeze_zone = abs(t["last"] - old_price) <= (0.45 * a) or (abs(t["last"] - old_price) / old_price * 100) <= 0.38
 
-            if ideal_price < old_price and dev_pct >= 0.35 and not in_freeze_zone:
+            if ideal_price < old_price and dev_pct >= 0.40 and not in_freeze_zone:
                 if not (live_sup and ideal_price < live_sup * 1.0015):
                     target_price = ideal_price
                     action_type = "correct"
                     price_icon = "⬇️"
 
-            elif ideal_price > old_price and dev_pct >= 0.30 and not in_freeze_zone:
+            elif ideal_price > old_price and dev_pct >= 0.38 and not in_freeze_zone:
                 can_shift_up = (is_accum and t["last"] <= (e50 * 1.012)) or (entry_mode == "sniper" and t["last"] <= (e21 * 1.008))
                 if can_shift_up:
                     target_price = ideal_price
                     action_type = "hunt_up"
                     price_icon = "⬆️"
+
+            if not action_type:
+                continue
 
             all_res, all_sup = get_all_sr_levels(candles, candles_1h)
             res_above_target = [(r[0], r[1]) for r in all_res if r[0] > target_price * 1.0015]
@@ -243,13 +302,16 @@ class PositionManagerWorker:
                 entry_sup, entry_sup_touches = live_sup, live_sup_touches
 
             min_rr = policy["min_rr_sniper"] if entry_mode == "sniper" else policy["min_rr_alt"]
-            
+            recent_low_6 = min(c["low"] for c in candles[-6:]) if len(candles) >= 6 else None
+
             sl, tp, is_valid, _ = calc_initial_sl_tp(
                 symbol=sym, entry=target_price, tier=tier, a=a,
                 sup=entry_sup, sup_touches=entry_sup_touches,
                 res=entry_res, res_touches=entry_res_touches,
                 is_mom=(entry_mode == "rocket"), entry_mode=entry_mode,
-                min_rr=min_rr
+                min_rr=min_rr,
+                recent_low_6=recent_low_6,
+                ema50=e50,
             )
 
             if is_valid and action_type:
@@ -260,9 +322,10 @@ class PositionManagerWorker:
                 order["sup_touches"] = entry_sup_touches
                 order["nearest_res"] = entry_res
                 order["res_touches"] = entry_res_touches
-                order["created"] = current_time
+                order["last_move_ts"] = current_time
+                order["requotes"] = order.get("requotes", 0) + 1
                 paper.save()
-                
-                msg_desc = "подтяжка к сжатию/базе" if action_type == "hunt_up" else f"сдвиг на {dev_pct:.2f}%"
+
+                msg_desc = "база" if action_type == "hunt_up" else f"{dev_pct:.2f}%"
                 paper.log_event(sym, "order_moved", order["price"], f"Сдвиг: {action_type}", tp=order["tp"], sl=order["sl"], sup=entry_sup, res=entry_res)
-                self._notify(f"📐 <b>Сдвиг {price_icon}</b> · {pair_html(sym, order)}\n📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · 🛡 SL {fmt_price(order['sl'])} · {msg_desc}")
+                self._notify(f"📐 <b>Сдвиг {price_icon}</b> · {pair_html(sym, order)}\n📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · 🛡📉 {fmt_price(order['sl'])} · {msg_desc}")
