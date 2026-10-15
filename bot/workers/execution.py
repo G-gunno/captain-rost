@@ -1,15 +1,20 @@
+import time
 import asyncio
 from loguru import logger
 from bot.core.event_bus import EventBus
 from bot.core.state import bot_state
 from bot.exchange.paper_exchange import paper
 from bot.exchange.market_data import market_data
-from bot.utils.format import pair_html, usd, fmt_price, fmt_pct, pnl_emoji
+from bot.utils.format import (
+    pair_html, format_coin_compact, sl_emoji, grade_badge,
+    usd, fmt_price, fmt_pct, pnl_emoji
+)
 from bot.strategy.shadow import shadow
-from bot.strategy.risk import update_position_sl, calc_runner_target, calc_breakeven_price
+from bot.strategy.risk import update_position_sl, calc_runner_target
+
 
 class ExecutionRiskWorker:
-    """Критический воркер исполнения ордеров, машины состояний SL и фиксации TP."""
+    """Критический воркер исполнения ордеров, «Дышащего Коридора» SL/TP и антиспам-нотификаций."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -18,7 +23,7 @@ class ExecutionRiskWorker:
         self._last_btc_price = 0.0
 
     async def run(self) -> None:
-        logger.info("⚡ Execution Worker запущен: машина состояний SL и исполнение позиций...")
+        logger.info("⚡ Execution Worker запущен: Дышащий Коридор SL/TP и исполнение позиций...")
         await asyncio.gather(
             self._price_loop(),
             self._emergency_loop()
@@ -43,7 +48,7 @@ class ExecutionRiskWorker:
                 results = paper.sell_all(tickers)
 
                 for ex in results:
-                    bot_state.set_cooldown(ex['symbol'], 900)
+                    bot_state.set_cooldown(ex["symbol"], 900)
                     self.bus.publish("NOTIFY", {"text": f"🚨 <b>Экстренный выход</b> · {ex['symbol']} · {ex['pnl_pct']:.2f}%", "urgent": True})
 
                 self.emergency_queue.task_done()
@@ -70,91 +75,122 @@ class ExecutionRiskWorker:
             paper.log_event(f["symbol"], "buy", f["price"], mode=ev_mode_str, tp=f.get("tp"), sl=f.get("sl"), sup=f.get("nearest_sup"), res=f.get("nearest_res"))
 
             self.bus.publish("NOTIFY", {
-                "text": f"🛒 <b>Покупка</b> · {pair_html(f['symbol'], f)}\n💵 {usd(f['qty'] * f['price'])} · 📥 {fmt_price(f['price'])}\n🎯 TP {fmt_pct(tp_pct)} · 🛡 SL {fmt_pct(sl_pct)}",
-                "urgent": False
+                "text": (
+                    f"🛒 <b>Покупка</b> · {pair_html(f['symbol'], f)}{grade_badge(f)}\n"
+                    f"💵 {usd(f['qty'] * f['price'])} · 📥 {fmt_price(f['price'])}\n"
+                    f"🎯 TP {fmt_pct(tp_pct)} · 🛡📉 {fmt_pct(sl_pct)}"
+                ),
+                "urgent": False,
             })
 
         state_changed = False
+        now_ts = time.time()
 
         for sym, pos in list(paper.positions.items()):
             t = tickers.get(sym)
-            if not t: continue
+            if not t:
+                continue
             last = t["last"]
 
-            # ⚡ СТОП-ЛОСС ИСПОЛНЯЕТСЯ СТРОГО ПО ВЫСТАВЛЕННОЙ ЦЕНЕ pos["sl"] БЕЗ ПРОСКАЛЬЗЫВАНИЯ!
+            # 1. Исполнение стоп-лосса с точным указанием типа стопа (🛡📉 / 🛡🔒 / 🛡💼 / 🛡📈)
             if last <= pos["sl"]:
                 sl_exec_price = pos["sl"]
-                ex = paper._sell(sym, sl_exec_price, "SL 🛡", regime_now=bot_state.current_regime)
+                sl_tag = sl_emoji(pos.get("sl_state", "SHIELD"))
+                ex = paper._sell(sym, sl_exec_price, f"SL {sl_tag}", regime_now=bot_state.current_regime)
                 ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"
-                paper.log_event(sym, ev_type, sl_exec_price, "SL 🛡", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
-                bot_state.set_cooldown(sym, 420)
+                paper.log_event(sym, ev_type, sl_exec_price, f"SL {sl_tag}", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+
+                is_real_sl_loss = ex["pnl_pct"] < -0.15
+                bot_state.record_trade_exit(sym, ex["pnl_pct"], sl_exec_price, is_sl=is_real_sl_loss)
+
                 self.bus.publish("NOTIFY", {
-                    "text": f"💸 <b>Продажа</b> · {pair_html(sym, ex)} · SL 🛡\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}",
-                    "urgent": False
+                    "text": (
+                        f"💸 <b>Продажа</b> · {pair_html(sym, ex)}{grade_badge(ex)} · {ex['exit_type']}\n"
+                        f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}"
+                    ),
+                    "urgent": False,
                 })
                 continue
 
-            # TP
+            # 2. Исполнение тейк-профита (🔥 TP1 и TP🏃🏻‍➡️ с защитой на кульминации)
             if last >= pos["tp"]:
+                candles_15m = await market_data.get_kline(sym, "15", 120)
+                candles_1h = await market_data.get_kline(sym, "60", 250)
+
                 if not pos.get("tp1_done"):
-                    half = pos["qty"] / 2
-                    ex = paper.sell_partial(sym, half, pos["tp"], "TP1 🎯")
+                    # Для reversal фиксируем 65% на TP1, для sniper/rocket — 50%
+                    tp1_ratio = 0.65 if pos.get("entry_mode") == "reversal" else 0.50
+                    part_qty = pos["qty"] * tp1_ratio
+                    ex = paper.sell_partial(sym, part_qty, pos["tp"], "🔥 TP1")
                     pos["tp1_done"] = True
-                    paper.log_event(sym, "tp1", pos["tp"], f"TP1 (+{ex['pnl_pct']:.1f}%)", mode="TP1 🎯", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                    paper.log_event(sym, "tp1", pos["tp"], f"🔥 TP1 (+{ex['pnl_pct']:.1f}%)", mode="🔥 TP1", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                     shadow.mark_success(sym)
 
-                    # Перевод в строгий безубыток по формуле биржевой комиссии
-                    candles_15m = await market_data.get_kline(sym, "15", 120)
-                    candles_1h = await market_data.get_kline(sym, "60", 250)
-                    pos["tp"] = calc_runner_target(sym, last, candles_15m, candles_1h)
+                    next_target, _, _ = calc_runner_target(sym, last, candles_15m, candles_1h, pos=pos)
+                    pos["tp"] = max(pos["tp"] * 1.012, next_target)
 
-                    pos["sl_state"] = "BREAKEVEN"
-                    pos["sl"] = max(pos["sl"], calc_breakeven_price(pos["avg"]))
+                    # Включаем храповик Дышащего Коридора после TP1
+                    _, new_sl, new_state, _ = update_position_sl(pos, max(pos.get("max_price", last), last), last_price=last, candles_15m=candles_15m)
+                    pos["sl"] = new_sl
+                    pos["sl_state"] = new_state
                     pos["_last_notified_sl_str"] = fmt_price(pos["sl"])
-                    pos["_last_notified_sl_state"] = "BREAKEVEN"
+                    pos["_last_notified_sl_state"] = new_state
+                    pos["_last_sl_notify_ts"] = now_ts
                     state_changed = True
 
+                    pct_label = int(round(tp1_ratio * 100))
                     self.bus.publish("NOTIFY", {
-                        "text": f"🎯 <b>TP1</b> · {pair_html(sym, ex)} · 50%\n🔥 {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}\nостаток бежит · 🎯 {fmt_price(pos['tp'])} · 🔒 БУ",
-                        "urgent": False
+                        "text": (
+                            f"🔥 <b>TP1</b> · {pair_html(sym, ex)}{grade_badge(pos)} · {pct_label}%\n"
+                            f"🟢 {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}\n"
+                            f"TP🏃🏻‍➡️ {fmt_price(pos['tp'])} · {sl_emoji(new_state)} {fmt_price(pos['sl'])}"
+                        ),
+                        "urgent": False,
                     })
                 else:
-                    candles_15m = await market_data.get_kline(sym, "15", 120)
-                    candles_1h = await market_data.get_kline(sym, "60", 250)
-                    next_target = calc_runner_target(sym, last, candles_15m, candles_1h)
-                    
-                    if next_target > pos["tp"] * 1.008:
+                    next_target, can_expand, phase_reason = calc_runner_target(sym, last, candles_15m, candles_1h, pos=pos)
+
+                    # Блок 1.3: На кульминации (RSI > 75) или у потолка 1H EMA21 запрещено отодвигать тейк вверх — фиксируем на пике!
+                    if can_expand and next_target > pos["tp"] * 1.008:
                         old_tp = pos["tp"]
                         pos["tp"] = next_target
-                        pos["sl"] = max(pos["sl"], round(old_tp * 0.997, 8))
+                        pos["sl"] = max(pos["sl"], round(old_tp * 0.995, 8))
                         pos["sl_state"] = "TRAILING_RUNNER"
                         pos["_last_notified_sl_str"] = fmt_price(pos["sl"])
                         pos["_last_notified_sl_state"] = "TRAILING_RUNNER"
+                        pos["_last_sl_notify_ts"] = now_ts
                         state_changed = True
-                        paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP Runner поднят к следующей стене", mode="TP поднят 🎯", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                        paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP🏃🏻‍➡️ поднят по коридору", mode="TP🏃🏻‍➡️", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                         self.bus.publish("NOTIFY", {
-                            "text": f"🎯 <b>TP Runner поднят к следующему уровню</b> · {pair_html(sym, pos)}\n🎯 Новая цель: {fmt_price(pos['tp'])} · 🛡 Стоп: {fmt_price(pos['sl'])}",
-                            "urgent": False
+                            "text": (
+                                f"TP🏃🏻‍➡️ <b>Потолок коридора расширен</b> · {pair_html(sym, pos)}\n"
+                                f"🎯 {fmt_price(pos['tp'])} · 🛡📈 {fmt_price(pos['sl'])}"
+                            ),
+                            "urgent": False,
                         })
                     else:
                         tp_exec_price = pos["tp"]
-                        ex = paper._sell(sym, tp_exec_price, "TP ✅", regime_now=bot_state.current_regime)
-                        paper.log_event(sym, "tp_runner", tp_exec_price, f"TP RUNNER (+{ex['pnl_pct']:.1f}%)", mode="TP RUNNER 🚀", tp=tp_exec_price, sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                        ex = paper._sell(sym, tp_exec_price, "TP🏃🏻‍➡️", regime_now=bot_state.current_regime)
+                        paper.log_event(sym, "tp_runner", tp_exec_price, f"TP🏃🏻‍➡️ (+{ex['pnl_pct']:.1f}%, {phase_reason})", mode="TP🏃🏻‍➡️", tp=tp_exec_price, sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                         shadow.mark_success(sym)
-                        bot_state.set_cooldown(sym, 180)
+                        bot_state.record_trade_exit(sym, ex["pnl_pct"], tp_exec_price, is_sl=False)
                         self.bus.publish("NOTIFY", {
-                            "text": f"🎯 <b>TP RUNNER</b> · {pair_html(sym, ex)} · ✅\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}",
-                            "urgent": False
+                            "text": (
+                                f"TP🏃🏻‍➡️ <b>Фиксация на пике</b> · {pair_html(sym, ex)}{grade_badge(ex)}\n"
+                                f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}"
+                            ),
+                            "urgent": False,
                         })
                 continue
 
-            # Трейлинг и обновление стопа
+            # 3. Асимметричный храповик SL по Дышащему Коридору + Антиспам 3 минуты (Блок 6.4)
             max_p = max(pos.get("max_price", last), last)
             pos["max_price"] = max_p
 
-            sl_updated, new_sl, new_state, tag_desc = update_position_sl(pos, max_p)
+            sl_updated, new_sl, new_state, tag_emoji = update_position_sl(pos, max_p, last_price=last)
             if sl_updated:
-                old_sl_str = pos.get("_last_notified_sl_str") or fmt_price(pos.get("sl", 0.0))
+                old_sl = float(pos.get("sl", 0.0))
+                old_sl_str = pos.get("_last_notified_sl_str") or fmt_price(old_sl)
                 new_sl_str = fmt_price(new_sl)
                 old_state = pos.get("_last_notified_sl_state") or pos.get("sl_state", "SHIELD")
 
@@ -163,14 +199,22 @@ class ExecutionRiskWorker:
                 pos["max_sl"] = new_sl
                 state_changed = True
 
-                # Анти-спам: отправляем уведомление только при реальном изменении цены или статуса
-                if new_sl_str != old_sl_str or new_state != old_state:
+                paper.log_event(sym, "sl_moved", pos["sl"], tag_emoji, tp=pos.get("tp"), sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+
+                # Антиспам-фильтр: пишем в Telegram не чаще чем раз в 3 минуты (180 сек) или при смене фазы стопа / скачке > 1.5 ATR
+                last_notify_ts = float(pos.get("_last_sl_notify_ts", 0.0))
+                a15 = float(pos.get("_atr15", 0.0))
+                big_jump = (a15 > 0 and (new_sl - old_sl) >= 1.5 * a15)
+                state_switched = (new_state != old_state)
+
+                if new_sl_str != old_sl_str and ((now_ts - last_notify_ts >= 180.0) or state_switched or big_jump):
                     pos["_last_notified_sl_str"] = new_sl_str
                     pos["_last_notified_sl_state"] = new_state
-                    paper.log_event(sym, "sl_moved", pos["sl"], tag_desc, tp=pos.get("tp"), sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                    pos["_last_sl_notify_ts"] = now_ts
+                    coin_compact = format_coin_compact(sym, pos)
                     self.bus.publish("NOTIFY", {
-                        "text": f"🛡 SL поднят по <b>{sym[:-4]}</b> до {new_sl_str} ({tag_desc})", 
-                        "urgent": False
+                        "text": f"🛡 SL поднят по {coin_compact} до {new_sl_str} ({tag_emoji})",
+                        "urgent": False,
                     })
 
         if state_changed:
