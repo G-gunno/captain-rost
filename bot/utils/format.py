@@ -65,7 +65,7 @@ def fmt_sym(s) -> str:
 
 
 def pnl_emoji(x) -> str:
-    return "🟢" if x > 0.25 else ("🔴" if x < -0.15 else "🛡🔒")
+    return "🟢" if x > 0.25 else ("🔴" if x < -0.15 else "🟡")
 
 
 def weight_emoji(v) -> str:
