@@ -2,17 +2,20 @@ import os
 import json
 import time
 from pathlib import Path
+from collections import defaultdict
 
 from loguru import logger
 
-from bot.strategy.learner import learner
+from bot.strategy.learner import learner, is_neutral_be
 from bot.core.remote_state import download_state, upload_state
 
 REMOTE_PATH = "paper_state.json"
+MAX_EVENTS_PER_SYMBOL = 150
+MAX_TOTAL_EVENTS = 5000
 
 
 class PaperExchange:
-    """Виртуальная биржа с резервированием состояния в GitHub."""
+    """Виртуальная биржа с резервированием состояния в GitHub и персональным буфером истории графиков."""
 
     FEE_PCT = 0.10
 
@@ -27,7 +30,7 @@ class PaperExchange:
         self.funding_coins = {}
         self.realized = []
         self.market_history = []
-        self.chart_events = [] 
+        self.chart_events = []
         self._last_upload = 0.0
         self._load()
 
@@ -49,10 +52,30 @@ class PaperExchange:
             self.funding_coins = data.get("funding_coins", {})
             self.realized = data.get("realized", [])
             self.market_history = data.get("market_history", [])
-            self.chart_events = data.get("chart_events", [])  
+            self.chart_events = data.get("chart_events", [])
             logger.info(f"Paper state загружен: USDT={self.usdt:.2f}, позиций={len(self.positions)}")
         else:
             self.chart_events = []
+
+    def _prune_chart_events(self) -> list:
+        """
+        Блок 5.2: Сохранение полной 48-часовой истории на графиках.
+        Хранит до 150 событий индивидуально для каждого тикера (общий буфер до 5000),
+        чтобы утренние сделки никогда не затирались к вечеру.
+        """
+        if not hasattr(self, "chart_events") or not self.chart_events:
+            return []
+        by_sym = defaultdict(list)
+        for ev in self.chart_events:
+            by_sym[ev.get("sym", "UNKNOWN")].append(ev)
+
+        pruned = []
+        for sym, ev_list in by_sym.items():
+            pruned.extend(ev_list[-MAX_EVENTS_PER_SYMBOL:])
+
+        pruned.sort(key=lambda x: x.get("ts", 0))
+        self.chart_events = pruned[-MAX_TOTAL_EVENTS:]
+        return self.chart_events
 
     def save(self):
         payload = {
@@ -64,7 +87,7 @@ class PaperExchange:
             "funding_coins": getattr(self, "funding_coins", {}),
             "realized": self.realized,
             "market_history": self.market_history,
-            "chart_events": self.chart_events[-600:] if hasattr(self, 'chart_events') else []
+            "chart_events": self._prune_chart_events(),
         }
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -74,14 +97,14 @@ class PaperExchange:
         if time.time() - self._last_upload > 3600:
             self._last_upload = time.time()
             upload_state(REMOTE_PATH, payload)
-            
+
     def log_event(self, symbol, ev_type, price, text="", rsi_val=None, mode=None, tp=None, sl=None, sup=None, res=None):
-        if not hasattr(self, 'chart_events'):
+        if not hasattr(self, "chart_events"):
             self.chart_events = []
         self.chart_events.append({
             "ts": int(time.time()),
             "sym": symbol,
-            "type": ev_type,  
+            "type": ev_type,
             "price": price,
             "text": text,
             "rsi": round(rsi_val, 1) if rsi_val else None,
@@ -103,6 +126,7 @@ class PaperExchange:
             return "Other"
 
     def place_limit_buy(self, symbol, qty, price, tp, sl, score=0, reason_keys=None):
+        now_ts = int(time.time())
         order = {
             "id": f"paper-{int(time.time() * 1000)}",
             "side": "Buy",
@@ -112,9 +136,11 @@ class PaperExchange:
             "tp": tp,
             "sl": sl,
             "score": score,
+            "initial_score": score,
             "reason_keys": reason_keys or [],
             "requotes": 0,
-            "created": int(time.time()),
+            "created": now_ts,
+            "last_move_ts": now_ts,
         }
         self.orders.append(order)
         self.save()
@@ -145,6 +171,7 @@ class PaperExchange:
                     pos["score"] = order.get("score", 0)
                     pos["reason_keys"] = order.get("reason_keys", [])
                     pos["patterns"] = order.get("patterns", [])
+                    pos["grade"] = order.get("grade", "B")
                     pos["sector"] = self._resolve_sector(order["symbol"], order.get("sector"))
                     pos["tier"] = order.get("tier")
                     pos["regime_entry"] = order.get("regime")
@@ -157,6 +184,7 @@ class PaperExchange:
                     pos["sup_touches"] = order.get("sup_touches", 0)
                     pos["res_touches"] = order.get("res_touches", 0)
                     pos["sl_state"] = order.get("sl_state", "SHIELD")
+                    pos["_last_sl_notify_ts"] = 0
                     self.trades.append({
                         "side": "Buy",
                         "symbol": order["symbol"],
@@ -178,9 +206,9 @@ class PaperExchange:
                 continue
             pos = self.positions[sym]
             if last >= pos["tp"]:
-                results.append(self._sell(sym, pos["tp"], "TP ✅", regime_now=regime_now))
+                results.append(self._sell(sym, pos["tp"], "TP🏃🏻‍➡️", regime_now=regime_now))
             elif last <= pos["sl"]:
-                results.append(self._sell(sym, pos["sl"], "SL 🛡", regime_now=regime_now))
+                results.append(self._sell(sym, pos["sl"], "SL", regime_now=regime_now))
         return results
 
     def sell_partial(self, sym, qty_part, price, reason):
@@ -214,9 +242,10 @@ class PaperExchange:
             "pnl_pct": round(pnl_pct, 2),
             "reason": reason,
             "time": int(time.time()),
-            "exit_type": "TP1",
+            "exit_type": "🔥 TP1",
             "sector": sector,
             "tier": tier,
+            "grade": pos.get("grade", "B"),
             "is_momentum": pos.get("is_momentum", False),
             "entry_mode": entry_mode,
             "regime": pos.get("regime_entry", "neutral"),
@@ -239,6 +268,7 @@ class PaperExchange:
             "transferred": transferred,
             "sector": sector,
             "tier": tier,
+            "grade": pos.get("grade", "B"),
             "is_momentum": pos.get("is_momentum", False),
             "entry_mode": entry_mode,
         }
@@ -258,10 +288,20 @@ class PaperExchange:
         total_cost = partial_cost + (cost + fee_buy)
         total_pnl_pct = total_pnl / total_cost * 100 if total_cost else pnl_final_pct
 
-        if reason.startswith("TP"):
-            exit_type = "TP1_RUN" if pos.get("tp1_done") else "TP"
-        elif reason.startswith("SL"):
-            exit_type = "TP1_SL" if pos.get("tp1_done") else "SL"
+        sl_state = pos.get("sl_state", "SHIELD")
+        is_be = is_neutral_be(total_pnl_pct)
+
+        if "TP" in reason:
+            exit_type = "TP🏃🏻‍➡️" if pos.get("tp1_done") else "🔥 TP1"
+        elif "SL" in reason or "🛡" in reason:
+            if is_be or sl_state == "BREAKEVEN":
+                exit_type = "🛡🔒"
+            elif sl_state == "PROFIT_LOCK":
+                exit_type = "🛡💼"
+            elif sl_state == "TRAILING_RUNNER":
+                exit_type = "🛡📈"
+            else:
+                exit_type = "🛡📉"
         else:
             exit_type = "EARLY"
 
@@ -271,8 +311,7 @@ class PaperExchange:
             and pos.get("regime_entry")
             and regime_now != pos["regime_entry"]
         )
-        if regime_changed and total_pnl < 0 and exit_type in ("SL", "EARLY"):
-            exit_type = "SL_REGIME"
+        if regime_changed and total_pnl < 0 and exit_type in ("🛡📉", "EARLY"):
             soft = True
 
         runner_bonus = 0.0
@@ -284,28 +323,31 @@ class PaperExchange:
         sector = self._resolve_sector(sym, pos.get("sector"))
         tier = pos.get("tier")
         entry_mode = pos.get("entry_mode", "rocket" if pos.get("is_momentum") else "sniper")
-        
+        grade = pos.get("grade", "B")
+
         try:
-            learner.record(pos.get("reason_keys", []), total_pnl > 0,
-                           total_pnl_pct, sector=sector, tier=tier,
-                           exit_type=exit_type, runner_bonus=runner_bonus,
-                           soft=soft, entry_mode=entry_mode,
-                           patterns=pos.get("patterns", []))
+            learner.record(
+                pos.get("reason_keys", []), total_pnl > 0,
+                total_pnl_pct, sector=sector, tier=tier,
+                exit_type=exit_type, runner_bonus=runner_bonus,
+                soft=soft, entry_mode=entry_mode,
+                patterns=pos.get("patterns", []),
+                grade=grade,
+            )
         except Exception as e:
             logger.error(f"learner record error: {e}")
 
         self.usdt += proceeds - fee_sell
         transferred = 0.0
 
-        # Безопасное отчисление 30% чистой прибыли в фонд (для TOP20 — в монетах, для остальных — в USDT)
-        if total_pnl > 0:
+        if total_pnl > 0 and not is_be:
             hodl_reserve_usdt = round(total_pnl * 0.30, 4)
             if tier == "TOP20" and price > 0:
                 qty_kept = min(pos["qty"] * 0.5, hodl_reserve_usdt / price)
                 if qty_kept > 0:
                     actual_reserved_usdt = round(qty_kept * price, 4)
                     self.usdt -= actual_reserved_usdt
-                    if not hasattr(self, 'funding_coins'):
+                    if not hasattr(self, "funding_coins"):
                         self.funding_coins = {}
                     self.funding_coins[sym] = self.funding_coins.get(sym, 0.0) + qty_kept
                     reason += " 🏦"
@@ -317,11 +359,12 @@ class PaperExchange:
         self.realized.append({
             "symbol": sym, "pnl": round(total_pnl, 4), "pnl_pct": round(total_pnl_pct, 2),
             "reason": reason, "time": int(time.time()), "exit_type": exit_type,
+            "sl_state": sl_state, "is_be": is_be, "grade": grade,
             "sector": sector, "tier": tier,
             "is_momentum": pos.get("is_momentum", False),
             "entry_mode": entry_mode,
             "patterns": pos.get("patterns", []),
-            "regime": pos.get("regime_entry", "neutral")
+            "regime": pos.get("regime_entry", "neutral"),
         })
         self.trades.append({
             "side": "Sell", "symbol": sym, "qty": pos["qty"],
@@ -331,10 +374,11 @@ class PaperExchange:
         return {
             "symbol": sym, "price": price, "pnl": total_pnl,
             "pnl_pct": total_pnl_pct, "reason": reason, "transferred": transferred,
-            "exit_type": exit_type, "runner_bonus": runner_bonus,
+            "exit_type": exit_type, "sl_state": sl_state, "is_be": is_be, "grade": grade,
+            "runner_bonus": runner_bonus,
             "sector": sector, "tier": tier,
             "is_momentum": pos.get("is_momentum", False),
-            "entry_mode": entry_mode
+            "entry_mode": entry_mode,
         }
 
     def sell_all(self, prices):
@@ -354,10 +398,10 @@ class PaperExchange:
         self.positions.clear()
         self.orders.clear()
         self.chart_events.clear()
-        if hasattr(self, 'funding_coins'):
+        if hasattr(self, "funding_coins"):
             self.funding_coins.clear()
-        self.usdt = self.start_usdt 
-        self.funding = 0.0           
+        self.usdt = self.start_usdt
+        self.funding = 0.0
         self.save()
         logger.info("paper: торговая статистика, позиции, балансы и накопления сброшены")
 
@@ -368,6 +412,10 @@ class PaperExchange:
         return eq
 
     def get_metrics(self, prices=None, hours=None):
+        """
+        Блок 6.1: Сделки из нейтральной категории БУ (-0.15%..+0.25%) выделяются в be_count
+        и не искажают расчет WinRate (win_count / loss_count).
+        """
         if prices is None:
             prices = {}
 
@@ -381,8 +429,11 @@ class PaperExchange:
         else:
             partial_count = len(self.realized) - len(finals)
 
-        wins = [r for r in finals if r["pnl"] > 0]
-        losses = [r for r in finals if r["pnl"] <= 0]
+        be_trades = [r for r in finals if r.get("is_be") or is_neutral_be(r.get("pnl_pct", 0.0))]
+        decisive = [r for r in finals if r not in be_trades]
+        wins = [r for r in decisive if r["pnl"] > 0]
+        losses = [r for r in decisive if r["pnl"] <= 0]
+
         sum_win = sum(r["pnl"] for r in wins)
         sum_loss = abs(sum(r["pnl"] for r in losses))
         if sum_loss == 0:
@@ -404,11 +455,12 @@ class PaperExchange:
 
         total_pnl = sum(r["pnl"] for r in finals)
         total_trades = len(finals)
+        decisive_count = len(decisive)
 
-        if total_trades > 0:
+        if decisive_count > 0:
             avg_win = sum_win / len(wins) if wins else 0
             avg_loss = sum_loss / len(losses) if losses else 0
-            winrate = len(wins) / total_trades
+            winrate = len(wins) / decisive_count
             lossrate = 1 - winrate
             expectancy = (winrate * avg_win) - (lossrate * avg_loss)
 
@@ -420,18 +472,20 @@ class PaperExchange:
             expectancy = None
             recovery_factor = None
 
-        wr, n = learner.winrate()
+        wr, _ = learner.winrate()
         return {
             "profit_factor": profit_factor,
             "max_drawdown_pct": max_dd,
             "winrate": wr,
             "win_count": len(wins),
             "loss_count": len(losses),
+            "be_count": len(be_trades),
             "total_trades": total_trades,
             "partial_count": partial_count,
             "total_pnl": total_pnl,
             "expectancy": expectancy,
             "recovery_factor": recovery_factor,
         }
+
 
 paper = PaperExchange()
