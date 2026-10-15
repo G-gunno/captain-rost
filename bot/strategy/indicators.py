@@ -56,56 +56,80 @@ def _dedup_levels(levels):
     return deduped
 
 
+def _count_spaced_touches(price_target: float, points: list, tol: float = 0.005) -> int:
+    """
+    Блок 2.1: Реформа «Капитальных стен».
+    Считает только те касания уровня, которые разнесены во времени минимум на 3-4 свечи
+    (внутри одного таймфрейма), без искусственного удвоения одиночного часового свинга.
+    points: список кортежей (price, tf_tag, candle_idx, min_gap)
+    """
+    if price_target <= 0:
+        return 0
+    matched = [pt for pt in points if abs(pt[0] - price_target) / price_target <= tol]
+    if not matched:
+        return 0
+
+    touches = 0
+    last_idx_by_tf = {}
+    for p_val, tf_tag, idx, min_gap in sorted(matched, key=lambda x: (x[1], x[2])):
+        prev_idx = last_idx_by_tf.get(tf_tag)
+        if prev_idx is None or (idx - prev_idx) >= min_gap:
+            touches += 1
+            last_idx_by_tf[tf_tag] = idx
+    return touches
+
+
 def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72):
     """
-    Возвращает все подтвержденные уровни S/R с дедупликацией шума.
+    Возвращает подтвержденные уровни S/R с требованием временного разнесения касаний (минимум 3-4 свечи).
+    Одиночный свинг на 1H больше не удваивается искусственно в 2 касания.
     """
     if not candles_15m or len(candles_15m) < 15:
         return [], []
 
-    swing_highs = []
-    swing_lows = []
+    high_points = []
+    low_points = []
 
-    # 1. Анализ 1H свечей (старший порядок, вес 2x)
+    # 1. Анализ 1H свечей (1 касание за реальный фрактал, минимальный шаг между касаниями = 3 свечи)
     if candles_1h and isinstance(candles_1h, list) and len(candles_1h) >= 20:
         recent_1h = candles_1h[-window_1h:] if len(candles_1h) >= window_1h else candles_1h
         n1 = len(recent_1h)
         for i in range(2, n1 - 2):
             h = recent_1h[i]["high"]
             l = recent_1h[i]["low"]
-            if all(h >= recent_1h[i+j]["high"] for j in (-2, -1, 1, 2)):
-                swing_highs.extend([h, h])
-            if all(l <= recent_1h[i+j]["low"] for j in (-2, -1, 1, 2)):
-                swing_lows.extend([l, l])
+            if all(h >= recent_1h[i + j]["high"] for j in (-2, -1, 1, 2)):
+                high_points.append((h, "1h", i, 3))
+            if all(l <= recent_1h[i + j]["low"] for j in (-2, -1, 1, 2)):
+                low_points.append((l, "1h", i, 3))
 
-    # 2. Анализ 15m свечей (асимметричный фрактал: 3 слева, 1 справа)
+    # 2. Анализ 15m свечей (минимальный шаг между независимыми касаниями = 4 свечи = 1 час)
     recent_15m = candles_15m[-window_15m:] if len(candles_15m) >= window_15m else candles_15m
     n15 = len(recent_15m)
     for i in range(3, n15 - 1):
         h = recent_15m[i]["high"]
         l = recent_15m[i]["low"]
-        if all(h >= recent_15m[i-j]["high"] for j in (1, 2, 3)) and h >= recent_15m[i+1]["high"]:
-            swing_highs.append(h)
-        if all(l <= recent_15m[i-j]["low"] for j in (1, 2, 3)) and l <= recent_15m[i+1]["low"]:
-            swing_lows.append(l)
+        if all(h >= recent_15m[i - j]["high"] for j in (1, 2, 3)) and h >= recent_15m[i + 1]["high"]:
+            high_points.append((h, "15m", i, 4))
+        if all(l <= recent_15m[i - j]["low"] for j in (1, 2, 3)) and l <= recent_15m[i + 1]["low"]:
+            low_points.append((l, "15m", i, 4))
 
+    unique_highs = {pt[0] for pt in high_points if pt[0] > 0}
     clusters_res = []
-    for h in set(swing_highs):
-        if h <= 0: continue
-        touches = sum(1 for x in swing_highs if abs(x - h) / h <= 0.005)
-        clusters_res.append((h, touches))
-    confirmed_res = [c for c in clusters_res if c[1] >= 2]
-    confirmed_res.sort(key=lambda x: x[0])
+    for h in unique_highs:
+        touches = _count_spaced_touches(h, high_points, tol=0.005)
+        if touches >= 2:
+            clusters_res.append((h, touches))
+    clusters_res.sort(key=lambda x: x[0])
 
+    unique_lows = {pt[0] for pt in low_points if pt[0] > 0}
     clusters_sup = []
-    for l in set(swing_lows):
-        if l <= 0: continue
-        touches = sum(1 for x in swing_lows if abs(x - l) / l <= 0.005)
-        clusters_sup.append((l, touches))
-    confirmed_sup = [c for c in clusters_sup if c[1] >= 2]
-    confirmed_sup.sort(key=lambda x: x[0], reverse=True)
+    for l in unique_lows:
+        touches = _count_spaced_touches(l, low_points, tol=0.005)
+        if touches >= 2:
+            clusters_sup.append((l, touches))
+    clusters_sup.sort(key=lambda x: x[0], reverse=True)
 
-    return _dedup_levels(confirmed_res), _dedup_levels(confirmed_sup)
+    return _dedup_levels(clusters_res), _dedup_levels(clusters_sup)
 
 
 def find_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72, window=None):
