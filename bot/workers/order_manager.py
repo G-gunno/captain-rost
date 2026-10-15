@@ -1,28 +1,30 @@
-import time
 import asyncio
 from loguru import logger
 
 from bot.core.event_bus import EventBus
 from bot.exchange.paper_exchange import paper
-from bot.strategy.sizing import buy_size, portfolio_limits, tier_limits, entry_offset
+from bot.strategy.sizing import buy_size, portfolio_limits, entry_offset, min_order_threshold
 from bot.strategy.scanner import get_thresholds
 from bot.strategy.learner import learner
-from bot.strategy.risk import (calc_initial_sl_tp, get_trade_policy, 
-                                evaluate_setup_grade, calc_total_open_risk_pct)
+from bot.strategy.risk import (
+    calc_initial_sl_tp, get_trade_policy,
+    evaluate_setup_grade, calc_total_open_risk_pct
+)
 from bot.news.cmc import get_coin_name
 from bot.news.rss_news import fetch_news_cache, check_sentiment
 from bot.utils.format import pair_html, corr_txt, usd, fmt_price, fmt_pct
 from bot.core.state import bot_state
 
+
 class OrderManagerWorker:
-    """Управляет портфелем: контроль совокупного риска, Grade A+ и фильтрация структуры."""
+    """Управляет портфелем: контроль совокупного риска, Grade A+ [💎], лимитки в тень и защита стопов."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
         self.signal_queue = self.bus.subscribe("SIGNALS_READY", maxsize=2)
 
     async def run(self):
-        logger.info("💼 Order Manager запущен: контроль Portfolio VaR и политик риска...")
+        logger.info("💼 Order Manager запущен: контроль Portfolio VaR, 1H Gatekeeper и политик риска...")
         while True:
             try:
                 event = await self.signal_queue.get()
@@ -48,8 +50,12 @@ class OrderManagerWorker:
 
         risk_mode = getattr(learner, "current_risk_mode", "NORMAL")
         policy = get_trade_policy(risk_mode)
+        min_usdt_order = min_order_threshold(equity)
 
-        logger.info(f"💼 OrderManager [{risk_mode}]: кандидатов {len(candidates)}, открытый риск {calc_total_open_risk_pct(paper.positions, paper.orders, equity):.2f}% / {policy['max_portfolio_risk_pct']}%")
+        logger.info(
+            f"💼 OrderManager [{risk_mode}]: кандидатов {len(candidates)}, "
+            f"открытый риск {calc_total_open_risk_pct(paper.positions, paper.orders, equity):.2f}% / {policy['max_portfolio_risk_pct']}%"
+        )
 
         for cand in candidates:
             sym = cand["symbol"]
@@ -65,6 +71,11 @@ class OrderManagerWorker:
 
             patterns = cand.get("patterns", [])
             is_accum = "vcp" in patterns
+            e21_15m = cand.get("e21", 0.0)
+            e50_15m = cand.get("e50", 0.0)
+
+            # Блок 4.1: Проверка структурного сброса карантина (кейс WAL)
+            bot_state.check_structural_reset(sym, cand["last"], e21_15m, e50_15m)
             if bot_state.is_on_cooldown(sym) and not is_accum:
                 continue
 
@@ -76,6 +87,13 @@ class OrderManagerWorker:
             entry_mode = cand.get("entry_mode", "sniper")
             is_mom = cand.get("is_momentum", False)
 
+            # Блок 4.2: Блокировка повторной ловли ножа ниже предыдущего стопа
+            if entry_mode == "reversal":
+                can_rev, rev_reason = bot_state.can_enter_reversal(sym, cand["last"], e21_15m)
+                if not can_rev:
+                    logger.info(f"OrderManager: {sym} reversal заблокирован -> {rev_reason}")
+                    continue
+
             # 2. Общие лимиты диверсификации секторов
             lim = other_lim if sector == "Other" else sec_lim
             sector_count = sum(1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector)
@@ -84,11 +102,11 @@ class OrderManagerWorker:
                 logger.debug(f"OrderManager: {sym} пропущен (лимит сектора {sector}: {lim})")
                 continue
 
-            # 3. Барьер качества Grade A+ для режима STRICT / CAUTIOUS
+            # 3. Барьер качества Grade A+ [💎] для режима STRICT / CAUTIOUS
             grade = evaluate_setup_grade(cand)
             if policy["require_grade_a_for_alt"] and entry_mode in ("reversal", "rocket"):
                 if grade != "A+":
-                    logger.info(f"OrderManager: {sym} пропущен -> режим {risk_mode} требует грейд A+ для {entry_mode} (текущий: {grade})")
+                    logger.info(f"OrderManager: {sym} пропущен -> режим {risk_mode} требует [💎] A+ для {entry_mode} (текущий: {grade})")
                     continue
 
             thr = thrs.get(entry_mode, 6.0)
@@ -97,7 +115,13 @@ class OrderManagerWorker:
             t_data = tickers.get(sym, {})
             bid1 = t_data.get("bid1", cand["last"])
             ideal_entry = cand["last"] * (1 + off)
-            entry = ideal_entry if is_mom else min(ideal_entry, bid1)
+            entry = min(ideal_entry, bid1)
+
+            # Блок 2.2: Вход на ретесте и базе с учетом глубины тени (Second Test / Base Entry)
+            wick_entry = cand.get("wick_entry_price")
+            if entry_mode == "reversal" and wick_entry and 0 < wick_entry < entry:
+                entry = max(wick_entry, cand["last"] * 0.985)
+                off = (entry - cand["last"]) / cand["last"]
 
             sup = cand.get("nearest_sup")
             sup_touches = cand.get("sup_touches", 0)
@@ -108,9 +132,10 @@ class OrderManagerWorker:
                     entry = min(entry, bid1)
 
             a = cand["atr"]
-            if a <= 0: continue
+            if a <= 0:
+                continue
 
-            # Поиск актуального сопротивления и его касаний относительно цены входа
+            # Поиск актуального сопротивления относительно цены входа
             all_res = cand.get("signal_values", {}).get("all_res", [])
             res_above_entry = []
             for r_item in all_res:
@@ -132,7 +157,11 @@ class OrderManagerWorker:
                 sup=sup, sup_touches=sup_touches,
                 res=entry_res, res_touches=res_touches,
                 is_mom=is_mom, entry_mode=entry_mode,
-                min_rr=min_rr
+                min_rr=min_rr,
+                recent_low_6=cand.get("recent_low_6"),
+                ema50=e50_15m,
+                e21_1h=cand.get("e21_1h"),
+                e50_1h=cand.get("e50_1h"),
             )
 
             if not is_valid:
@@ -141,32 +170,36 @@ class OrderManagerWorker:
 
             # 4. Бюджетирование совокупного риска (Portfolio VaR)
             sl_dist_pct = (entry - sl) / entry * 100
-            if sl_dist_pct <= 0: continue
+            if sl_dist_pct <= 0:
+                continue
 
             trade_risk_budget_pct = policy["risk_per_trade_core"] if entry_mode == "sniper" else policy["risk_per_trade_alt"]
             current_risk_pct = calc_total_open_risk_pct(paper.positions, paper.orders, equity)
             avail_risk_budget_pct = policy["max_portfolio_risk_pct"] - current_risk_pct
 
-            if avail_risk_budget_pct <= 0.10:
+            if avail_risk_budget_pct <= 0.15:
                 logger.debug(f"OrderManager: {sym} пропущен -> лимит риска {policy['max_portfolio_risk_pct']}% исчерпан")
                 continue
 
             effective_risk_pct = min(trade_risk_budget_pct, avail_risk_budget_pct)
             size_by_risk = (equity * (effective_risk_pct / 100.0)) / (sl_dist_pct / 100.0)
 
-            size_base = buy_size(equity, cand["score"], thr, cand["liquidity"], paper.usdt,
-                                 entry_mode=entry_mode)
+            size_base = buy_size(
+                equity, cand["score"], thr, cand["liquidity"], paper.usdt,
+                entry_mode=entry_mode, grade=grade
+            )
 
-            size = min(size_base, size_by_risk, paper.usdt * 0.95, equity * 0.10)
+            size = min(size_base, size_by_risk, paper.usdt * 0.95, equity * 0.12)
             size = round(size, 2)
 
-            if size < 10:
-                logger.debug(f"OrderManager: {sym} пропущен (размер {size} < 10 USDT)")
+            # Блок 6.3: Отсекаем микро-покупки ниже оптимизированного порога
+            if size < min_usdt_order:
+                logger.debug(f"OrderManager: {sym} пропущен (размер {size:.2f} < мин. порога {min_usdt_order:.2f} USDT)")
                 continue
 
             qty = size / entry
             order = paper.place_limit_buy(sym, qty, entry, tp=tp, sl=sl, score=cand["score"], reason_keys=cand.get("reason_keys", []))
-            
+
             order.update({
                 "sector": sector, "tier": tier, "corr": cand.get("corr"),
                 "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode,
@@ -176,7 +209,9 @@ class OrderManagerWorker:
                 "sup_touches": sup_touches,
                 "sl_state": "SHIELD",
                 "patterns": patterns,
-                "grade": grade
+                "grade": grade,
+                "initial_score": cand["score"],
+                "last_move_ts": int(order["created"]),
             })
             paper.save()
 
@@ -185,13 +220,13 @@ class OrderManagerWorker:
 
             tp_pct = (tp - entry) / entry * 100
             sl_pct = (sl - entry) / entry * 100
-            grade_badge = f" [Grade {grade}]" if grade == "A+" else ""
+            g_badge = " [💎]" if grade == "A+" else ""
 
-            logger.info(f"OrderManager: 🎯 {sym} ОРДЕР {entry_mode}{grade_badge}: entry=${fmt_price(entry)}, TP=${fmt_price(tp)}, SL=${fmt_price(sl)}")
+            logger.info(f"OrderManager: 🎯 {sym} ОРДЕР {entry_mode}{g_badge}: entry=${fmt_price(entry)}, TP=${fmt_price(tp)}, SL=${fmt_price(sl)}")
 
             self._notify(
-                f"📋 <b>Ордер</b> · {pair_html(sym, order)}{grade_badge}\n"
+                f"📋 <b>Ордер</b> · {pair_html(sym, order)}{g_badge}\n"
                 f"💵 {usd(size)} · 📥 {fmt_price(entry)} ({off * 100:+.2f}%){corr_txt(cand)}\n"
-                f"🎯 {fmt_price(tp)} ({fmt_pct(tp_pct)}) · 🛡 {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
+                f"🎯 {fmt_price(tp)} ({fmt_pct(tp_pct)}) · 🛡📉 {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
                 f"⭐ {cand['score']:.1f} · 🧠 {'; '.join(cand['reasons'][:3])}"
             )
