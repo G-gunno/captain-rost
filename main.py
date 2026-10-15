@@ -568,8 +568,8 @@ async def cmd_status(update, context):
                 val, w = pos["qty"] * last, (pos["qty"] * last / eq * 100 if eq else 0)
                 pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
 
-                tp1 = " · 🔥TP1" if pos.get("tp1_done") else ""
-                msg.append(f"{format_coin(sym, pos)}{grade_badge(pos)} · {pnl_emoji(pnl_pct)} {fmt_pct(pnl_pct)}{tp1}")
+                tp1_status = " · 🔥 TP1" if pos.get("tp1_done") else ""
+                msg.append(f"{format_coin(sym, pos)}{grade_badge(pos)} · {pnl_emoji(pnl_pct)} <b>{fmt_pct(pnl_pct)}</b>{tp1_status}")
                 msg.append(f"   💼 {usd(val)} · {w:.1f}%")
                 msg.append(f"   📥 {fmt_price(pos['avg'])} → 📊 {fmt_price(last)}")
 
