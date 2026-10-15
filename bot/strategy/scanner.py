@@ -29,7 +29,6 @@ STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
                 "RLUSD", "PYUSD", "EURI", "USDS", "USD0", "FRAX",
                 "LUSD", "GUSD", "XUSD", "USDX", "CUSD", "SUSD"}
 
-# Правильная градация порогов по фазам рынка: в BULL входы легче, в BEAR — строже по всем фронтам
 BASE_THRESHOLDS = {
     "bull": {"rocket": 6.0, "sniper": 5.5, "reversal": 5.2},
     "neutral": {"rocket": 6.5, "sniper": 6.0, "reversal": 5.4},
@@ -49,6 +48,7 @@ _regime_tracker = {
     "bull_start_ts": 0.0,
     "breadth_streak": 0,
 }
+
 
 def _init_regime_tracker():
     if _regime_tracker["last_bear_ts"] == 0.0 and hasattr(paper, "market_history") and paper.market_history:
@@ -70,7 +70,7 @@ def get_thresholds(regime):
     else:
         base = BASE_THRESHOLDS.get(regime, BASE_THRESHOLDS["neutral"])
 
-    adj = learner.threshold_adj 
+    adj = learner.threshold_adj
     t = shadow.tuning
 
     return {
@@ -95,7 +95,7 @@ def is_post_pump_dump(candles_15m: list) -> tuple:
     if not candles_15m or len(candles_15m) < 16:
         return False, ""
     recent = candles_15m[-16:]
-    
+
     high_val = -1.0
     high_idx = -1
     low_val = float("inf")
@@ -118,6 +118,61 @@ def is_post_pump_dump(candles_15m: list) -> tuple:
                 return True, f"пост-памп дамп (+{pump_magnitude:.1f}%, слив {dump_depth*100:.0f}%)"
 
     return False, ""
+
+
+def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int, a15: float) -> tuple:
+    """
+    Блок 2.1: Матрица первичной часовой валидации (1H Gatekeeper):
+    Возвращает (gate_status, e21_1h, e50_1h, reason_1h)
+    - 🟢 '1H_TREND_OK': Чистый аптренд (Close > EMA21 > EMA50) или плоская база над растущей EMA50, без перегрева.
+    - 🟡 '1H_SUPPORT_ONLY': Боковик или откат, но цена лежит на подтвержденной плите поддержки (>= 2-3 касания).
+    - 🔴 '1H_BAN':
+        А) Падение в пустом поле под падающей 1H EMA50 без плиты поддержки (CAP, OP, STRK).
+        Б) Остывание сразу после вертикального часового пампа (GLMR).
+    """
+    if not candles_1h or len(candles_1h) < 50:
+        return "1H_SUPPORT_ONLY", 0.0, 0.0, "недостаточно 1H истории"
+
+    closes_1h = [c["close"] for c in candles_1h]
+    last_1h = closes_1h[-1]
+    e21_series = ema(closes_1h, 21)
+    e50_series = ema(closes_1h, 50)
+    e21_1h = e21_series[-1]
+    e50_1h = e50_series[-1]
+    e50_prev = e50_series[-4] if len(e50_series) >= 4 else e50_1h
+    r_1h = rsi(closes_1h)
+    a_1h = atr(candles_1h)
+
+    # Проверка Б: Остывание после свечи часовой кульминации (кейс GLMR)
+    recent_6_1h = candles_1h[-6:]
+    max_h_6 = max(c["high"] for c in recent_6_1h)
+    min_l_6 = min(c["low"] for c in recent_6_1h)
+    if min_l_6 > 0 and ((max_h_6 - min_l_6) / min_l_6 * 100) >= 11.0:
+        pullback_from_peak = (max_h_6 - last_1h) / (max_h_6 - min_l_6) if max_h_6 > min_l_6 else 0.0
+        # Если после вертикального выстрела идут красные свечи остывания без плоской базы
+        if 0.25 <= pullback_from_peak <= 0.85 and candles_1h[-1]["close"] < candles_1h[-1]["open"]:
+            return "1H_BAN", e21_1h, e50_1h, "1H остывание после пампа (GLMR-фильтр)"
+
+    # Проверка А: Зеленый свет аптренда 1H
+    e50_rising = e50_1h >= e50_prev * 0.9995
+    if (last_1h >= e21_1h >= e50_1h * 0.998 or (last_1h >= e50_1h and e50_rising)) and r_1h <= 76:
+        return "1H_TREND_OK", e21_1h, e50_1h, "1H аптренд"
+
+    # Проверка падения под падающей EMA 50 (CAP, OP, STRK)
+    has_strong_slab = bool(nearest_sup and sup_touches >= 3 and a15 > 0 and (last_1h - nearest_sup) <= 2.2 * a15)
+    has_moderate_sup = bool(nearest_sup and sup_touches >= 2 and a15 > 0 and (last_1h - nearest_sup) <= 1.5 * a15)
+
+    if last_1h < e50_1h and not e50_rising:
+        # Если цена улетела глубоко под падающую 1H EMA50 (> 2.8 ATR_1H) или нет многократной плиты — полный БАН
+        dist_below_e50_1h = (e50_1h - last_1h) / a_1h if a_1h > 0 else 0.0
+        if not has_strong_slab or dist_below_e50_1h > 3.0:
+            return "1H_BAN", e21_1h, e50_1h, "1H даунтренд в пустом поле"
+        return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"1H плита поддержки ({sup_touches}x)"
+
+    if has_strong_slab or has_moderate_sup:
+        return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"1H опора на поддержку ({sup_touches}x)"
+
+    return "1H_SUPPORT_ONLY", e21_1h, e50_1h, "1H нейтральная структура"
 
 
 def raw_max_score(regime):
@@ -189,12 +244,12 @@ async def get_regime():
     if stable_trend == "bull" and raw_regime == "neutral":
         raw_regime = "bull"
     elif stable_trend == "bear" and raw_regime == "bull" and not breadth_bull:
-        raw_regime = "neutral" 
+        raw_regime = "neutral"
 
     if fng < 35 and raw_regime == "bull":
-        raw_regime = "neutral" 
+        raw_regime = "neutral"
     elif fng > 78 and raw_regime == "bear":
-        raw_regime = "neutral" 
+        raw_regime = "neutral"
 
     regime = raw_regime
 
@@ -278,22 +333,37 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
     prior_candles = candles_15m[-26:-2] if len(candles_15m) >= 26 else candles_15m[:-1]
     recent_high = max(c["high"] for c in prior_candles) if prior_candles else last
     recent_low_2h = min(c["low"] for c in candles_15m[-8:]) if len(candles_15m) >= 8 else min(c["low"] for c in candles_15m)
+    recent_low_6 = min(c["low"] for c in candles_15m[-6:]) if len(candles_15m) >= 6 else recent_low_2h
 
     w = shadow.signal_windows()
     score, reasons, keys = 0.0, [], []
 
     # 1. Трендовый контекст
-    if last > e50: score += learner.weight("ema50"); reasons.append("цена выше EMA50"); keys.append("ema50")
-    if e21 > e50: score += learner.weight("ema21"); reasons.append("EMA21>EMA50"); keys.append("ema21")
-    if e12 > e26: score += learner.weight("impulse"); reasons.append("импульс роста"); keys.append("impulse")
+    if last > e50:
+        score += learner.weight("ema50")
+        reasons.append("цена выше EMA50")
+        keys.append("ema50")
+    if e21 > e50:
+        score += learner.weight("ema21")
+        reasons.append("EMA21>EMA50")
+        keys.append("ema21")
+    if e12 > e26:
+        score += learner.weight("impulse")
+        reasons.append("импульс роста")
+        keys.append("impulse")
 
     # 2. RSI без слепых зон
     if r < 38:
-        score += learner.weight("rsi"); reasons.append(f"перепроданность RSI {r:.0f}"); keys.append("rsi")
+        score += learner.weight("rsi")
+        reasons.append(f"перепроданность RSI {r:.0f}")
+        keys.append("rsi")
     elif 38 <= r <= w["rsi_hi"]:
-        score += learner.weight("rsi"); reasons.append(f"RSI {r:.0f}"); keys.append("rsi")
-    elif r > w["rsi_hi"]: 
-        score -= 1.5; reasons.append(f"перегрев RSI {r:.0f}") 
+        score += learner.weight("rsi")
+        reasons.append(f"RSI {r:.0f}")
+        keys.append("rsi")
+    elif r > w["rsi_hi"]:
+        score -= 1.5
+        reasons.append(f"перегрев RSI {r:.0f}")
 
     # 3. Объем
     last_candle = candles_15m[-1]
@@ -330,10 +400,11 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
             score -= 4.0
             reasons.append(f"FOMO-перегрев (+{dist_from_ema/a15:.1f} ATR от EMA21)")
 
-    # 4. Триггеры Price Action (с памятью для уже выставленных ордеров)
+    # 4. Триггеры Price Action
     detected_patterns = detect_patterns(candles_15m, a15, e50, e21, recent_high)
     matched_modes = []
     pattern_keys = []
+    wick_entry_price = None
 
     for pat in detected_patterns:
         pkey = pat["key"]
@@ -342,8 +413,9 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         reasons.append(f"{pat['name']} (+{p_bonus:.1f})")
         pattern_keys.append(pkey)
         matched_modes.append(pat["mode"])
+        if pat.get("wick_entry_price") and wick_entry_price is None:
+            wick_entry_price = pat["wick_entry_price"]
 
-    # Если проверяется активный лимитный ордер, сохраняем его стартовый паттерн, пока сетап жив
     if saved_patterns:
         base_bonuses = {"pinbar": 2.5, "divergence": 2.5, "vcp": 3.0, "breakout": 3.0, "engulfing": 2.0}
         for sp in saved_patterns:
@@ -354,14 +426,15 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         if saved_mode and saved_mode not in matched_modes:
             matched_modes.append(saved_mode)
 
-    # 5. Динамика 24h
+    # 5. Динамика 24h + локальный дисконт от свинга (для QNT 18:10)
+    local_swing_drop = (recent_high - last) / recent_high * 100 if recent_high > last else 0.0
     if 0 < t["change_pct"] < w["chg_hi"]:
         score += learner.weight("chg24h")
         reasons.append(f"24ч +{t['change_pct']:.1f}%")
         keys.append("chg24h")
-    elif t["change_pct"] <= -5.0 and ("reversal" in matched_modes or r < 38):
+    elif (t["change_pct"] <= -5.0 or local_swing_drop >= 3.0) and ("reversal" in matched_modes or r < 40):
         score += learner.weight("chg24h")
-        reasons.append(f"дисконт 24ч {t['change_pct']:.1f}%")
+        reasons.append(f"дисконт от свинга -{local_swing_drop:.1f}%")
         keys.append("chg24h")
     elif t["change_pct"] >= w["chg_hi"]:
         score -= 1.0
@@ -370,9 +443,9 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
     if t["quote_volume"] < 500_000:
         score -= 1.0
 
-    # 6. Уровни S/R
+    # 6. Уровни S/R и Multi-Touch Support Bonus (Блок 2.3)
     nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_15m, candles_1h)
-    
+
     if nearest_res and res_touches >= 3 and a15 > 0 and not is_open_pos:
         dist_to_res = nearest_res - last
         if dist_to_res < 0.5 * a15 or (dist_to_res / last * 100) < 0.35:
@@ -382,37 +455,37 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
     sup_is_near = False
     if nearest_sup and sup_touches >= 2 and a15 > 0:
         dist_to_sup = last - nearest_sup
-        if 0 <= dist_to_sup <= 2.0 * a15:
+        if 0 <= dist_to_sup <= 2.2 * a15:
             sup_is_near = True
-            if not is_open_pos and (last > closes[-2] or "reversal" in matched_modes):
-                score += 1.5
-                reasons.append(f"опора на поддержку ${fmt_price(nearest_sup)} ({sup_touches}x)")
+            if not is_open_pos and (last > closes[-2] or "reversal" in matched_modes or sup_touches >= 3):
+                # Повышенный бонус за многократную плиту поддержки (>= 3 касаний, как на QNT)
+                sup_bonus = 2.8 if sup_touches >= 3 else 1.5
+                score += sup_bonus
+                reasons.append(f"плита поддержки ${fmt_price(nearest_sup)} ({sup_touches}x, +{sup_bonus:.1f})")
                 keys.append("support_bounce")
+                if sup_touches >= 3 and "reversal" not in matched_modes and last < e50:
+                    matched_modes.append("reversal")
+
+    # 7. Матрица 1H-валидации (1H Gatekeeper)
+    gate_1h, e21_1h, e50_1h, gate_reason = validate_1h_structure(candles_1h, nearest_sup, sup_touches, a15)
 
     if candles_1h and len(candles_1h) >= 25:
         closes_1h = [c["close"] for c in candles_1h]
         last_1h = closes_1h[-1]
-        e21_1h = ema(closes_1h, 21)[-1]
-        e50_1h = ema(closes_1h, 50)[-1]
-        e_trend_1h = ema(closes_1h, 200)[-1] if len(closes_1h) >= 200 else e50_1h
         r_1h = rsi(closes_1h)
 
-        global_uptrend = last_1h > e_trend_1h
-        local_dip = r_1h < 45 
-        micro_turn = e12 > e26 
-
-        if global_uptrend and local_dip and micro_turn:
-            score += 1.5
-            reasons.append("MTF: выкуп отката по тренду")
+        # MTF Pullback: если 1H в чистом аптренде, откат к EMA50 на 15m получает приоритет
+        if gate_1h == "1H_TREND_OK" and (r_1h < 52 or abs(last - e50) <= 1.2 * a15) and e12 >= e26 * 0.999:
+            score += 2.0
+            reasons.append("MTF: выкуп отката в 1H аптренде (+2.0)")
             keys.append("mtf_dip")
-        elif not global_uptrend and r_1h > 65:
-            score -= 1.0
-            reasons.append("MTF: ловушка (даунтренд)")
+        elif gate_1h == "1H_BAN" and not is_open_pos:
+            score -= 5.0
+            reasons.append(f"🚫 {gate_reason}")
 
-        is_rev_candidate = ("pinbar" in pattern_keys or "divergence" in pattern_keys or "reversal" in matched_modes)
-        if last_1h < e21_1h and not is_open_pos and not is_rev_candidate:
-            score -= 3.5
-            reasons.append(f"1H даунтренд (цена < EMA21_1H ${fmt_price(e21_1h)})")
+        # В режиме 1H_SUPPORT_ONLY запрещаем пробойные ракеты
+        if gate_1h == "1H_SUPPORT_ONLY" and "rocket" in matched_modes:
+            matched_modes = [m for m in matched_modes if m != "rocket"]
 
     has_structure = (
         sup_is_near or
@@ -422,7 +495,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
     )
 
     confirmed_res, confirmed_sup = get_all_sr_levels(candles_15m, candles_1h)
-    
+
     signal_values = {
         "rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio,
         "nearest_res": nearest_res, "res_touches": res_touches,
@@ -431,16 +504,22 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         "all_sup": confirmed_sup,
         "recent_high": recent_high,
         "recent_low_2h": recent_low_2h,
+        "recent_low_6": recent_low_6,
+        "e21": e21, "e50": e50,
+        "e21_1h": e21_1h, "e50_1h": e50_1h,
+        "gate_1h": gate_1h,
+        "wick_entry_price": wick_entry_price,
         "matched_modes": matched_modes,
         "patterns": pattern_keys,
-        "has_structure": has_structure
+        "has_structure": has_structure,
     }
     return score, reasons, keys, signal_values
 
 
 def normalize(raw, regime):
     rm = raw_max_score(regime)
-    if rm <= 0: return 0.0
+    if rm <= 0:
+        return 0.0
     return round(max(0.0, min(SCORE_MAX, raw / rm * SCORE_MAX)), 2)
 
 
@@ -469,20 +548,26 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
 
     if corr > tier_corr_limit and regime == "neutral":
         raw -= 1
+    elif abs(corr) < 0.25:
+        raw += learner.weight("indep") * 1.4
     elif corr < 0.45:
         raw += learner.weight("indep")
 
     fng = get_fear_and_greed()
-    if fng >= 80: raw -= 0.5
-    elif fng <= 25: raw += 0.5
+    if fng >= 80:
+        raw -= 0.5
+    elif fng <= 25:
+        raw += 0.5
 
     if is_sector_hot(sector):
         raw += 0.5
 
     sb = learner.sector_bias(sector)
-    if sb: raw += sb
+    if sb:
+        raw += sb
     tb = learner.tier_bias(tier)
-    if tb: raw += tb
+    if tb:
+        raw += tb
 
     if news_items is not None:
         name = await get_coin_name(base)
@@ -495,9 +580,12 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
     score10 = normalize(raw, regime)
 
     modes = sv_live.get("matched_modes", [])
-    if "reversal" in modes: entry_mode_live = "reversal"
-    elif "rocket" in modes: entry_mode_live = "rocket"
-    else: entry_mode_live = "sniper"
+    if "reversal" in modes:
+        entry_mode_live = "reversal"
+    elif "rocket" in modes:
+        entry_mode_live = "rocket"
+    else:
+        entry_mode_live = "sniper"
 
     if deriv_t:
         funding = deriv_t.get("funding", 0)
@@ -507,9 +595,10 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
             score10 += 0.5
 
     is_sqz = await check_coinglass_liquidation_threat(sym)
-    if is_sqz: score10 -= 1.5 
+    if is_sqz:
+        score10 -= 1.5
 
-    score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)    
+    score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)
     return score10, candles_15m
 
 
@@ -552,7 +641,8 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
     by_listings = []
     seen = set()
     for sym, age_h in sorted(sources, key=lambda x: x[1]):
-        if sym in seen or not (24 <= age_h <= 336): continue
+        if sym in seen or not (24 <= age_h <= 336):
+            continue
         seen.add(sym)
         if sym in tickers and is_tradable(sym) and tickers[sym]["quote_volume"] >= 500_000:
             by_listings.append((sym, age_h))
@@ -589,18 +679,24 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             candles_15m = await market_data.get_kline(sym, "15", 120)
             candles_1h = await market_data.get_kline(sym, "60", 250)
 
-            if len(candles_15m) < 60 or len(candles_1h) < 60: return None
+            if len(candles_15m) < 60 or len(candles_1h) < 60:
+                return None
 
-            is_post_pump, pp_reason = is_post_pump_dump(candles_15m)
+            is_post_pump, _ = is_post_pump_dump(candles_15m)
             if is_post_pump:
                 return None
 
             a = atr(candles_15m)
             last_price = tickers[sym]["last"]
             atr_pct = (a / last_price) * 100 if last_price else 0
-            if a <= 0 or atr_pct < 0.25: return None
+            if a <= 0 or atr_pct < 0.25:
+                return None
 
             score, reasons, keys, signal_values = score_symbol(candles_15m, candles_1h, tickers[sym], regime)
+
+            # Блок 2.1: Жесткий отсев по часовому валидатору 1H_BAN
+            if signal_values.get("gate_1h") == "1H_BAN":
+                return None
 
             if not signal_values.get("has_structure"):
                 return None
@@ -612,18 +708,25 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             corr = _corr(_returns([c["close"] for c in candles_15m]), btc_ret)
             tier_corr_limit = TIER_CORR_LIMITS.get(tier, 0.82)
 
+            # Блок 2.6: Иммунитет для независимых монет (corr < 0.25)
+            is_independent_mover = abs(corr) < 0.25 and signal_values.get("gate_1h") == "1H_TREND_OK"
+
             if corr > tier_corr_limit and regime == "neutral":
                 score -= 1
                 reasons.append(f"зеркало BTC ({tier}: corr {corr:.2f})")
+            elif is_independent_mover:
+                score += learner.weight("indep") * 1.5
+                reasons.append(f"иммунитет от BTC (corr {corr:.2f})")
+                keys.append("indep")
             elif corr < 0.45:
                 score += learner.weight("indep")
                 reasons.append(f"независима от BTC (corr {corr:.2f})")
                 keys.append("indep")
 
-            if fng >= 80:  
+            if fng >= 80:
                 score -= 0.5
                 reasons.append(f"F&G перегрев ({fng}): -0.5")
-            elif fng <= 25: 
+            elif fng <= 25:
                 score += 0.5
                 reasons.append(f"F&G страх ({fng}): +0.5")
 
@@ -634,7 +737,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
             if is_sector_hot(sector):
                 score += 0.5
-                reasons.append(f"TVL приток (DefiLlama): +0.5")
+                reasons.append("TVL приток (DefiLlama): +0.5")
 
             tb = learner.tier_bias(tier)
             if tb:
@@ -663,24 +766,31 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             score10 = (score / raw_max * SCORE_MAX) if raw_max > 0 else 0.0
 
             modes = signal_values.get("matched_modes", [])
-            if "reversal" in modes: entry_mode = "reversal"
-            elif "rocket" in modes: entry_mode = "rocket"
-            else: entry_mode = "sniper"
+            if "reversal" in modes:
+                entry_mode = "reversal"
+            elif "rocket" in modes:
+                entry_mode = "rocket"
+            else:
+                entry_mode = "sniper"
+
+            # Если 1H разрешает только работу от плиты — блокируем ракеты и переводим в reversal/sniper от плиты
+            if signal_values.get("gate_1h") == "1H_SUPPORT_ONLY" and entry_mode == "rocket":
+                return None
 
             deriv_t = deriv_tickers.get(sym)
             if deriv_t:
                 funding = deriv_t.get("funding", 0)
                 if funding > 0.05 and entry_mode == "rocket":
                     score10 -= 0.5
-                    reasons.append(f"перегрев лонгов Фьюч ({-0.5})")
+                    reasons.append("перегрев лонгов Фьюч (-0.5)")
                 elif funding < -0.01:
                     score10 += 0.5
-                    reasons.append(f"шорт-сквиз потенциал Фьюч ({+0.5})")
+                    reasons.append("шорт-сквиз потенциал Фьюч (+0.5)")
 
             is_sqz = await check_coinglass_liquidation_threat(sym)
             if is_sqz:
                 score10 -= 1.5
-                reasons.append(f"риск ликвидаций Coinglass ({-1.5})")
+                reasons.append("риск ликвидаций Coinglass (-1.5)")
 
             score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)
 
@@ -700,7 +810,15 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 "sup_touches": signal_values.get("sup_touches", 0),
                 "recent_high": signal_values.get("recent_high"),
                 "recent_low_2h": signal_values.get("recent_low_2h"),
-                "size_mult": 1.0
+                "recent_low_6": signal_values.get("recent_low_6"),
+                "e21": signal_values.get("e21"),
+                "e50": signal_values.get("e50"),
+                "e21_1h": signal_values.get("e21_1h"),
+                "e50_1h": signal_values.get("e50_1h"),
+                "gate_1h": signal_values.get("gate_1h"),
+                "wick_entry_price": signal_values.get("wick_entry_price"),
+                "is_independent": is_independent_mover,
+                "size_mult": 1.0,
             }
 
     tasks = [_analyze_sym(sym) for sym in pool]
@@ -710,6 +828,8 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
     scored.sort(key=lambda c: c["score"], reverse=True)
 
     thrs = get_thresholds(regime)
+    neutral_thrs = get_thresholds("neutral")
+
     try:
         shadow.observe(scored, regime, thrs)
         shadow.tick(tickers)
@@ -722,7 +842,8 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
     for c in scored[:5]:
         chart_url = f"{public_url}/chart?symbol={c['symbol']}"
         mode = c.get("entry_mode", "sniper")
-        thr = thrs.get(mode, 6.0)
+        eff_thrs = neutral_thrs if (regime == "bear" and c.get("is_independent")) else thrs
+        thr = eff_thrs.get(mode, 6.0)
         mode_icon = "🚀" if mode == "rocket" else "🧲" if mode == "reversal" else "🏹"
 
         parts_html.append(f"{mode_icon} <a href='{chart_url}'><b>{c['symbol'][:-4]}</b></a> {TIER_EMOJI.get(c['tier'], '🐭')} · <i>{c['sector']}</i> · {c['score']:.1f}/{thr:g} · ₿ {c['corr']:.2f}")
@@ -737,7 +858,10 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
     candidates = []
     for c in scored:
         mode = c.get("entry_mode", "sniper")
-        if c["score"] < thrs.get(mode, 6.0): continue
+        # Иммунитет от BEAR для независимых трендовых активов (corr < 0.25)
+        eff_thrs = neutral_thrs if (regime == "bear" and c.get("is_independent")) else thrs
+        if c["score"] < eff_thrs.get(mode, 6.0):
+            continue
         c["is_new"] = c["symbol"] in new_set
         candidates.append(c)
 
