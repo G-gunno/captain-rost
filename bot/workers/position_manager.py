@@ -21,7 +21,7 @@ from bot.core.state import bot_state
 
 
 class PositionManagerWorker:
-    """Управление позициями: Дышащий Коридор по свечам 15m/1H, Зона Заморозки лимиток и защита ордеров на базе."""
+    """Управление позициями: Дышащий Коридор по свечам 15m/1H, Зона Заморозки лимиток и защита баланса."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -134,7 +134,6 @@ class PositionManagerWorker:
                 self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)}{grade_badge(ex)} · {reason}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                 continue
 
-            # Обновляем свечной контекст и храповик SL по Дышащему Коридору
             max_p = max(pos.get("max_price", last), last)
             pos["max_price"] = max_p
             sl_updated, new_sl, new_state, tag_emoji = update_position_sl(pos, max_p, last_price=last, candles_15m=candles)
@@ -156,7 +155,6 @@ class PositionManagerWorker:
                     coin_compact = format_coin_compact(sym, pos)
                     self._notify(f"🛡 SL поднят по {coin_compact} до {new_sl_str} ({tag_emoji})")
 
-            # Динамический потолок TP🏃🏻‍➡️ (расширение при разгоне, заморозка на полке/кульминации)
             if pos.get("tp1_done") and last >= (pos["tp"] - 0.5 * a):
                 candles_1h = await market_data.get_kline(sym, "60", 250)
                 next_target, can_expand, _ = calc_runner_target(sym, last, candles, candles_1h, pos=pos)
@@ -213,8 +211,6 @@ class PositionManagerWorker:
             thr = thrs.get(entry_mode, 6.0)
             init_score = order.get("initial_score", order.get("score", thr))
 
-            # Блок 2.6: Защита лимитных ордеров на базе (кейс AVA в 19:30 перед выстрелом)
-            # Если ордер стоит под проторговкой, а цена держится над EMA50 и структура тренда жива — не отменяем!
             base_intact = (entry_mode != "reversal" and t["last"] >= e50 * 0.996 and e21 >= e50 * 0.996)
             trend_broken_order = (entry_mode != "reversal" and t["last"] < e50 * 0.990 and e21 < e50 * 0.997)
 
@@ -246,10 +242,7 @@ class PositionManagerWorker:
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ ({init_score:.1f}-{score_now:.1f})")
                 continue
 
-            # =================================================================
-            # Блок 1.4: УКРОЩЕНИЕ «МИКРО-ОХОТЫ» ОРДЕРОВ (ЗОНА ЗАМОРОЗКИ / DEEP)
-            # Запрет сдвига чаще чем раз в 8 минут (480с) и при отклонении < 0.38%
-            # =================================================================
+            # Зона заморозки (Freeze Zone): реквот не чаще раза в 8 минут
             last_move_ts = order.get("last_move_ts", order["created"])
             if (current_time - last_move_ts) < 480:
                 continue
@@ -276,7 +269,8 @@ class PositionManagerWorker:
                     action_type = "correct"
                     price_icon = "⬇️"
 
-            elif ideal_price > old_price and dev_pct >= 0.38 and not in_freeze_zone:
+            # В режиме BEAR и при политике STRICT запрещено двигать лимитки вверх (hunt_up)!
+            elif ideal_price > old_price and dev_pct >= 0.38 and not in_freeze_zone and regime != "bear" and new_mode != "STRICT":
                 can_shift_up = (is_accum and t["last"] <= (e50 * 1.012)) or (entry_mode == "sniper" and t["last"] <= (e21 * 1.008))
                 if can_shift_up:
                     target_price = ideal_price
@@ -287,7 +281,7 @@ class PositionManagerWorker:
                 continue
 
             all_res, all_sup = get_all_sr_levels(candles, candles_1h)
-            res_above_target = [(r[0], r[1]) for r in all_res if r[0] > target_price * 1.0015]
+            res_above_target = [(r[0], r[1]) for r in all_res if r[0] > target_price * 1.0025]
             if res_above_target:
                 res_above_target.sort(key=lambda x: x[0])
                 entry_res, entry_res_touches = res_above_target[0]
@@ -315,7 +309,10 @@ class PositionManagerWorker:
             )
 
             if is_valid and action_type:
+                # Сохраняем неизменной долларовую стоимость ордера, чтобы реквот никогда не уводил баланс в минус
+                old_notional = order["qty"] * order["price"]
                 order["price"] = target_price
+                order["qty"] = old_notional / target_price if target_price > 0 else order["qty"]
                 order["sl"] = sl
                 order["tp"] = tp
                 order["nearest_sup"] = entry_sup
