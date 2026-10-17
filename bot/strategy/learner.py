@@ -21,7 +21,6 @@ PATTERN_NAMES = {
 
 TIERS = ["TOP20", "MID", "SMALL", "MICRO"]
 
-# Блок 5.1 и 6.1: Границы нейтральной зоны безубытка (🛡🔒 БУ)
 BE_LOW_PCT = -0.15
 BE_HIGH_PCT = 0.25
 
@@ -31,7 +30,7 @@ def is_neutral_be(pnl_pct: float) -> bool:
 
 
 class Learner:
-    """Самообучение: веса контекста + нейтральная зона БУ + управление сетапами Grade A+ [💎]."""
+    """Самообучение: сбалансированные веса с Mean Reversion + нейтральная зона БУ + управление Grade A+ [💎]."""
 
     def __init__(self):
         self.weights = {k: 1.0 for k in KEYS}
@@ -61,7 +60,13 @@ class Learner:
         if data:
             loaded_weights = data.get("weights", {})
             for k in KEYS:
-                self.weights[k] = loaded_weights.get(k, 1.0)
+                w_val = float(loaded_weights.get(k, 1.0))
+                self.weights[k] = round(min(1.45, max(0.55, w_val)), 3)
+
+            # Авто-выравнивание исторического перекоса весов (если трендовые ключи упали < 0.60, а редкие > 1.40)
+            if min(self.weights.values()) < 0.60 or max(self.weights.values()) > 1.40:
+                for k in KEYS:
+                    self.weights[k] = round(0.5 * self.weights[k] + 0.5 * 1.0, 3)
 
             self.results = data.get("results", [])
             self.be_count = int(data.get("be_count", 0))
@@ -69,11 +74,17 @@ class Learner:
             self.sector_stats = data.get("sector_stats", {})
             self.tier_stats = data.get("tier_stats", {})
             self.exit_stats = data.get("exit_stats", {})
+            # Склеиваем дублирующиеся ключи 🛡🔒 и 🛡🔒 БУ из прошлых сессий
+            if "🛡🔒" in self.exit_stats:
+                old_be = self.exit_stats.pop("🛡🔒")
+                for p in old_be:
+                    target_k = "🛡💼" if p > BE_HIGH_PCT else "🛡🔒 БУ"
+                    self.exit_stats.setdefault(target_k, []).append(p)
             self.entry_stats = data.get("entry_stats", {})
             self.pattern_stats = data.get("pattern_stats", {})
             self.grade_stats = data.get("grade_stats", {"A+": [], "B": []})
             self.grade_a_streak = int(data.get("grade_a_streak", 0))
-            logger.info("learner: опыт загружен")
+            logger.info("learner: опыт загружен и сбалансирован")
 
     def save(self):
         payload = {
@@ -102,11 +113,6 @@ class Learner:
         return self.weights.get(key, 1.0)
 
     def grade_a_trust_mult(self) -> float:
-        """
-        Блок 6.2: Адаптивный мультипликатор доверия к сетапам Grade A+ [💎]:
-        - Серия стопов (streak <= -2) -> снижаем вес позиции до 0.80x
-        - Серия побед (streak >= 2) -> повышаем вес до 1.15x
-        """
         if self.grade_a_streak <= -3:
             return 0.70
         if self.grade_a_streak == -2:
@@ -137,10 +143,6 @@ class Learner:
     def record(self, keys, win, pnl_pct=0.0, sector=None, tier=None,
                exit_type=None, runner_bonus=0.0, soft=False,
                entry_mode=None, patterns=None, grade="B"):
-        """
-        Блок 5.1: Сделки в нейтральной зоне БУ (-0.15% <= pnl_pct <= +0.25%)
-        НЕ накручивают ложный win=True и НЕ искажают веса индикаторов!
-        """
         g_key = "A+" if grade == "A+" else "B"
         gh = self.grade_stats.setdefault(g_key, [])
         gh.append(round(pnl_pct, 2))
@@ -174,9 +176,10 @@ class Learner:
             hist.append(round(pnl_pct, 2))
             self.tier_stats[tier] = hist[-50:]
         if exit_type:
-            eh = self.exit_stats.setdefault(exit_type, [])
+            norm_exit = "🛡💼" if (exit_type == "🛡🔒" and real_win) else ("🛡📉" if (exit_type == "🛡🔒" and not real_win) else exit_type)
+            eh = self.exit_stats.setdefault(norm_exit, [])
             eh.append(round(pnl_pct, 2))
-            self.exit_stats[exit_type] = eh[-50:]
+            self.exit_stats[norm_exit] = eh[-50:]
         if entry_mode:
             em_h = self.entry_stats.setdefault(entry_mode, [])
             em_h.append(round(pnl_pct, 2))
@@ -190,28 +193,24 @@ class Learner:
 
         abs_pnl = abs(pnl_pct)
         if abs_pnl >= 3.0:
-            delta = 0.10 if real_win else -0.10
+            delta = 0.06 if real_win else -0.06
         elif abs_pnl >= 1.0:
-            delta = 0.05 if real_win else -0.05
+            delta = 0.035 if real_win else -0.035
         else:
-            delta = 0.03 if real_win else -0.03
+            delta = 0.02 if real_win else -0.02
         if runner_bonus > 5.0:
-            delta += 0.05
+            delta += 0.03
         if soft and not real_win:
             delta *= 0.5
 
-        for k in keys:
-            if k in self.weights:
-                self.weights[k] = round(min(1.7, max(0.3, self.weights[k] + delta)), 3)
-
-        target = float(len(self.weights))
-        cur = sum(self.weights.values())
-        if cur > 0:
-            k = target / cur
-            self.weights = {
-                w: round(min(1.7, max(0.3, v * k)), 3)
-                for w, v in self.weights.items()
-            }
+        # Обновляем только участвовавшие ключи + мягкий возврат всех весов к 1.0 (Mean Reversion 2%),
+        # чтобы редкие ключи (hype/news_pos) не раздувались за счет падения трендовых (ema21/ema50)
+        for k in KEYS:
+            w_cur = self.weights.get(k, 1.0)
+            if k in keys:
+                w_cur += delta
+            w_reverted = w_cur * 0.98 + 1.0 * 0.02
+            self.weights[k] = round(min(1.45, max(0.55, w_reverted)), 3)
 
         self.save()
         logger.info(f"learner: win={real_win} pnl={pnl_pct:+.2f}% grade={g_key} delta={delta:+.3f} keys={keys}")
@@ -223,7 +222,7 @@ class Learner:
         wr = sum(1 for p in hist if p > 0) / len(hist)
         avg = sum(hist) / len(hist)
         mult = 1.0 + (wr - 0.5) * 0.5 + min(0.2, max(-0.2, avg * 0.05))
-        return round(max(0.60, min(1.40, mult)), 2)
+        return round(max(0.65, min(1.35, mult)), 2)
 
     def sector_bias(self, sector):
         hist = [p for p in (self.sector_stats.get(sector) or []) if not is_neutral_be(p)]
