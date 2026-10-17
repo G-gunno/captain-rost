@@ -14,7 +14,7 @@ from bot.strategy.risk import update_position_sl, calc_runner_target
 
 
 class ExecutionRiskWorker:
-    """Критический воркер исполнения ордеров, «Дышащего Коридора» SL/TP и антиспам-нотификаций."""
+    """Критический воркер исполнения ордеров, «Дышащего Коридора» SL/TP (включая 🛡🔥 ABOVE_TP1) и антиспам-нотификаций."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -92,7 +92,7 @@ class ExecutionRiskWorker:
                 continue
             last = t["last"]
 
-            # 1. Исполнение стоп-лосса с точным указанием типа стопа (🛡📉 / 🛡🔒 / 🛡💼 / 🛡📈)
+            # 1. Исполнение стоп-лосса с точным указанием типа стопа (🛡📉 / 🛡🔒 / 🛡💼 / 🛡📈 / 🛡🔥)
             if last <= pos["sl"]:
                 sl_exec_price = pos["sl"]
                 sl_tag = sl_emoji(pos.get("sl_state", "SHIELD"))
@@ -118,7 +118,6 @@ class ExecutionRiskWorker:
                 candles_1h = await market_data.get_kline(sym, "60", 250)
 
                 if not pos.get("tp1_done"):
-                    # Для reversal фиксируем 65% на TP1, для sniper/rocket — 50%
                     tp1_ratio = 0.65 if pos.get("entry_mode") == "reversal" else 0.50
                     part_qty = pos["qty"] * tp1_ratio
                     ex = paper.sell_partial(sym, part_qty, pos["tp"], "🔥 TP1")
@@ -129,7 +128,6 @@ class ExecutionRiskWorker:
                     next_target, _, _ = calc_runner_target(sym, last, candles_15m, candles_1h, pos=pos)
                     pos["tp"] = max(pos["tp"] * 1.012, next_target)
 
-                    # Включаем храповик Дышащего Коридора после TP1
                     _, new_sl, new_state, _ = update_position_sl(pos, max(pos.get("max_price", last), last), last_price=last, candles_15m=candles_15m)
                     pos["sl"] = new_sl
                     pos["sl_state"] = new_state
@@ -150,21 +148,22 @@ class ExecutionRiskWorker:
                 else:
                     next_target, can_expand, phase_reason = calc_runner_target(sym, last, candles_15m, candles_1h, pos=pos)
 
-                    # Блок 1.3: На кульминации (RSI > 75) или у потолка 1H EMA21 запрещено отодвигать тейк вверх — фиксируем на пике!
                     if can_expand and next_target > pos["tp"] * 1.008:
                         old_tp = pos["tp"]
                         pos["tp"] = next_target
                         pos["sl"] = max(pos["sl"], round(old_tp * 0.995, 8))
-                        pos["sl_state"] = "TRAILING_RUNNER"
+                        tp1_ref = float(pos.get("tp1_price") or pos.get("initial_tp") or 0.0)
+                        new_state = "ABOVE_TP1" if (tp1_ref > 0 and pos["sl"] >= tp1_ref * 0.9995) else "TRAILING_RUNNER"
+                        pos["sl_state"] = new_state
                         pos["_last_notified_sl_str"] = fmt_price(pos["sl"])
-                        pos["_last_notified_sl_state"] = "TRAILING_RUNNER"
+                        pos["_last_notified_sl_state"] = new_state
                         pos["_last_sl_notify_ts"] = now_ts
                         state_changed = True
                         paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP🏃🏻‍➡️ поднят по коридору", mode="TP🏃🏻‍➡️", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                         self.bus.publish("NOTIFY", {
                             "text": (
                                 f"TP🏃🏻‍➡️ <b>Потолок коридора расширен</b> · {pair_html(sym, pos)}\n"
-                                f"🎯 {fmt_price(pos['tp'])} · 🛡📈 {fmt_price(pos['sl'])}"
+                                f"🎯 {fmt_price(pos['tp'])} · {sl_emoji(new_state)} {fmt_price(pos['sl'])}"
                             ),
                             "urgent": False,
                         })
@@ -183,7 +182,7 @@ class ExecutionRiskWorker:
                         })
                 continue
 
-            # 3. Асимметричный храповик SL по Дышащему Коридору + Антиспам 3 минуты (Блок 6.4)
+            # 3. Асимметричный храповик SL по Дышащему Коридору + Антиспам 3 минуты
             max_p = max(pos.get("max_price", last), last)
             pos["max_price"] = max_p
 
@@ -201,7 +200,6 @@ class ExecutionRiskWorker:
 
                 paper.log_event(sym, "sl_moved", pos["sl"], tag_emoji, tp=pos.get("tp"), sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
 
-                # Антиспам-фильтр: пишем в Telegram не чаще чем раз в 3 минуты (180 сек) или при смене фазы стопа / скачке > 1.5 ATR
                 last_notify_ts = float(pos.get("_last_sl_notify_ts", 0.0))
                 a15 = float(pos.get("_atr15", 0.0))
                 big_jump = (a15 > 0 and (new_sl - old_sl) >= 1.5 * a15)
