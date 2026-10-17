@@ -450,6 +450,9 @@ async def cmd_log(update, context):
 @restricted
 async def cmd_chart(update, context):
     import time
+    import io
+    from bot.services.reports import build_trades_audit_24h
+
     arg = (context.args or [None])[0]
     public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
 
@@ -519,7 +522,24 @@ async def cmd_chart(update, context):
 
             lines.append("")
 
-        return await reply(update, "\n".join(lines).strip())
+        await reply(update, "\n".join(lines).strip())
+
+        try:
+            tz = ZoneInfo(os.getenv("TIMEZONE", "Europe/Moscow"))
+            ts_str = datetime.now(tz).strftime("%H%M%S")
+            audit_text = await build_trades_audit_24h(tz)
+            audit_doc = io.BytesIO(audit_text.encode("utf-8"))
+            audit_name = f"audit_24h_{ts_str}.txt"
+            audit_doc.name = audit_name
+            await update.message.reply_document(
+                document=audit_doc,
+                filename=audit_name,
+                caption="📊 <b>Полный табличный аудит сделок и монет (24ч)</b>",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.exception(f"audit_24h build error: {e}")
+        return
 
     sym = arg.upper() + ("USDT" if not arg.upper().endswith("USDT") else "")
     await reply(update, f"📈 <b>График торгов {sym}</b>\n\n🌐 <a href='{public_url}/chart?symbol={sym}'>Открыть интерактивный график</a>")
