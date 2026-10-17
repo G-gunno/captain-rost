@@ -613,7 +613,7 @@ def normalize(raw, regime):
     return round(max(0.0, min(SCORE_MAX, raw / rm * SCORE_MAX)), 2)
 
 
-async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_open_pos=False, saved_patterns=None, saved_mode=None):
+async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_open_pos=False, saved_patterns=None, saved_mode=None, btc_candles=None):
     candles_15m = await market_data.get_kline(sym, "15", 120)
     candles_1h = await market_data.get_kline(sym, "60", 250)
 
@@ -633,7 +633,9 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
     sector = sectors_map.get(base, "Other")
     tier = tier_of(ranks_map.get(base))
 
-    if isinstance(btc_ret, list) and btc_ret and isinstance(btc_ret[0], dict):
+    if btc_candles:
+        corr = _corr_candles(candles_15m, btc_candles)
+    elif isinstance(btc_ret, list) and btc_ret and isinstance(btc_ret[0], dict):
         corr = _corr_candles(candles_15m, btc_ret)
     else:
         corr = _corr(_returns([c["close"] for c in candles_15m[:-1]]), btc_ret[:-1] if btc_ret else [])
