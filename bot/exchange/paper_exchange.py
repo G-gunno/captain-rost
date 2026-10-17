@@ -191,6 +191,9 @@ class PaperExchange:
                     pos["res_touches"] = order.get("res_touches", 0)
                     pos["sl_state"] = order.get("sl_state", "SHIELD")
                     pos["_last_sl_notify_ts"] = 0
+                    pos["_ema21"] = order.get("_ema21", 0.0)
+                    pos["_ema50"] = order.get("_ema50", 0.0)
+                    pos["_atr15"] = order.get("_atr15", 0.0)
                     self.trades.append({
                         "side": "Buy",
                         "symbol": order["symbol"],
