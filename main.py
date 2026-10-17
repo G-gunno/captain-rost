@@ -18,7 +18,7 @@ from bot.exchange.market_data import market_data
 from bot.exchange.paper_exchange import paper
 from bot.core.state import bot_state
 from bot.core.remote_state import ensure_branch
-from bot.services.reports import build_report
+from bot.services.reports import build_report, build_audit_html
 from bot.services.info import info_full_text
 from bot.strategy.shadow import shadow
 from bot.strategy.scanner import SCAN_SUMMARY, FILTERED_BY_NEWS, get_regime, get_thresholds
@@ -70,6 +70,25 @@ async def webhook_handler(request):
     return web.Response(text="OK")
 
 
+async def audit_handler(request):
+    try:
+        tz = ZoneInfo(os.getenv("TIMEZONE", "Europe/Moscow"))
+        public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
+        html_page = await build_audit_html(tz, public_url=public_url)
+        compressed_html = gzip.compress(html_page.encode("utf-8"))
+        return web.Response(
+            body=compressed_html,
+            content_type="text/html",
+            headers={
+                "Content-Encoding": "gzip",
+                "Vary": "Accept-Encoding"
+            }
+        )
+    except Exception as e:
+        logger.exception(f"audit_handler error: {e}")
+        return web.Response(text=f"Ошибка генерации дашборда /audit: {e}", status=500)
+
+
 async def chart_handler(request):
     symbol = request.query.get("symbol")
     interval_str = request.query.get("interval", "60")
@@ -99,7 +118,10 @@ async def chart_handler(request):
                 'background: rgba(30, 30, 30, 0.85); padding: 8px 15px; border-radius: 8px; '
                 'border: 1px solid #444; font-family: Arial, sans-serif; '
                 'box-shadow: 0 4px 6px rgba(0,0,0,0.3); display: flex; align-items: center;">'
-                '<span style="color: #ccc; margin-right: 12px; font-size: 14px;">Таймфрейм:</span>'
+                '<a href="/audit" style="text-decoration: none; color: #00e5ff; background: rgba(0, 229, 255, 0.14); '
+                'border: 1px solid rgba(0, 229, 255, 0.4); padding: 5px 10px; margin-right: 12px; border-radius: 4px; '
+                'font-size: 13px; font-weight: bold;">📊 Аудит 24ч</a>'
+                '<span style="color: #ccc; margin-right: 10px; font-size: 14px;">ТФ:</span>'
             )
 
             for tf in valid_intervals:
@@ -293,7 +315,7 @@ async def cmd_info(update, context):
 
 @restricted
 async def cmd_help(update, context):
-    await reply(update, "📖 <b>Мои команды</b>\n/status — метрики\n/info — инфо\n/learn — обучение\n/news — аналитика\n/pause, /resume, /exitall\n/log — лог")
+    await reply(update, "📖 <b>Мои команды</b>\n/status — метрики\n/chart — графики и веб-аудит\n/info — инфо\n/learn — обучение\n/news — аналитика\n/pause, /resume, /exitall\n/log — лог")
 
 
 @restricted
@@ -450,9 +472,6 @@ async def cmd_log(update, context):
 @restricted
 async def cmd_chart(update, context):
     import time
-    import io
-    from bot.services.reports import build_trades_audit_24h
-
     arg = (context.args or [None])[0]
     public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
 
@@ -465,10 +484,14 @@ async def cmd_chart(update, context):
 
         closed_trades = [t for t in paper.realized if not t.get("partial") and t.get("time", 0) >= cutoff]
 
-        if not active_syms and not closed_trades:
-            return await reply(update, "⚠️ За последние 24 часа активности не было.")
+        lines = [
+            "📈 <b>Графики торгов и Аудит (24ч)</b>",
+            f"🌐 <a href='{public_url}/audit'><b>Открыть интерактивный дашборд инфографики (24ч)</b></a>\n"
+        ]
 
-        lines = ["📈 <b>Графики торгов (24ч)</b>\n"]
+        if not active_syms and not closed_trades:
+            lines.append("<i>За последние 24 часа активности не было.</i>")
+            return await reply(update, "\n".join(lines))
 
         if active_syms:
             curr_reg = bot_state.current_regime.upper()
@@ -522,27 +545,15 @@ async def cmd_chart(update, context):
 
             lines.append("")
 
-        await reply(update, "\n".join(lines).strip())
-
-        try:
-            tz = ZoneInfo(os.getenv("TIMEZONE", "Europe/Moscow"))
-            ts_str = datetime.now(tz).strftime("%H%M%S")
-            audit_text = await build_trades_audit_24h(tz)
-            audit_doc = io.BytesIO(audit_text.encode("utf-8"))
-            audit_name = f"audit_24h_{ts_str}.txt"
-            audit_doc.name = audit_name
-            await update.message.reply_document(
-                document=audit_doc,
-                filename=audit_name,
-                caption="📊 <b>Полный табличный аудит сделок и монет (24ч)</b>",
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            logger.exception(f"audit_24h build error: {e}")
-        return
+        return await reply(update, "\n".join(lines).strip())
 
     sym = arg.upper() + ("USDT" if not arg.upper().endswith("USDT") else "")
-    await reply(update, f"📈 <b>График торгов {sym}</b>\n\n🌐 <a href='{public_url}/chart?symbol={sym}'>Открыть интерактивный график</a>")
+    await reply(
+        update,
+        f"📈 <b>График торгов {sym}</b>\n\n"
+        f"🌐 <a href='{public_url}/chart?symbol={sym}'>Открыть интерактивный график</a>\n"
+        f"📊 <a href='{public_url}/audit'>Открыть общий дашборд аудита (24ч)</a>"
+    )
 
 
 @restricted
@@ -704,7 +715,7 @@ async def run_all(application):
         BotCommand("resume", "▶️ Возобновить"),
         BotCommand("status", "📊 Статус"),
         BotCommand("funding", "🏦 Накопительный фонд"),
-        BotCommand("chart", "📈 График"),
+        BotCommand("chart", "📈 Графики и Аудит 24ч"),
         BotCommand("learn", "🧠 Обучение"),
         BotCommand("news", "📰 Новости"),
         BotCommand("exitall", "🛑 Продать всё"),
@@ -757,6 +768,7 @@ async def run_all(application):
     web_app = web.Application()
     web_app.router.add_get("/", health_handler)
     web_app.router.add_get("/chart", chart_handler)
+    web_app.router.add_get("/audit", audit_handler)
     web_app.router.add_post(WEBHOOK_PATH, webhook_handler)
 
     runner = web.AppRunner(web_app)
