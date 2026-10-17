@@ -24,7 +24,6 @@ TIER_MAX_SL = {
     "MICRO": 4.2,
 }
 
-# Блок 1.1: Ранний прыжок be_trigger ликвидирован!
 TIER_TRAIL_CONFIG = {
     "TOP20": {"runner_dist": 0.009, "lock_trigger_pct": 1.8, "lock_dist": 0.006},
     "MID":   {"runner_dist": 0.012, "lock_trigger_pct": 2.2, "lock_dist": 0.008},
@@ -83,31 +82,45 @@ def calc_breakeven_price(avg_price: float, fee_pct: float = 0.10) -> float:
 
 def evaluate_setup_grade(cand: dict) -> str:
     """
-    Блок 6.2: Оценивает класс сетапа (Grade A+ [💎] vs B) с учетом текущей серии побед/поражений A+.
-    При серии неудач по A+ (streak <= -2) планка схождения факторов повышается с 3 до 4.
+    Строгий отбор сетапов высшей категории [💎] Grade A+ (без инфляции за счет балла score):
+    Требуется реальное схождение структурных факторов (confluence >= 4, либо >= 5 при серии неудач):
+    - Подтвержденный паттерн Price Action (vcp / pinbar / divergence / breakout = +2, engulfing = +1)
+    - Мощная плита поддержки (вес касаний >= 4 дает +2, вес 3 дает +1)
+    - Часовой аптренд 48ч + MTF выкуп отката (+1)
+    - Подтверждение объемом >= 1.5x (+1)
+    - Независимость от BTC corr < 0.25 (+1)
     """
     confluence = 0
     patterns = cand.get("patterns", [])
     keys = cand.get("reason_keys", [])
     sv = cand.get("signal_values", {})
+    sup_touches = cand.get("sup_touches", 0)
 
-    if len(patterns) >= 2:
+    strong_pats = [p for p in patterns if p in ("pinbar", "divergence", "vcp", "breakout")]
+    if len(strong_pats) >= 1:
         confluence += 2
-    elif len(patterns) == 1:
+    elif len(patterns) >= 1:
         confluence += 1
 
-    if cand.get("sup_touches", 0) >= 3:
+    if sup_touches >= 4:
         confluence += 2
-    elif cand.get("sup_touches", 0) >= 2 or "support_bounce" in keys:
+    elif sup_touches == 3:
         confluence += 1
 
-    if "mtf_dip" in keys or sv.get("volume", 1.0) >= 1.35:
+    if cand.get("gate_1h") == "1H_TREND_OK" and "mtf_dip" in keys:
         confluence += 1
 
-    if cand.get("score", 0.0) >= 7.0:
+    if sv.get("volume", 1.0) >= 1.50:
         confluence += 1
 
-    req_confluence = 4 if getattr(learner, "grade_a_streak", 0) <= -2 else 3
+    if abs(cand.get("corr", 1.0)) < 0.25:
+        confluence += 1
+
+    # Обязательное условие для A+: наличие либо сильного паттерна Price Action, либо бетонной плиты (вес >= 4)
+    if not strong_pats and sup_touches < 4:
+        return "B"
+
+    req_confluence = 5 if getattr(learner, "grade_a_streak", 0) <= -2 else 4
     return "A+" if confluence >= req_confluence else "B"
 
 
@@ -140,10 +153,10 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
                         min_rr: float = None, recent_low_6: float = None,
                         ema50: float = None, e21_1h: float = None, e50_1h: float = None):
     """
-    Блок 3: Умная постановка первичного Стоп-лосса:
-    1. Wick Low Protection: первичный стоп ставится ниже минимального хвоста последних 5-6 свечей (recent_low_6 * 0.997).
-    2. Запрет ставить стоп НА линию EMA 50 в аптренде: уходит под EMA 50 с запасом (EMA 50 - 0.6 * ATR).
-    3. Для контртрендового reversal (когда 1H EMA21 < EMA50) учитывается потолок 1H EMA 21.
+    Умная постановка первичного Стоп-лосса и Тейк-профита:
+    1. Wick Low Protection: стоп ниже хвоста последних 6 свечей (recent_low_6 * 0.997).
+    2. Буфер под EMA 50 в аптренде (EMA 50 - 0.6 * ATR).
+    3. Капитальной стеной сопротивления считается только уровень с весом >= 4 (часовая/многократная плита).
     """
     tier = tier or "SMALL"
     sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.015)
@@ -153,7 +166,6 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     sl_tuning = shadow.sl_mult()
     tp_tuning = shadow.tp_mult()
 
-    # 1. Базовый расчет SL от поддержки или ATR
     sl_dist = 0.0
     if sup and sup_touches >= 2 and sup < entry and (entry - sup) <= 1.8 * a:
         struct_sl = round(sup * 0.997, 8)
@@ -168,7 +180,7 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
         sl_dist = min(sl_dist_raw, entry * (max_sl_allowed / 100.0))
         sl = round(entry - sl_dist, 8)
 
-    # Блок 3.1: Защита от постановки стопа внутри тени (Wick Low Protection)
+    # Защита от постановки стопа внутри тени (Wick Low Protection)
     if recent_low_6 and recent_low_6 > 0 and recent_low_6 < entry:
         wick_safe_sl = round(recent_low_6 * 0.997, 8)
         if wick_safe_sl < sl:
@@ -177,7 +189,7 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
                 sl = wick_safe_sl
                 sl_dist = entry - sl
 
-    # Блок 3.2: Запрет ставить стоп НА линию EMA 50 в аптренде (буфер EMA 50 - 0.6 * ATR)
+    # Запрет ставить стоп НА линию EMA 50 в аптренде
     if ema50 and ema50 > 0 and entry > ema50:
         ema50_safe_sl = round(ema50 - 0.6 * a, 8)
         if sl > ema50_safe_sl and abs(sl - ema50) <= 0.6 * a:
@@ -189,24 +201,22 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     if sl >= entry or (sl_dist / entry * 100) > max_sl_allowed:
         return None, None, False, "Недопустимая дистанция SL"
 
-    # 2. Расчет первого тейк-профита (TP1)
     tp_dist_raw = max(1.65 * a * tp_tuning, sl_dist * 1.35, entry * tp_floor_pct)
     tp = round(entry + tp_dist_raw, 8)
     if min_rr is None:
         min_rr = 1.05 if entry_mode == "sniper" else 0.95
 
-    # Если контртрендовый отскок (reversal при 1H даунтренде) — ограничиваем TP разумной крышей 1H EMA 21
     if entry_mode == "reversal" and e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry * 1.008:
         cap_1h = round(e21_1h * 0.998, 8)
         if cap_1h < tp and (cap_1h - entry) / sl_dist >= 0.85:
             tp = cap_1h
             min_rr = min(min_rr, 0.85)
 
-    # Проверка капитальной стены сопротивления (>= 3 разнесенных касания)
-    if res and res > entry and res_touches >= 3:
+    # Проверка настоящей Капитальной стены сопротивления (структурный вес >= 4)
+    if res and res > entry and res_touches >= 4:
         res_dist_pct = (res - entry) / entry * 100
         if res_dist_pct < 0.35:
-            return None, None, False, f"Капитальная стена сопротивления в упор ({res_dist_pct:.2f}% < 0.35%)"
+            return None, None, False, f"Капитальная стена 1H в упор ({res_dist_pct:.2f}% < 0.35%)"
 
         res_cap_tp = round(res * 0.997, 8)
         if res_cap_tp < tp:
@@ -214,7 +224,7 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
                 tp = res_cap_tp
                 min_rr = min(min_rr, 0.85)
             else:
-                return None, None, False, f"Капитальная стена не дает забрать 0.85x RR (RR={(res_cap_tp - entry)/sl_dist:.2f})"
+                return None, None, False, f"Капитальная стена 1H не дает забрать 0.85x RR (RR={(res_cap_tp - entry)/sl_dist:.2f})"
 
     rr = (tp - entry) / sl_dist
     if tp <= entry or round(rr, 2) < min_rr:
@@ -224,13 +234,6 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
 
 
 def calc_runner_target(symbol: str, current_price: float, candles_15m: list, candles_1h: list = None, pos: dict = None) -> tuple:
-    """
-    Блок 1.2 и 1.3: Расчет потолка «Дышащего Коридора» (Зеленая линия TP):
-    Возвращает (new_tp, can_expand_tp, phase_reason).
-    - На свече кульминации (RSI > 75 или отрыв > 3.5 ATR от EMA50) ЗАПРЕЩЕНО отодвигать тейк вверх (фиксация на пике PONS!).
-    - В контртренде 1H (reversal при 1H EMA21 < EMA50) потолок прижимается к 1H EMA 21 (кейс QNT).
-    - В фазе разгона аптренда (EMA21 > EMA50) потолок расширяется: EMA21 + (2.5..3.5)*ATR.
-    """
     if not candles_15m or len(candles_15m) < 25:
         return round(current_price * 1.03, 8), True, "static"
 
@@ -240,13 +243,11 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
     r15 = rsi(closes)
     a15 = atr(candles_15m)
 
-    # 1. Проверка кульминации / перегрева (Фаза 5 таблицы)
     dist_from_e50_atr = ((current_price - e50) / a15) if a15 > 0 else 0.0
     if r15 > 75 or dist_from_e50_atr > 3.5:
         climax_tp = round(max(current_price, candles_15m[-1]["high"]) * 1.001, 8)
         return climax_tp, False, "climax_freeze"
 
-    # 2. Проверка контртрендового потолка 1H EMA 21 (Фаза 3 таблицы — кейс QNT)
     entry_mode = (pos or {}).get("entry_mode", "sniper")
     if candles_1h and len(candles_1h) >= 50:
         closes_1h = [c["close"] for c in candles_1h]
@@ -256,15 +257,13 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
             if e21_1h > current_price * 1.005:
                 return round(e21_1h * 0.998, 8), False, "1h_ema21_cap"
 
-    # 3. Проверка полки / проторговки (Фаза 4 таблицы — затухание ATR в боковике)
     recent_box = (max(c["high"] for c in candles_15m[-6:]) - min(c["low"] for c in candles_15m[-6:])) / current_price if current_price > 0 else 0.0
     if recent_box <= 0.015 and e21 <= e50 * 1.001:
         old_tp = (pos or {}).get("tp", current_price * 1.02)
         return round(max(old_tp, current_price * 1.012), 8), False, "shelf_freeze"
 
-    # 4. Фаза разгона тренда (Фаза 2 таблицы: EMA21 > EMA50 -> расширение вверх)
     all_res, _ = get_all_sr_levels(candles_15m, candles_1h)
-    res_above = [r[0] for r in all_res if r[0] > current_price * 1.012 and r[1] >= 3]
+    res_above = [r[0] for r in all_res if r[0] > current_price * 1.012 and r[1] >= 4]
 
     mult_atr = 3.2 if (e21 > e50 and r15 >= 58) else 2.5
     corridor_ceiling = e21 + mult_atr * a15
@@ -280,16 +279,6 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
 
 
 def update_position_sl(pos: dict, max_p: float, last_price: float = None, candles_15m: list = None) -> tuple:
-    """
-    Блок 1: Механика «Дышащего Коридора» (Красная линия SL — асимметричный храповик).
-    - Полный отказ от раннего прыжка в БУ на +0.8%!
-    - Стоп никогда не опускается вниз: SL_new = max(SL_old, candidate_sl).
-    - Индивидуальная опора по стратегиям:
-      * sniper 🏹 -> под EMA 50 - 0.8 * ATR
-      * rocket 🚀 -> под EMA 21 - 0.6 * ATR
-      * reversal 🧲 -> до пробоя EMA 50 держит базовый стоп под опорой; после TP1 / закрепления над EMA 50 включает храповик.
-    - В фазе перегрева (RSI > 75 или отрыв > 3.5 ATR) пересаживается ближе к цене под EMA 21 - 0.4 * ATR.
-    """
     avg_p = pos.get("avg", 0.0)
     if avg_p <= 0:
         return False, pos.get("sl"), pos.get("sl_state", "SHIELD"), ""
@@ -307,7 +296,6 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
     breakeven = calc_breakeven_price(avg_p)
     profit_pct = (max_p - avg_p) / avg_p * 100
 
-    # Обновляем кэшированные метрики свечей внутри позиции, если переданы свечи
     if candles_15m and len(candles_15m) >= 50:
         closes = [c["close"] for c in candles_15m]
         pos["_ema21"] = ema(closes, 21)[-1]
@@ -322,40 +310,30 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
 
     is_climax = (r15 > 75) or (a15 > 0 and e50 > 0 and (last_p - e50) > 3.5 * a15)
 
-    # 1. Расчет структурного храповика по EMA (если индикаторы известны)
     ema_ratchet_sl = 0.0
     if a15 > 0 and e21 > 0 and e50 > 0:
         if is_climax and profit_pct >= 1.2:
-            # Фаза 4: Кульминация / Перегрев — зажимаем стоп под быструю EMA 21
             ema_ratchet_sl = e21 - 0.45 * a15
         elif entry_mode == "rocket":
-            # Ракета 🚀 — опора под быструю EMA 21
             if last_p > e21:
                 ema_ratchet_sl = e21 - 0.65 * a15
         elif entry_mode == "sniper":
-            # Снайпер 🏹 — опора под трендовую EMA 50
             if last_p > e50:
                 ema_ratchet_sl = e50 - 0.80 * a15
         elif entry_mode == "reversal":
-            # Ловец дна 🧲 — двухфазный режим: храповик включается только после закрепления над EMA 50 или взятия TP1
             if pos.get("tp1_done") or (last_p > e50 and e21 >= e50 * 0.998):
                 ema_ratchet_sl = e50 - 0.80 * a15
 
-        # Никогда не ставим храповик выше текущей рыночной цены минус минимальный зазор
         if ema_ratchet_sl >= last_p * 0.996:
             ema_ratchet_sl = last_p * 0.995
 
-    # 2. Логика после взятия TP1 (Runner бежит по коридору)
     if pos.get("tp1_done"):
         runner_trail = round(max_p * (1 - cfg["runner_dist"]), 8)
         candidate = max(breakeven, runner_trail, ema_ratchet_sl)
         if candidate > new_sl:
             new_sl = candidate
         new_state = "TRAILING_RUNNER" if new_sl > breakeven * 1.003 else "BREAKEVEN"
-
-    # 3. Логика до TP1 (БЕЗ раннего подброса в БУ на +0.8%!)
     else:
-        # Храповик под EMA может плавно поднимать стоп снизу по мере роста тренда
         if ema_ratchet_sl > new_sl and profit_pct >= 0.8:
             new_sl = ema_ratchet_sl
             if new_sl >= breakeven * 1.003:
@@ -363,7 +341,6 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
             elif new_sl >= breakeven:
                 new_state = "BREAKEVEN"
 
-        # Если цена уже дала сильный разгон (>= lock_trigger_pct, например +2.2%..+3.0%) или кульминацию — запираем профит
         if profit_pct >= cfg["lock_trigger_pct"] or (is_climax and profit_pct >= 1.5):
             lock_sl = round(max_p * (1 - cfg["lock_dist"]), 8)
             candidate = max(breakeven, lock_sl, ema_ratchet_sl)
