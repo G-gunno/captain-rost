@@ -17,14 +17,14 @@ from bot.core.state import bot_state
 
 
 class OrderManagerWorker:
-    """Управляет портфелем: контроль совокупного риска, Grade A+ [💎], лимитки в тень и защита стопов."""
+    """Управляет портфелем: контроль свободного USDT без ухода в минус, 1H Gatekeeper и политики риска."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
         self.signal_queue = self.bus.subscribe("SIGNALS_READY", maxsize=2)
 
     async def run(self):
-        logger.info("💼 Order Manager запущен: контроль Portfolio VaR, 1H Gatekeeper и политик риска...")
+        logger.info("💼 Order Manager запущен: контроль Portfolio VaR, 1H Gatekeeper и свободного баланса...")
         while True:
             try:
                 event = await self.signal_queue.get()
@@ -58,6 +58,13 @@ class OrderManagerWorker:
         )
 
         for cand in candidates:
+            # 0. Жесткий контроль реально свободного USDT (с вычетом уже стоящих лимитных ордеров!)
+            locked_usdt = sum(o["qty"] * o["price"] * (1.0 + paper.FEE_PCT / 100.0) for o in paper.orders)
+            free_usdt = max(0.0, paper.usdt - locked_usdt)
+            if free_usdt < min_usdt_order:
+                logger.debug(f"OrderManager: свободный баланс {free_usdt:.2f} USDT < мин. ордера {min_usdt_order:.2f} USDT — стоп набора")
+                break
+
             sym = cand["symbol"]
             base = sym[:-4]
 
@@ -74,9 +81,10 @@ class OrderManagerWorker:
             e21_15m = cand.get("e21", 0.0)
             e50_15m = cand.get("e50", 0.0)
 
-            # Блок 4.1: Проверка структурного сброса карантина (кейс WAL)
+            # Структурный сброс карантина при возврате над EMA21 (кейс WAL/ARB),
+            # но БЕЗ обхода активного кулдауна через флаг is_accum!
             bot_state.check_structural_reset(sym, cand["last"], e21_15m, e50_15m)
-            if bot_state.is_on_cooldown(sym) and not is_accum:
+            if bot_state.is_on_cooldown(sym):
                 continue
 
             if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
@@ -87,7 +95,6 @@ class OrderManagerWorker:
             entry_mode = cand.get("entry_mode", "sniper")
             is_mom = cand.get("is_momentum", False)
 
-            # Блок 4.2: Блокировка повторной ловли ножа ниже предыдущего стопа
             if entry_mode == "reversal":
                 can_rev, rev_reason = bot_state.can_enter_reversal(sym, cand["last"], e21_15m)
                 if not can_rev:
@@ -102,14 +109,14 @@ class OrderManagerWorker:
                 logger.debug(f"OrderManager: {sym} пропущен (лимит сектора {sector}: {lim})")
                 continue
 
-            # 3. Барьер качества Grade A+ [💎] для режима STRICT / CAUTIOUS
+            # 3. Оценка класса сетапа Grade A+ [💎]
             grade = evaluate_setup_grade(cand)
             if policy["require_grade_a_for_alt"] and entry_mode in ("reversal", "rocket"):
                 if grade != "A+":
                     logger.info(f"OrderManager: {sym} пропущен -> режим {risk_mode} требует [💎] A+ для {entry_mode} (текущий: {grade})")
                     continue
 
-            thr = thrs.get(entry_mode, 6.0)
+            thr = cand.get("thr") or thrs.get(entry_mode, 6.0)
             off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], entry_mode, tier=tier, is_accumulation=is_accum)
 
             t_data = tickers.get(sym, {})
@@ -117,7 +124,6 @@ class OrderManagerWorker:
             ideal_entry = cand["last"] * (1 + off)
             entry = min(ideal_entry, bid1)
 
-            # Блок 2.2: Вход на ретесте и базе с учетом глубины тени (Second Test / Base Entry)
             wick_entry = cand.get("wick_entry_price")
             if entry_mode == "reversal" and wick_entry and 0 < wick_entry < entry:
                 entry = max(wick_entry, cand["last"] * 0.985)
@@ -135,12 +141,12 @@ class OrderManagerWorker:
             if a <= 0:
                 continue
 
-            # Поиск актуального сопротивления относительно цены входа
+            # Поиск ближайшей капитальной стены относительно цены входа
             all_res = cand.get("signal_values", {}).get("all_res", [])
             res_above_entry = []
             for r_item in all_res:
                 r_val, r_tch = r_item if isinstance(r_item, (list, tuple)) else (r_item, 2)
-                if r_val > entry * 1.0015:
+                if r_val > entry * 1.0025:
                     res_above_entry.append((r_val, r_tch))
 
             if res_above_entry:
@@ -168,7 +174,7 @@ class OrderManagerWorker:
                 logger.info(f"OrderManager: {sym} отклонён -> {rej_reason}")
                 continue
 
-            # 4. Бюджетирование совокупного риска (Portfolio VaR)
+            # 4. Бюджетирование совокупного риска (Portfolio VaR) и свободного USDT
             sl_dist_pct = (entry - sl) / entry * 100
             if sl_dist_pct <= 0:
                 continue
@@ -185,14 +191,14 @@ class OrderManagerWorker:
             size_by_risk = (equity * (effective_risk_pct / 100.0)) / (sl_dist_pct / 100.0)
 
             size_base = buy_size(
-                equity, cand["score"], thr, cand["liquidity"], paper.usdt,
+                equity, cand["score"], thr, cand["liquidity"], free_usdt,
                 entry_mode=entry_mode, grade=grade
             )
 
-            size = min(size_base, size_by_risk, paper.usdt * 0.95, equity * 0.12)
+            # Никогда не превышаем реально доступный остаток free_usdt (с запасом 1% на комиссию)
+            size = min(size_base, size_by_risk, free_usdt * 0.98, equity * 0.12)
             size = round(size, 2)
 
-            # Блок 6.3: Отсекаем микро-покупки ниже оптимизированного порога
             if size < min_usdt_order:
                 logger.debug(f"OrderManager: {sym} пропущен (размер {size:.2f} < мин. порога {min_usdt_order:.2f} USDT)")
                 continue
@@ -202,7 +208,13 @@ class OrderManagerWorker:
 
             order.update({
                 "sector": sector, "tier": tier, "corr": cand.get("corr"),
-                "regime": regime, "is_momentum": is_mom, "entry_mode": entry_mode,
+                "regime": regime, "risk_mode": risk_mode,
+                "thr": thr,
+                "gate_1h": cand.get("gate_1h", "1H_TREND_OK"),
+                "reason_1h": cand.get("reason_1h", ""),
+                "chg_48h": cand.get("chg_48h", 0.0),
+                "reasons": cand.get("reasons", []),
+                "is_momentum": is_mom, "entry_mode": entry_mode,
                 "nearest_res": entry_res,
                 "res_touches": res_touches,
                 "nearest_sup": sup,
@@ -222,11 +234,15 @@ class OrderManagerWorker:
             sl_pct = (sl - entry) / entry * 100
             g_badge = " [💎]" if grade == "A+" else ""
 
-            logger.info(f"OrderManager: 🎯 {sym} ОРДЕР {entry_mode}{g_badge}: entry=${fmt_price(entry)}, TP=${fmt_price(tp)}, SL=${fmt_price(sl)}")
+            logger.info(
+                f"OrderManager: 🎯 {sym} ОРДЕР {entry_mode}{g_badge}: entry=${fmt_price(entry)}, "
+                f"TP=${fmt_price(tp)}, SL=${fmt_price(sl)} | 1H: {cand.get('reason_1h', '')}"
+            )
 
             self._notify(
                 f"📋 <b>Ордер</b> · {pair_html(sym, order)}{g_badge}\n"
                 f"💵 {usd(size)} · 📥 {fmt_price(entry)} ({off * 100:+.2f}%){corr_txt(cand)}\n"
                 f"🎯 {fmt_price(tp)} ({fmt_pct(tp_pct)}) · 🛡📉 {fmt_price(sl)} ({fmt_pct(sl_pct)})\n"
-                f"⭐ {cand['score']:.1f} · 🧠 {'; '.join(cand['reasons'][:3])}"
+                f"⭐ {cand['score']:.1f}/{thr:g} · 🕐 {cand.get('reason_1h', '')}\n"
+                f"🧠 {'; '.join(cand['reasons'][:3])}"
             )
