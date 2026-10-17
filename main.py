@@ -539,7 +539,7 @@ async def cmd_status(update, context):
         eq = paper.equity(prices)
 
         locked_usdt = sum(o["qty"] * o["price"] for o in paper.orders)
-        available_usdt = paper.usdt - locked_usdt
+        available_usdt = max(0.0, paper.usdt - locked_usdt)
         free_pct = available_usdt / eq * 100 if eq else 0
 
         metrics_all = paper.get_metrics(prices)
