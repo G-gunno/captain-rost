@@ -15,7 +15,7 @@ MAX_TOTAL_EVENTS = 5000
 
 
 class PaperExchange:
-    """Виртуальная биржа с сохранением полной аналитики сделок (1H Gatekeeper, reasons, тайминги) для 24ч аудита."""
+    """Виртуальная биржа с сохранением полной аналитики сделок (1H Gatekeeper, reasons, тайминги, 🛡🔥 ABOVE_TP1) для 24ч аудита."""
 
     FEE_PCT = 0.10
 
@@ -171,6 +171,7 @@ class PaperExchange:
                     pos["gate_1h"] = order.get("gate_1h", "1H_TREND_OK")
                     pos["reason_1h"] = order.get("reason_1h", "")
                     pos["chg_48h"] = order.get("chg_48h", 0.0)
+                    pos["pos_in_48h"] = order.get("pos_in_48h", 0.5)
                     pos["corr"] = order.get("corr")
                     pos["reasons"] = order.get("reasons", [])
                     pos["reason_keys"] = order.get("reason_keys", [])
@@ -189,6 +190,9 @@ class PaperExchange:
                     pos["sup_touches"] = order.get("sup_touches", 0)
                     pos["res_touches"] = order.get("res_touches", 0)
                     pos["sl_state"] = order.get("sl_state", "SHIELD")
+                    pos["_ema21"] = order.get("_ema21", 0.0)
+                    pos["_ema50"] = order.get("_ema50", 0.0)
+                    pos["_atr15"] = order.get("_atr15", 0.0)
                     pos["_last_sl_notify_ts"] = 0
                     self.trades.append({
                         "side": "Buy",
@@ -301,6 +305,8 @@ class PaperExchange:
         elif "SL" in reason or "🛡" in reason:
             if is_be:
                 exit_type = "🛡🔒"
+            elif sl_state == "ABOVE_TP1":
+                exit_type = "🛡🔥"
             elif sl_state == "TRAILING_RUNNER":
                 exit_type = "🛡📈"
             elif sl_state in ("PROFIT_LOCK", "BREAKEVEN") and total_pnl_pct > 0.25:
@@ -385,6 +391,7 @@ class PaperExchange:
             "gate_1h": pos.get("gate_1h", ""),
             "reason_1h": pos.get("reason_1h", ""),
             "chg_48h": pos.get("chg_48h", 0.0),
+            "pos_in_48h": pos.get("pos_in_48h", 0.5),
             "corr": pos.get("corr"),
             "reasons": pos.get("reasons", []),
             "reason_keys": pos.get("reason_keys", []),
