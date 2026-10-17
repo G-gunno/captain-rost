@@ -11,6 +11,7 @@ STATE_FILE = Path(os.getenv("STORAGE_DIR", "storage")) / "shadow.json"
 REMOTE_PATH = "shadow.json"
 
 OBS_GAP = 2.0
+H1 = 3600
 H4 = 4 * 3600
 H24 = 24 * 3600
 PUMP_PCT = 3.0
@@ -31,7 +32,7 @@ def _band(score):
 
 
 class Shadow:
-    """Теневой журнал: наблюдает монеты, считает реальные MFE-пампы за 24ч и калибрует пороги."""
+    """Теневой журнал: наблюдает монеты, использует 4ч оперативный контур + 24ч финал и калибрует пороги."""
 
     def __init__(self):
         self.episodes = {}
@@ -102,7 +103,8 @@ class Shadow:
             traded = (sym in paper.positions or any(o["symbol"] == sym for o in paper.orders))
 
             self.episodes[sym] = {
-                "ts": now, "price": c["last"], "max_score": c["score"],
+                "ts": now, "price": c["last"], "last": c["last"],
+                "max_score": c["score"],
                 "regime": regime, "entry_mode": mode,
                 "sector": c.get("sector"), "tier": c.get("tier"),
                 "keys": c.get("reason_keys", []), "traded": bool(traded),
@@ -124,6 +126,7 @@ class Shadow:
             if not t:
                 continue
             last = t["last"]
+            ep["last"] = last
             ep["hi"] = max(ep["hi"], last)
             ep["lo"] = min(ep["lo"], last)
 
@@ -138,6 +141,62 @@ class Shadow:
             if age >= H24:
                 self._close(sym, ep, last)
         self.save()
+
+    def _combined_agg(self) -> dict:
+        """
+        Объединяет закрытую 24ч статистику (self.agg) с оперативным контуром активных эпизодов
+        старше 1 часа (age >= 3600), чтобы автотюн и /learn работали уже в первые часы после сброса!
+        """
+        merged = {}
+        for k, v in self.agg.items():
+            merged[k] = {
+                "n": v.get("n", 0),
+                "sum4": v.get("sum4", 0.0),
+                "sum24": v.get("sum24", 0.0),
+                "pumps4": v.get("pumps4", 0),
+                "pumps24": v.get("pumps24", 0),
+                "traded": v.get("traded", 0),
+                "sum_mae": v.get("sum_mae", 0.0),
+                "sum_mfe": v.get("sum_mfe", 0.0),
+                "sum_pull": v.get("sum_pull", 0.0),
+                "sum_pull_pump": v.get("sum_pull_pump", 0.0),
+                "sum_mae_pump": v.get("sum_mae_pump", 0.0),
+            }
+
+        now = time.time()
+        for sym, ep in self.episodes.items():
+            age = now - ep.get("ts", now)
+            dec = ep.get("price", 0.0)
+            if age < H1 or dec <= 0:
+                continue
+            ref_last = ep.get("p4") or ep.get("last") or dec
+            move_cur = (ref_last - dec) / dec * 100
+            mae = (ep.get("lo", dec) - dec) / dec * 100
+            mfe = (ep.get("hi", dec) - dec) / dec * 100
+            pullback = (ep.get("lo_before_pump", ep.get("lo", dec)) - dec) / dec * 100
+            did_pump = bool(ep.get("pumped") or mfe >= PUMP_PCT or move_cur >= PUMP_PCT)
+
+            mode = ep.get("entry_mode", "sniper")
+            key = f"{ep.get('regime', 'neutral')}|{mode}|{_band(ep.get('max_score', 6.0))}"
+            a = merged.setdefault(key, {
+                "n": 0, "sum4": 0.0, "sum24": 0.0, "pumps4": 0, "pumps24": 0,
+                "traded": 0, "sum_mae": 0.0, "sum_mfe": 0.0, "sum_pull": 0.0,
+                "sum_pull_pump": 0.0, "sum_mae_pump": 0.0,
+            })
+            a["n"] += 1
+            a["sum4"] += move_cur
+            a["sum24"] += move_cur
+            a["sum_mae"] += mae
+            a["sum_mfe"] += mfe
+            a["sum_pull"] += mae
+            if did_pump:
+                a["pumps24"] += 1
+                a["sum_pull_pump"] += pullback
+                a["sum_mae_pump"] += mae
+            if ep.get("success"):
+                a["traded"] += 1
+
+        return merged
 
     def _close(self, sym, ep, last):
         dec = ep["price"]
@@ -171,8 +230,6 @@ class Shadow:
         if move4 >= PUMP_PCT:
             a["pumps4"] += 1
 
-        # Засчитываем памп по факту достижения +3% внутри 24ч окна (MFE >= 3% или ep['pumped']),
-        # чтобы число пампов никогда не было меньше числа успешных сделок!
         did_pump = bool(ep.get("pumped") or mfe >= PUMP_PCT or move24 >= PUMP_PCT)
         if did_pump:
             a["pumps24"] += 1
@@ -196,9 +253,11 @@ class Shadow:
         if not self.tuning["auto"]:
             return
         now = time.time()
-        if now - self._last_tune < 3600:
+        if now - self._last_tune < 1800:
             return
         self._last_tune = now
+
+        active_agg = self._combined_agg()
 
         for mode in ["rocket", "sniper", "reversal"]:
             nudge = 0.0
@@ -207,7 +266,7 @@ class Shadow:
             mode_n = 0
             mode_sum24 = 0.0
 
-            for key, a in self.agg.items():
+            for key, a in active_agg.items():
                 if f"|{mode}|" in key:
                     mode_n += a["n"]
                     mode_pumps += a["pumps24"]
@@ -231,7 +290,7 @@ class Shadow:
         sum_pull_pump = 0.0
         sum_mae_pump = 0.0
 
-        for a in self.agg.values():
+        for a in active_agg.values():
             pumps = a.get("pumps24", 0)
             total_pumps += pumps
             total_missed_pumps += max(0, pumps - a.get("traded", 0))
@@ -318,14 +377,15 @@ class Shadow:
         self.save()
 
     def learn_lines(self):
-        out = ["👁 <b>Теневой журнал</b> · упущенные возможности (24ч)"]
+        out = ["👁 <b>Теневой журнал</b> · упущенные возможности (4ч/24ч)"]
         out.append(f"   автотюн: {'🟢 вкл' if self.tuning['auto'] else '🔴 выкл'} · "
                    f"эпизодов: {len(self.episodes)}")
         shown = False
         reg_emoji = {"bull": "🟢", "neutral": "🟡", "bear": "🔴"}
 
-        for key in sorted(self.agg):
-            a = self.agg[key]
+        active_agg = self._combined_agg()
+        for key in sorted(active_agg):
+            a = active_agg[key]
             if a["n"] < 3:
                 continue
 
