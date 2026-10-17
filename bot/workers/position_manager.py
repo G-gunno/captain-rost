@@ -87,7 +87,7 @@ class PositionManagerWorker:
             if not t:
                 continue
 
-            score_pos, candles = await live_score(sym, t, regime, btc_ret, news_items, deriv_t=deriv_tickers.get(sym), is_open_pos=True)
+            score_pos, candles = await live_score(sym, t, regime, btc_ret, news_items, deriv_t=deriv_tickers.get(sym), is_open_pos=True, btc_candles=btc_candles)
             if score_pos is None or not candles:
                 continue
 
@@ -162,13 +162,15 @@ class PositionManagerWorker:
                     old_tp = pos["tp"]
                     pos["tp"] = next_target
                     pos["sl"] = max(pos["sl"], round(old_tp * 0.995, 8))
-                    pos["sl_state"] = "TRAILING_RUNNER"
+                    tp1_p = pos.get("tp1_price") or pos.get("initial_tp") or 0.0
+                    pos["sl_state"] = "ABOVE_TP1" if (tp1_p > 0 and pos["sl"] >= tp1_p) else "TRAILING_RUNNER"
+                    sl_tag = sl_emoji(pos["sl_state"])
                     paper.save()
                     paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP🏃🏻‍➡️ поднят", mode="TP🏃🏻‍➡️", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
-                    self._notify(f"TP🏃🏻‍➡️ <b>Потолок коридора поднят</b> · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · 🛡📈 {fmt_price(pos['sl'])}")
+                    self._notify(f"TP🏃🏻‍➡️ <b>Потолок коридора поднят</b> · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · {sl_tag} {fmt_price(pos['sl'])}")
 
         # =====================================================================
-        # 2. ПРОВЕРКА НЕИСПОЛНЕННЫХ ОРДЕРОВ (ЗАЩИТА БАЗЫ И ЗОНА ЗАМОРОЗКИ)
+        # 2. ПРОВЕРКА НЕИСПОЛНЕННЫХ ОРДЕРОВ (С ПРОЗРАЧНЫМ ЛОГИРОВАНИЕМ СНЯТИЯ)
         # =====================================================================
         for order in list(paper.orders):
             sym = order["symbol"]
@@ -184,6 +186,7 @@ class PositionManagerWorker:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Токсичные новости", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 7200)
+                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> токсичные новости ({neg}/{mentions})")
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ (новости)")
                 continue
 
@@ -194,7 +197,8 @@ class PositionManagerWorker:
                 sym, t, regime, btc_ret, news_items,
                 deriv_t=deriv_tickers.get(sym),
                 saved_patterns=patterns,
-                saved_mode=entry_mode
+                saved_mode=entry_mode,
+                btc_candles=btc_candles,
             )
             if score_now is None or not candles:
                 continue
@@ -218,6 +222,7 @@ class PositionManagerWorker:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], f"Умер ({init_score:.1f}-{score_now:.1f})", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 300)
+                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> ☠️⚰️ слом тренда ({init_score:.1f} -> {score_now:.1f})")
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ ({init_score:.1f}-{score_now:.1f})")
                 continue
 
@@ -225,6 +230,7 @@ class PositionManagerWorker:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], f"Ослаб ({score_now:.1f})", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 300)
+                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> 🪫📉 ослаб сигнал ({score_now:.1f} < {thr - 1.5:.2f})")
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🪫📉 ({score_now:.1f})")
                 continue
 
@@ -232,6 +238,7 @@ class PositionManagerWorker:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Улетела без нас", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 300)
+                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> 🚀👋🏻 улетела без нас (last=${fmt_price(t['last'])} vs ord=${fmt_price(order['price'])})")
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🚀👋🏻")
                 continue
 
@@ -239,6 +246,7 @@ class PositionManagerWorker:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Тайм-аут 2ч", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 420)
+                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> ☠️⚰️ тайм-аут 2ч ({init_score:.1f}-{score_now:.1f})")
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ ({init_score:.1f}-{score_now:.1f})")
                 continue
 
@@ -309,7 +317,6 @@ class PositionManagerWorker:
             )
 
             if is_valid and action_type:
-                # Сохраняем неизменной долларовую стоимость ордера, чтобы реквот никогда не уводил баланс в минус
                 old_notional = order["qty"] * order["price"]
                 order["price"] = target_price
                 order["qty"] = old_notional / target_price if target_price > 0 else order["qty"]
@@ -324,5 +331,6 @@ class PositionManagerWorker:
                 paper.save()
 
                 msg_desc = "база" if action_type == "hunt_up" else f"{dev_pct:.2f}%"
+                logger.info(f"PositionManager: 📐 Сдвиг ордера {sym} ({action_type}) -> new_entry=${fmt_price(target_price)}, SL=${fmt_price(sl)}")
                 paper.log_event(sym, "order_moved", order["price"], f"Сдвиг: {action_type}", tp=order["tp"], sl=order["sl"], sup=entry_sup, res=entry_res)
                 self._notify(f"📐 <b>Сдвиг {price_icon}</b> · {pair_html(sym, order)}\n📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · 🛡📉 {fmt_price(order['sl'])} · {msg_desc}")
