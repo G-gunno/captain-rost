@@ -7,7 +7,7 @@ TIER_SL_FLOOR = {
     "TOP20": 0.009,  # 0.9%
     "MID":   0.012,  # 1.2%
     "SMALL": 0.015,  # 1.5%
-    "MICRO": 0.020,  # 2.0%
+    "MICRO": 0.018,  # 1.8%
 }
 
 TIER_TP_FLOOR = {
@@ -17,18 +17,19 @@ TIER_TP_FLOOR = {
     "MICRO": 0.018,  # 1.8%
 }
 
+# Снижены потолки максимального стопа, чтобы исключить одиночные пробои по -4.15% (кейс ERA)
 TIER_MAX_SL = {
-    "TOP20": 2.2,
-    "MID":   2.8,
-    "SMALL": 3.4,
-    "MICRO": 4.2,
+    "TOP20": 2.0,
+    "MID":   2.4,
+    "SMALL": 2.6,
+    "MICRO": 2.9,
 }
 
 TIER_TRAIL_CONFIG = {
-    "TOP20": {"runner_dist": 0.009, "lock_trigger_pct": 1.8, "lock_dist": 0.006},
-    "MID":   {"runner_dist": 0.012, "lock_trigger_pct": 2.2, "lock_dist": 0.008},
-    "SMALL": {"runner_dist": 0.015, "lock_trigger_pct": 2.6, "lock_dist": 0.010},
-    "MICRO": {"runner_dist": 0.020, "lock_trigger_pct": 3.0, "lock_dist": 0.014},
+    "TOP20": {"runner_dist": 0.009, "lock_trigger_pct": 1.6, "lock_dist": 0.006},
+    "MID":   {"runner_dist": 0.011, "lock_trigger_pct": 2.0, "lock_dist": 0.008},
+    "SMALL": {"runner_dist": 0.014, "lock_trigger_pct": 2.3, "lock_dist": 0.009},
+    "MICRO": {"runner_dist": 0.018, "lock_trigger_pct": 2.6, "lock_dist": 0.012},
 }
 
 TRADE_POLICIES = {
@@ -82,14 +83,19 @@ def calc_breakeven_price(avg_price: float, fee_pct: float = 0.10) -> float:
 
 def evaluate_setup_grade(cand: dict) -> str:
     """
-    Строгий отбор сетапов высшей категории [💎] Grade A+ (без инфляции за счет балла score):
-    Требуется реальное схождение структурных факторов (confluence >= 4, либо >= 5 при серии неудач):
-    - Подтвержденный паттерн Price Action (vcp / pinbar / divergence / breakout = +2, engulfing = +1)
-    - Мощная плита поддержки (вес касаний >= 4 дает +2, вес 3 дает +1)
-    - Часовой аптренд 48ч + MTF выкуп отката (+1)
-    - Подтверждение объемом >= 1.5x (+1)
-    - Независимость от BTC corr < 0.25 (+1)
+    Строгий отбор сетапов высшей категории [💎] Grade A+:
+    - Запрет выдавать [💎] A+ на крыше 48-часового диапазона (pos_in_48h > 0.70) или при высокой корреляции с BTC (> 0.55).
+    - Обязательное схождение структурных факторов: сильный паттерн Price Action / часовая плита >= 4x + объем + MTF.
     """
+    pos_in_48h = cand.get("pos_in_48h", 0.5)
+    corr = abs(cand.get("corr", 1.0))
+    entry_mode = cand.get("entry_mode", "sniper")
+
+    if entry_mode in ("sniper", "rocket") and pos_in_48h > 0.70:
+        return "B"
+    if corr > 0.55:
+        return "B"
+
     confluence = 0
     patterns = cand.get("patterns", [])
     keys = cand.get("reason_keys", [])
@@ -107,16 +113,15 @@ def evaluate_setup_grade(cand: dict) -> str:
     elif sup_touches == 3:
         confluence += 1
 
-    if cand.get("gate_1h") == "1H_TREND_OK" and "mtf_dip" in keys:
+    if cand.get("gate_1h") == "1H_TREND_OK" and ("mtf_dip" in keys or pos_in_48h <= 0.65):
         confluence += 1
 
-    if sv.get("volume", 1.0) >= 1.50:
+    if sv.get("volume", 1.0) >= 1.45:
         confluence += 1
 
-    if abs(cand.get("corr", 1.0)) < 0.25:
+    if corr < 0.25:
         confluence += 1
 
-    # Обязательное условие для A+: наличие либо сильного паттерна Price Action, либо бетонной плиты (вес >= 4)
     if not strong_pats and sup_touches < 4:
         return "B"
 
@@ -161,7 +166,7 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     tier = tier or "SMALL"
     sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.015)
     tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.016)
-    max_sl_allowed = TIER_MAX_SL.get(tier, 3.4)
+    max_sl_allowed = TIER_MAX_SL.get(tier, 2.6)
 
     sl_tuning = shadow.sl_mult()
     tp_tuning = shadow.tp_mult()
@@ -175,12 +180,11 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
             sl = round(entry - sl_dist, 8)
 
     if sl_dist <= 0:
-        base_mult = 0.85 if is_mom else (1.55 if entry_mode == "reversal" else 1.20)
+        base_mult = 0.85 if is_mom else (1.50 if entry_mode == "reversal" else 1.20)
         sl_dist_raw = max(base_mult * a * sl_tuning, entry * sl_floor_pct)
         sl_dist = min(sl_dist_raw, entry * (max_sl_allowed / 100.0))
         sl = round(entry - sl_dist, 8)
 
-    # Защита от постановки стопа внутри тени (Wick Low Protection)
     if recent_low_6 and recent_low_6 > 0 and recent_low_6 < entry:
         wick_safe_sl = round(recent_low_6 * 0.997, 8)
         if wick_safe_sl < sl:
@@ -189,7 +193,6 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
                 sl = wick_safe_sl
                 sl_dist = entry - sl
 
-    # Запрет ставить стоп НА линию EMA 50 в аптренде
     if ema50 and ema50 > 0 and entry > ema50:
         ema50_safe_sl = round(ema50 - 0.6 * a, 8)
         if sl > ema50_safe_sl and abs(sl - ema50) <= 0.6 * a:
@@ -212,7 +215,6 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
             tp = cap_1h
             min_rr = min(min_rr, 0.85)
 
-    # Проверка настоящей Капитальной стены сопротивления (структурный вес >= 4)
     if res and res > entry and res_touches >= 4:
         res_dist_pct = (res - entry) / entry * 100
         if res_dist_pct < 0.35:
@@ -279,6 +281,14 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
 
 
 def update_position_sl(pos: dict, max_p: float, last_price: float = None, candles_15m: list = None) -> tuple:
+    """
+    Дышащий Коридор с 5 фазами стопа:
+    - SHIELD (🛡📉): первичный стоп
+    - BREAKEVEN (🛡🔒): безубыток
+    - PROFIT_LOCK (🛡💼): фиксация прибыли ДО взятия TP1 (с ускоренным поджатием для 🚀 rocket — кейс MANA)
+    - TRAILING_RUNNER (🛡📈): динамический трейлинг ПОСЛЕ взятия TP1 (ниже уровня TP1)
+    - ABOVE_TP1 (🛡🔥): стоп-лосс перешагнул ВЫШЕ уровня первого тейка (TP1)!
+    """
     avg_p = pos.get("avg", 0.0)
     if avg_p <= 0:
         return False, pos.get("sl"), pos.get("sl_state", "SHIELD"), ""
@@ -286,6 +296,7 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
     last_p = last_price or max_p
     tier = pos.get("tier") or "SMALL"
     entry_mode = pos.get("entry_mode", "sniper")
+    is_rocket = (entry_mode == "rocket" or pos.get("is_momentum", False))
     cfg = TIER_TRAIL_CONFIG.get(tier, TIER_TRAIL_CONFIG["SMALL"])
 
     current_sl = round(float(pos.get("sl", 0.0)), 8)
@@ -295,6 +306,9 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
 
     breakeven = calc_breakeven_price(avg_p)
     profit_pct = (max_p - avg_p) / avg_p * 100
+    tp_price = float(pos.get("tp", 0.0))
+    init_tp = float(pos.get("initial_tp") or tp_price)
+    tp_target_pct = ((init_tp - avg_p) / avg_p * 100) if init_tp > avg_p else 3.0
 
     if candles_15m and len(candles_15m) >= 50:
         closes = [c["close"] for c in candles_15m]
@@ -313,10 +327,11 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
     ema_ratchet_sl = 0.0
     if a15 > 0 and e21 > 0 and e50 > 0:
         if is_climax and profit_pct >= 1.2:
-            ema_ratchet_sl = e21 - 0.45 * a15
-        elif entry_mode == "rocket":
+            ema_ratchet_sl = e21 - 0.40 * a15
+        elif is_rocket:
+            # Для ракеты 🚀 поджимаем стоп значительно плотнее под быструю EMA 21
             if last_p > e21:
-                ema_ratchet_sl = e21 - 0.65 * a15
+                ema_ratchet_sl = e21 - 0.35 * a15
         elif entry_mode == "sniper":
             if last_p > e50:
                 ema_ratchet_sl = e50 - 0.80 * a15
@@ -328,12 +343,38 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
             ema_ratchet_sl = last_p * 0.995
 
     if pos.get("tp1_done"):
-        runner_trail = round(max_p * (1 - cfg["runner_dist"]), 8)
+        tp1_ref = float(pos.get("tp1_price") or pos.get("initial_tp") or 0.0)
+        runner_dist = cfg["runner_dist"] * (0.80 if is_rocket else 1.0)
+        runner_trail = round(max_p * (1 - runner_dist), 8)
         candidate = max(breakeven, runner_trail, ema_ratchet_sl)
         if candidate > new_sl:
             new_sl = candidate
-        new_state = "TRAILING_RUNNER" if new_sl > breakeven * 1.003 else "BREAKEVEN"
+
+        # Если стоп поднялся до или выше цены первого тейка TP1 -> присваиваем элитный статус 🛡🔥 ABOVE_TP1!
+        if tp1_ref > 0 and new_sl >= tp1_ref * 0.9995:
+            new_state = "ABOVE_TP1"
+        elif new_sl > breakeven * 1.003:
+            new_state = "TRAILING_RUNNER"
+        else:
+            new_state = "BREAKEVEN"
     else:
+        # 1. Агрессивная защита импульса для 🚀 Ракета ДО взятия TP1 (кейс MANA)
+        if is_rocket:
+            # При прохождении >= 45% пути к TP1 (или +1.15% профита) — перенос в безубыток 🛡🔒
+            if profit_pct >= max(1.15, tp_target_pct * 0.45):
+                if breakeven > new_sl:
+                    new_sl = breakeven
+                    new_state = "BREAKEVEN"
+            # При прохождении >= 62% пути к TP1 (или +1.65% профита) — жесткий профит-лок 🛡💼 (фиксируем 48% импульса)
+            if profit_pct >= max(1.65, tp_target_pct * 0.62):
+                rocket_lock = round(avg_p + (max_p - avg_p) * 0.48, 8)
+                rocket_trail = round(max_p * (1 - cfg["lock_dist"] * 0.80), 8)
+                candidate = max(breakeven, rocket_lock, rocket_trail, ema_ratchet_sl)
+                if candidate > new_sl:
+                    new_sl = candidate
+                    new_state = "PROFIT_LOCK" if new_sl > breakeven * 1.002 else "BREAKEVEN"
+
+        # 2. Стандартный храповик по EMA и порогу lock_trigger_pct
         if ema_ratchet_sl > new_sl and profit_pct >= 0.8:
             new_sl = ema_ratchet_sl
             if new_sl >= breakeven * 1.003:
