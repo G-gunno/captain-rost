@@ -1,11 +1,14 @@
-from datetime import datetime, timedelta
+import html as _html
+import json
 import time
 from collections import defaultdict
+from datetime import datetime, timedelta
 
 from bot.exchange.market_data import market_data
 from bot.exchange.paper_exchange import paper
 from bot.strategy.learner import learner, is_neutral_be
 from bot.news.cmc import TIER_EMOJI
+from bot.core.state import bot_state
 from bot.utils.format import (
     format_coin, sl_emoji, grade_badge, mode_emoji,
     usd, fmt_price, fmt_pct, pnl_emoji
@@ -24,10 +27,13 @@ def _fmt_ts(ts: int, tz) -> str:
     return datetime.fromtimestamp(int(ts), tz).strftime("%H:%M")
 
 
-async def build_trades_audit_24h(tz) -> str:
+async def build_audit_html(tz, public_url: str = "") -> str:
     """
-    Генерирует подробный табличный аудит всех сделок, монет и открытых позиций за последние 24 часа.
-    Прикрепляется отдельным файлом при вызове /chart и /log.
+    Генерирует интерактивный веб-дашборд инфографики за 24 часа (/audit):
+- KPI-карточки в шапке
+- 3 интерактивных графика Plotly (Кривая капитала 24ч, PnL по секторам, Донат типов выходов)
+- 3 интерактивные таблицы (Открытые позиции и ордера, Рейтинг монет, Хронология сделок)
+      с прямыми кликабельными ссылками на свечной график каждой монеты (/chart?symbol=...).
     """
     prices = await market_data.get_tickers()
     eq = paper.equity(prices)
@@ -51,91 +57,98 @@ async def build_trades_audit_24h(tz) -> str:
     losses = [r for r in decisive if r["pnl"] <= 0]
     clean_wr = (len(wins) / len(decisive) * 100) if decisive else 0.0
 
-    out = []
-    out.append("========================================================================================================================")
-    out.append(f"📊 КАПИТАН РОСТ — ПОЛНЫЙ АУДИТ СДЕЛОК И МОНЕТ ЗА 24 ЧАСА ({now.strftime('%Y-%m-%d %H:%M %Z')})")
-    out.append("========================================================================================================================")
-    out.append(
-        f"Капитал: {usd(eq)} | Доступно: {usd(avail_usdt)} | В ордерах: {usd(locked_usdt)} | Накопления: {usd(paper.funding)}\n"
-        f"Сделок (24ч): {len(closed_24h)} (✅ Побед: {len(wins)} | ❌ Стопов: {len(losses)} | 🛡🔒 БУ: {len(be_trades)} | 🔥 TP1: {metrics_24h['partial_count']})\n"
-        f"Чистый Winrate: {clean_wr:.1f}% | PF: {metrics_24h['profit_factor'] or 0:.2f} | Max DD: {metrics_24h['max_drawdown_pct']:.1f}% | PnL 24ч: {usd(metrics_24h['total_pnl'])}\n"
-        f"Сетапы [💎] A+: WR {a_stats['wr']:.0%} ({a_stats['decisive']} рез. + {a_stats['be']} БУ) | Вес доверия: x{a_stats['mult']:.2f} (серия {a_stats['streak']:+d})\n"
-        f"Текущий режим риска ИИ: {learner.current_risk_mode} (строгость {learner.threshold_adj:+.2f})"
-    )
-    out.append("")
+    # --- ДАННЫЕ ДЛЯ ГРАФИКОВ PLOTLY ---
+    # 1. Кривая накопленного PnL ($) за 24ч
+    eq_times = ["Старт 24ч"]
+    eq_vals = [0.0]
+    eq_texts = ["Начало отсчёта"]
+    cum_pnl = 0.0
+    for t in closed_24h:
+        cum_pnl = round(cum_pnl + float(t.get("pnl", 0.0)), 2)
+        sym_b = t["symbol"][:-4] if t["symbol"].endswith("USDT") else t["symbol"]
+        eq_times.append(_fmt_ts(t.get("time"), tz) + f" ({sym_b})")
+        eq_vals.append(cum_pnl)
+        eq_texts.append(f"{sym_b}: {t['pnl_pct']:+.2f}% ({usd(t['pnl'])}) · {t.get('exit_type', '')}")
 
-    # -------------------------------------------------------------------------
-    # ТАБЛИЦА 1: ДЕТАЛЬНЫЙ ХРОНОЛОГИЧЕСКИЙ ЖУРНАЛ ВСЕХ СДЕЛОК ЗА 24 ЧАСА
-    # -------------------------------------------------------------------------
-    out.append("1. ДЕТАЛЬНАЯ ХРОНОЛОГИЧЕСКАЯ ТАБЛИЦА ВСЕХ ЗАКРЫТЫХ СДЕЛОК (24Ч)")
-    out.append("-" * 120)
-    out.append(
-        "| №  | Монета (Тир/Сектор) | Ордер / Вход / Выход | Стратегия и Грейд | Рынок / Режим | Скор/Порог | Валидация 1H (48ч) и ₿-корр | Почему решили купить (Триггеры и ключи) | Вход -> Выход (TP / SL) | Итог PnL (% / $ / Тип) |"
-    )
-    out.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
+    # 2. PnL по секторам ($)
+    sec_pnl = defaultdict(float)
+    sec_cnt = defaultdict(int)
+    for t in closed_24h:
+        s = t.get("sector", "Other")
+        sec_pnl[s] += float(t.get("pnl", 0.0))
+        sec_cnt[s] += 1
+    sec_sorted = sorted(sec_pnl.items(), key=lambda kv: kv[1])
+    sec_labels = [f"{k} ({sec_cnt[k]})" for k, _ in sec_sorted] or ["Нет данных"]
+    sec_values = [round(v, 2) for _, v in sec_sorted] or [0.0]
+    sec_colors = ["#00e676" if v >= 0 else "#ff1744" for v in sec_values]
 
-    if closed_24h:
-        for idx, t in enumerate(closed_24h, 1):
-            sym_base = t["symbol"][:-4] if t["symbol"].endswith("USDT") else t["symbol"]
-            t_em = TIER_EMOJI.get(t.get("tier"), "🐭")
-            sec = t.get("sector", "Other")
-            m_em = mode_emoji(t)
-            emode = t.get("entry_mode", "sniper")
-            g_str = "[💎] A+" if t.get("grade") == "A+" else "[B]"
-            reg_str = (t.get("regime") or "neutral").upper()
-            rmode = t.get("risk_mode", "NORMAL")
+    # 3. Распределение выходов
+    exit_cnt = defaultdict(int)
+    for t in closed_24h:
+        exit_cnt[t.get("exit_type", "🛡📉")] += 1
+    exit_labels = list(exit_cnt.keys()) or ["Нет сделок"]
+    exit_values = list(exit_cnt.values()) or [1]
 
-            t_ord = _fmt_ts(t.get("order_created"), tz)
-            t_in = _fmt_ts(t.get("entry_time"), tz)
-            t_out = _fmt_ts(t.get("time"), tz)
+    # --- ТАБЛИЦА 1: ОТКРЫТЫЕ ПОЗИЦИИ И ЛИМИТНЫЕ ОРДЕРА ---
+    active_rows_html = []
+    for sym, pos in sorted(paper.positions.items()):
+        sym_base = sym[:-4] if sym.endswith("USDT") else sym
+        last_p = prices.get(sym, {}).get("last", 0)
+        val = pos["qty"] * last_p
+        p_pct = (last_p - pos["avg"]) / pos["avg"] * 100 if pos.get("avg") and last_p else 0.0
+        pnl_cls = "pos-val" if p_pct >= 0 else "neg-val"
+        g_badge = "<span class='badge badge-a'>💎 A+</span>" if pos.get("grade") == "A+" else "<span class='badge badge-b'>B</span>"
+        tp1_badge = "<span class='badge badge-tp1'>🔥 TP1</span>" if pos.get("tp1_done") else ""
+        sl_tag = sl_emoji(pos.get("sl_state", "SHIELD"))
+        sc_s = f"{pos.get('score', 0):.1f} / {pos.get('thr', 0):.2f}" if pos.get("score") else "—"
+        r1h = _html.escape(f"{pos.get('gate_1h', '')} ({pos.get('reason_1h', '')})")
+        corr_s = f"₿ {pos.get('corr', 0) or 0:.2f}"
+        why_p = _html.escape("; ".join(pos.get("reasons", [])[:5]) or ", ".join(pos.get("reason_keys", [])))
 
-            sc = t.get("score", 0.0)
-            thr = t.get("thr", 0.0)
-            sc_str = f"{sc:.1f}/{thr:.2f}" if sc > 0 else "—"
+        active_rows_html.append(
+            f"<tr>"
+            f"<td><span class='badge badge-open'>📦 ПОЗИЦИЯ</span></td>"
+            f"<td><a class='coin-link' href='/chart?symbol={sym}&interval=60' target='_blank'>{mode_emoji(pos)} <b>{sym_base}</b></a> {TIER_EMOJI.get(pos.get('tier'), '🐭')} <span class='muted'>({pos.get('sector', 'Other')})</span></td>"
+            f"<td>{pos.get('entry_mode', 'sniper')} {g_badge} {tp1_badge}</td>"
+            f"<td><b>{usd(val)}</b></td>"
+            f"<td>${fmt_price(pos['avg'])} &rarr; <b>${fmt_price(last_p)}</b> (<span class='{pnl_cls}'>{p_pct:+.2f}%</span>)</td>"
+            f"<td>🎯 ${fmt_price(pos['tp'])}<br>{sl_tag} <b>${fmt_price(pos['sl'])}</b></td>"
+            f"<td>{sc_s}</td>"
+            f"<td>{r1h}<br><span class='muted'>{corr_s}</span></td>"
+            f"<td class='reasons-cell'>{why_p}</td>"
+            f"</tr>"
+        )
 
-            g1h = t.get("gate_1h") or "1H_OK"
-            r1h = t.get("reason_1h") or "—"
-            corr_v = t.get("corr")
-            corr_s = f"₿ {corr_v:.2f}" if corr_v is not None else ""
-            info_1h = f"{g1h} ({r1h}) {corr_s}".strip()
+    for o in paper.orders:
+        sym = o["symbol"]
+        sym_base = sym[:-4] if sym.endswith("USDT") else sym
+        last_p = prices.get(sym, {}).get("last", 0)
+        val = o["qty"] * o["price"]
+        dist = (o["price"] - last_p) / last_p * 100 if last_p > 0 else 0.0
+        g_badge = "<span class='badge badge-a'>💎 A+</span>" if o.get("grade") == "A+" else "<span class='badge badge-b'>B</span>"
+        sc_s = f"{o.get('score', 0):.1f} / {o.get('thr', 0):.2f}" if o.get("score") else "—"
+        r1h = _html.escape(f"{o.get('gate_1h', '')} ({o.get('reason_1h', '')})")
+        corr_s = f"₿ {o.get('corr', 0) or 0:.2f}"
+        why_o = _html.escape("; ".join(o.get("reasons", [])[:5]) or ", ".join(o.get("reason_keys", [])))
 
-            reasons_list = t.get("reasons") or t.get("reason_keys") or []
-            why_str = "; ".join(str(x) for x in reasons_list[:5]) if reasons_list else "архивная сделка"
+        active_rows_html.append(
+            f"<tr>"
+            f"<td><span class='badge badge-order'>📋 ОРДЕР</span></td>"
+            f"<td><a class='coin-link' href='/chart?symbol={sym}&interval=60' target='_blank'>{mode_emoji(o)} <b>{sym_base}</b></a> {TIER_EMOJI.get(o.get('tier'), '🐭')} <span class='muted'>({o.get('sector', 'Other')})</span></td>"
+            f"<td>{o.get('entry_mode', 'sniper')} {g_badge}</td>"
+            f"<td><b>{usd(val)}</b></td>"
+            f"<td>Лимитка <b>${fmt_price(o['price'])}</b> <span class='muted'>({dist:+.2f}% от ${fmt_price(last_p)})</span></td>"
+            f"<td>🎯 ${fmt_price(o['tp'])}<br>🛡📉 ${fmt_price(o['sl'])}</td>"
+            f"<td>{sc_s}</td>"
+            f"<td>{r1h}<br><span class='muted'>{corr_s}</span></td>"
+            f"<td class='reasons-cell'>{why_o}</td>"
+            f"</tr>"
+        )
 
-            ep = t.get("entry_price")
-            xp = t.get("exit_price")
-            itp = t.get("initial_tp")
-            isl = t.get("initial_sl")
-            if ep and xp:
-                prices_str = f"${fmt_price(ep)} -> ${fmt_price(xp)}"
-                if itp and isl:
-                    prices_str += f" (TP ${fmt_price(itp)} / SL ${fmt_price(isl)})"
-            else:
-                prices_str = "—"
+    if not active_rows_html:
+        active_rows_html.append("<tr><td colspan='9' class='empty-row'>Открытых позиций и активных ордеров сейчас нет</td></tr>")
 
-            res_icon = "🛡🔒" if (t.get("is_be") or is_neutral_be(t["pnl_pct"])) else ("✅" if t["pnl"] > 0 else "❌")
-            tp1_mark = " + 🔥TP1" if t.get("tp1_done") else ""
-            res_str = f"{res_icon} {t['pnl_pct']:+.2f}% ({usd(t['pnl'])}) · {t.get('exit_type', '')}{tp1_mark}"
-
-            out.append(
-                f"| {idx} | {sym_base} {t_em} ({sec}) | {t_ord} / {t_in} / {t_out} | {m_em} {emode} {g_str} | "
-                f"{reg_str} / {rmode} | {sc_str} | {info_1h} | {why_str} | {prices_str} | {res_str} |"
-            )
-    else:
-        out.append("| — | За последние 24 часа закрытых сделок нет | — | — | — | — | — | — | — | — |")
-
-    out.append("")
-
-    # -------------------------------------------------------------------------
-    # ТАБЛИЦА 2: СВОДНЫЙ РЕЕСТР ПО ВСЕМ МОНЕТАМ ЗА 24 ЧАСА (ОТ ЛУЧШИХ К ХУДШИМ)
-    # -------------------------------------------------------------------------
-    out.append("2. СВОДНЫЙ РЕЕСТР ПО ВСЕМ МОНЕТАМ ЗА 24 ЧАСА (СОРТИРОВКА ПО СУММАРНОМУ PNL)")
-    out.append("-" * 120)
-    out.append(
-        "| Монета | Сектор / Тир | Сделок | Все закрытые сделки за 24ч (Стратегия · Грейд · Результат · Выход) | Открытая позиция сейчас | Суммарный PnL (% / $) |"
-    )
-    out.append("| :--- | :--- | :---: | :--- | :--- | :--- |")
-
+    # --- ТАБЛИЦА 2: СВОДНЫЙ РЕЕСТР ПО МОНЕТАМ ЗА 24Ч ---
     by_coin = defaultdict(list)
     for t in closed_24h:
         by_coin[t["symbol"]].append(t)
@@ -153,68 +166,337 @@ async def build_trades_audit_24h(tz) -> str:
         trades_desc = []
         for x in t_list:
             ic = "🛡🔒" if (x.get("is_be") or is_neutral_be(x["pnl_pct"])) else ("✅" if x["pnl"] > 0 else "❌")
-            gb = "[💎]" if x.get("grade") == "A+" else ""
-            trades_desc.append(f"{ic} {mode_emoji(x)}{gb} {x['pnl_pct']:+.2f}% ({x.get('exit_type', '')})")
-        trades_str = " · ".join(trades_desc) if trades_desc else "—"
+            gb = "💎" if x.get("grade") == "A+" else ""
+            cls_c = "pos-val" if x["pnl"] > 0 else ("neg-val" if x["pnl"] < 0 else "muted")
+            trades_desc.append(f"{ic} {mode_emoji(x)}{gb} <span class='{cls_c}'>{x['pnl_pct']:+.2f}%</span> ({x.get('exit_type', '')})")
+        trades_str = " &middot; ".join(trades_desc) if trades_desc else "<span class='muted'>—</span>"
 
         pos = paper.positions.get(sym)
         if pos:
             last_p = prices.get(sym, {}).get("last", 0)
             p_pct = (last_p - pos["avg"]) / pos["avg"] * 100 if pos.get("avg") and last_p else 0.0
-            pos_str = f"{mode_emoji(pos)}{grade_badge(pos)} {p_pct:+.2f}% ({sl_emoji(pos.get('sl_state'))})"
+            p_cls = "pos-val" if p_pct >= 0 else "neg-val"
+            pos_str = f"{mode_emoji(pos)}{grade_badge(pos)} <span class='{p_cls}'>{p_pct:+.2f}%</span> ({sl_emoji(pos.get('sl_state'))})"
         else:
-            pos_str = "—"
+            pos_str = "<span class='muted'>—</span>"
 
         coin_rows.append((sym, sec, t_em, len(t_list), trades_str, pos_str, sum_pct, sum_usd))
 
     coin_rows.sort(key=lambda r: r[6], reverse=True)
+    coin_rows_html = []
     for sym, sec, t_em, cnt, trades_str, pos_str, sum_pct, sum_usd in coin_rows:
         sym_base = sym[:-4] if sym.endswith("USDT") else sym
-        tot_ic = "🟢" if sum_pct > 0.25 else ("🔴" if sum_pct < -0.15 else "🟡")
-        out.append(f"| {sym_base} | {sec} {t_em} | {cnt} | {trades_str} | {pos_str} | {tot_ic} {sum_pct:+.2f}% ({usd(sum_usd)}) |")
-
-    out.append("")
-
-    # -------------------------------------------------------------------------
-    # ТАБЛИЦА 3: ТЕКУЩИЕ ОТКРЫТЫЕ ПОЗИЦИИ И АКТИВНЫЕ ЛИМИТНЫЕ ОРДЕРА
-    # -------------------------------------------------------------------------
-    out.append(f"3. ТЕКУЩИЕ ОТКРЫТЫЕ ПОЗИЦИИ ({len(paper.positions)}) И ЛИМИТНЫЕ ОРДЕРА ({len(paper.orders)})")
-    out.append("-" * 120)
-    out.append(
-        "| Статус | Монета | Стратегия и Грейд | Сумма $ | Вход -> Текущая (PnL %) | TP / SL (Статус стопа) | Скор/Порог | 1H Валидация (48ч) и ₿ | Причины входа |"
-    )
-    out.append("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |")
-
-    for sym, pos in sorted(paper.positions.items()):
-        sym_base = sym[:-4] if sym.endswith("USDT") else sym
-        last_p = prices.get(sym, {}).get("last", 0)
-        val = pos["qty"] * last_p
-        p_pct = (last_p - pos["avg"]) / pos["avg"] * 100 if pos.get("avg") and last_p else 0.0
-        sc_s = f"{pos.get('score', 0):.1f}/{pos.get('thr', 0):.2f}" if pos.get("score") else "—"
-        r1h = f"{pos.get('gate_1h', '')} ({pos.get('reason_1h', '')}) ₿{pos.get('corr', 0) or 0:.2f}"
-        why_p = "; ".join(pos.get("reasons", [])[:4]) or ", ".join(pos.get("reason_keys", []))
-        out.append(
-            f"| 📦 ПОЗИЦИЯ | {sym_base} ({pos.get('sector', 'Other')}) | {mode_emoji(pos)} {pos.get('entry_mode', 'sniper')}{grade_badge(pos)} | "
-            f"{usd(val)} | ${fmt_price(pos['avg'])} -> ${fmt_price(last_p)} ({p_pct:+.2f}%) | "
-            f"🎯 ${fmt_price(pos['tp'])} / {sl_emoji(pos.get('sl_state'))} ${fmt_price(pos['sl'])} | {sc_s} | {r1h} | {why_p} |"
+        tot_cls = "pos-val" if sum_pct > 0.15 else ("neg-val" if sum_pct < -0.15 else "muted")
+        coin_rows_html.append(
+            f"<tr>"
+            f"<td><a class='coin-link' href='/chart?symbol={sym}&interval=60' target='_blank'>📈 <b>{sym_base}</b></a></td>"
+            f"<td>{sec} {t_em}</td>"
+            f"<td style='text-align:center;'><b>{cnt}</b></td>"
+            f"<td>{trades_str}</td>"
+            f"<td>{pos_str}</td>"
+            f"<td><span class='{tot_cls}'><b>{sum_pct:+.2f}%</b> ({usd(sum_usd)})</span></td>"
+            f"</tr>"
         )
 
-    for o in paper.orders:
-        sym = o["symbol"]
+    if not coin_rows_html:
+        coin_rows_html.append("<tr><td colspan='6' class='empty-row'>Нет данных по монетам за 24 часа</td></tr>")
+
+    # --- ТАБЛИЦА 3: ХРОНОЛОГИЧЕСКИЙ ЖУРНАЛ ВСЕХ СДЕЛОК (24Ч) ---
+    trades_rows_html = []
+    for idx, t in enumerate(closed_24h, 1):
+        sym = t["symbol"]
         sym_base = sym[:-4] if sym.endswith("USDT") else sym
-        last_p = prices.get(sym, {}).get("last", 0)
-        val = o["qty"] * o["price"]
-        dist = (o["price"] - last_p) / last_p * 100 if last_p > 0 else 0.0
-        sc_s = f"{o.get('score', 0):.1f}/{o.get('thr', 0):.2f}" if o.get("score") else "—"
-        r1h = f"{o.get('gate_1h', '')} ({o.get('reason_1h', '')}) ₿{o.get('corr', 0) or 0:.2f}"
-        why_o = "; ".join(o.get("reasons", [])[:4]) or ", ".join(o.get("reason_keys", []))
-        out.append(
-            f"| 📋 ОРДЕР | {sym_base} ({o.get('sector', 'Other')}) | {mode_emoji(o)} {o.get('entry_mode', 'sniper')}{grade_badge(o)} | "
-            f"{usd(val)} | Лимитка ${fmt_price(o['price'])} ({dist:+.2f}% от ${fmt_price(last_p)}) | "
-            f"🎯 ${fmt_price(o['tp'])} / 🛡📉 ${fmt_price(o['sl'])} | {sc_s} | {r1h} | {why_o} |"
+        t_em = TIER_EMOJI.get(t.get("tier"), "🐭")
+        sec = t.get("sector", "Other")
+        m_em = mode_emoji(t)
+        emode = t.get("entry_mode", "sniper")
+        g_badge = "<span class='badge badge-a'>💎 A+</span>" if t.get("grade") == "A+" else "<span class='badge badge-b'>B</span>"
+        reg_str = (t.get("regime") or "neutral").upper()
+        rmode = t.get("risk_mode", "NORMAL")
+
+        t_ord = _fmt_ts(t.get("order_created"), tz)
+        t_in = _fmt_ts(t.get("entry_time"), tz)
+        t_out = _fmt_ts(t.get("time"), tz)
+
+        sc = t.get("score", 0.0)
+        thr = t.get("thr", 0.0)
+        sc_str = f"<b>{sc:.1f}</b> / {thr:.2f}" if sc > 0 else "—"
+
+        g1h = _html.escape(t.get("gate_1h") or "1H_OK")
+        r1h = _html.escape(t.get("reason_1h") or "—")
+        corr_v = t.get("corr")
+        corr_s = f"₿ {corr_v:.2f}" if corr_v is not None else ""
+
+        reasons_list = t.get("reasons") or t.get("reason_keys") or []
+        why_str = _html.escape("; ".join(str(x) for x in reasons_list[:6])) if reasons_list else "—"
+
+        ep = t.get("entry_price")
+        xp = t.get("exit_price")
+        itp = t.get("initial_tp")
+        isl = t.get("initial_sl")
+        if ep and xp:
+            prices_str = f"${fmt_price(ep)} &rarr; <b>${fmt_price(xp)}</b>"
+            if itp and isl:
+                prices_str += f"<br><span class='muted'>TP ${fmt_price(itp)} / SL ${fmt_price(isl)}</span>"
+        else:
+            prices_str = "—"
+
+        is_be_flag = t.get("is_be") or is_neutral_be(t["pnl_pct"])
+        res_icon = "🛡🔒" if is_be_flag else ("✅" if t["pnl"] > 0 else "❌")
+        pnl_cls = "pos-val" if t["pnl"] > 0 else ("neg-val" if t["pnl"] < 0 else "muted")
+        tp1_mark = " + <span class='badge badge-tp1'>🔥TP1</span>" if t.get("tp1_done") else ""
+
+        trades_rows_html.append(
+            f"<tr>"
+            f"<td style='text-align:center;'>{idx}</td>"
+            f"<td><a class='coin-link' href='/chart?symbol={sym}&interval=60' target='_blank'>📈 <b>{sym_base}</b></a> {t_em}<br><span class='muted'>{sec}</span></td>"
+            f"<td>{t_ord} / {t_in} / <b>{t_out}</b></td>"
+            f"<td>{m_em} {emode} {g_badge}</td>"
+            f"<td>{reg_str}<br><span class='muted'>{rmode}</span></td>"
+            f"<td>{sc_str}</td>"
+            f"<td><b>{g1h}</b><br><span class='muted'>{r1h} {corr_s}</span></td>"
+            f"<td class='reasons-cell'>{why_str}</td>"
+            f"<td>{prices_str}</td>"
+            f"<td>{res_icon} <span class='{pnl_cls}'><b>{t['pnl_pct']:+.2f}%</b> ({usd(t['pnl'])})</span><br>{t.get('exit_type', '')}{tp1_mark}</td>"
+            f"</tr>"
         )
 
-    return "\n".join(out)
+    if not trades_rows_html:
+        trades_rows_html.append("<tr><td colspan='10' class='empty-row'>За последние 24 часа закрытых сделок нет</td></tr>")
+
+    pf_val = metrics_24h["profit_factor"]
+    pf_str = "—" if pf_val is None else ("∞" if pf_val == float("inf") else f"{pf_val:.2f}")
+    tot_pnl_24 = metrics_24h["total_pnl"]
+    tot_pnl_cls = "pos-val" if tot_pnl_24 >= 0 else "neg-val"
+    curr_reg = bot_state.current_regime.upper()
+
+    html_page = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Капитан Рост — Интерактивный Аудит 24ч</title>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<style>
+  :root {{
+    --bg: #0f1218;
+    --card: #171c26;
+    --border: #262f40;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #2962ff;
+    --green: #00e676;
+    --red: #ff5252;
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0; padding: 20px;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    font-size: 13.5px;
+  }}
+  .header-bar {{
+    display: flex; justify-content: space-between; align-items: center;
+    background: var(--card); border: 1px solid var(--border);
+    padding: 14px 20px; border-radius: 10px; margin-bottom: 18px;
+    flex-wrap: wrap; gap: 10px;
+  }}
+  .header-title {{ font-size: 18px; font-weight: 700; }}
+  .btn {{
+    text-decoration: none; color: #fff; background: var(--accent);
+    padding: 8px 14px; border-radius: 6px; font-weight: 600; font-size: 13px;
+  }}
+  .kpi-grid {{
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+    gap: 12px; margin-bottom: 18px;
+  }}
+  .kpi-card {{
+    background: var(--card); border: 1px solid var(--border);
+    padding: 12px 15px; border-radius: 8px;
+  }}
+  .kpi-label {{ color: var(--muted); font-size: 12px; margin-bottom: 5px; }}
+  .kpi-val {{ font-size: 18px; font-weight: 700; }}
+  .charts-grid {{
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 14px; margin-bottom: 22px;
+  }}
+  .chart-box {{
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 8px; min-height: 300px;
+  }}
+  .section-title {{
+    font-size: 15px; font-weight: 700; margin: 22px 0 10px;
+    padding-left: 10px; border-left: 3px solid var(--accent);
+  }}
+  .table-wrap {{
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; overflow-x: auto; margin-bottom: 20px;
+  }}
+  table {{ width: 100%; border-collapse: collapse; min-width: 850px; }}
+  th, td {{
+    padding: 9px 11px; text-align: left;
+    border-bottom: 1px solid var(--border); vertical-align: top;
+  }}
+  th {{ background: #1d2432; color: #b8c4d4; font-weight: 600; font-size: 12px; text-transform: uppercase; }}
+  tr:hover td {{ background: rgba(41, 98, 255, 0.06); }}
+  .coin-link {{
+    color: #58a6ff; text-decoration: none;
+    padding: 2px 6px; border-radius: 4px; background: rgba(88, 166, 255, 0.12);
+  }}
+  .coin-link:hover {{ background: rgba(88, 166, 255, 0.28); }}
+  .pos-val {{ color: var(--green); }}
+  .neg-val {{ color: var(--red); }}
+  .muted {{ color: var(--muted); font-size: 12px; }}
+  .badge {{
+    display: inline-block; padding: 2px 6px; border-radius: 4px;
+    font-size: 11px; font-weight: 700;
+  }}
+  .badge-a {{ background: rgba(0, 229, 255, 0.16); color: #00e5ff; border: 1px solid rgba(0, 229, 255, 0.4); }}
+  .badge-b {{ background: rgba(139, 148, 158, 0.15); color: #8b949e; }}
+  .badge-tp1 {{ background: rgba(0, 230, 118, 0.18); color: #00e676; }}
+  .badge-open {{ background: rgba(41, 98, 255, 0.22); color: #82b1ff; }}
+  .badge-order {{ background: rgba(255, 171, 0, 0.2); color: #ffd740; }}
+  .reasons-cell {{ max-width: 340px; font-size: 12.5px; line-height: 1.4; }}
+  .empty-row {{ text-align: center; color: var(--muted); padding: 18px !important; }}
+</style>
+</head>
+<body>
+
+<div class="header-bar">
+  <div>
+    <div class="header-title">📊 Капитан Рост — Интерактивный Аудит и Инфографика (24ч)</div>
+    <div class="muted">Срез: {now.strftime('%Y-%m-%d %H:%M:%S %Z')} · Клик по любой монете открывает её интерактивный свечной график</div>
+  </div>
+  <div>
+    <a class="btn" href="/audit">🔄 Обновить срез</a>
+  </div>
+</div>
+
+<div class="kpi-grid">
+  <div class="kpi-card">
+    <div class="kpi-label">📈 Торговый капитал</div>
+    <div class="kpi-val">{usd(eq)}</div>
+    <div class="muted">Свободно: {usd(avail_usdt)} · Ордера: {usd(locked_usdt)}</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">💵 PnL за 24 часа</div>
+    <div class="kpi-val {tot_pnl_cls}">{usd(tot_pnl_24)}</div>
+    <div class="muted">🏦 Накопления: {usd(paper.funding)}</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">🎯 Чистый Winrate (24ч)</div>
+    <div class="kpi-val">{clean_wr:.1f}% <span class="muted">({len(closed_24h)} сдел.)</span></div>
+    <div class="muted">✅ {len(wins)} · ❌ {len(losses)} · 🛡🔒 {len(be_trades)} · 🔥TP1: {metrics_24h['partial_count']}</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">📊 Profit Factor & Max DD</div>
+    <div class="kpi-val">PF: {pf_str} · DD: {metrics_24h['max_drawdown_pct']:.1f}%</div>
+    <div class="muted">Цель PF ≥ 1.3 · Лимит DD 15%</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">💎 Сетапы [💎] Grade A+</div>
+    <div class="kpi-val">WR {a_stats['wr']:.0%} <span class="muted">(×{a_stats['mult']:.2f})</span></div>
+    <div class="muted">Реш.: {a_stats['decisive']} · Серия: {a_stats['streak']:+d}</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">🧭 Режим рынка и ИИ</div>
+    <div class="kpi-val">{curr_reg} · {learner.current_risk_mode}</div>
+    <div class="muted">Строгость ИИ: {learner.threshold_adj:+.2f}</div>
+  </div>
+</div>
+
+<div class="charts-grid">
+  <div class="chart-box" id="chart-equity"></div>
+  <div class="chart-box" id="chart-sectors"></div>
+  <div class="chart-box" id="chart-exits"></div>
+</div>
+
+<div class="section-title">1. Текущие открытые позиции ({len(paper.positions)}) и активные лимитные ордера ({len(paper.orders)})</div>
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Статус</th><th>Монета (График)</th><th>Стратегия / Грейд</th><th>Объём $</th>
+        <th>Вход &rarr; Текущая (PnL)</th><th>TP / SL (Фаза)</th><th>Скор / Порог</th>
+        <th>1H Валидация (48ч)</th><th>Причины и триггеры входа</th>
+      </tr>
+    </thead>
+    <tbody>
+      {"".join(active_rows_html)}
+    </tbody>
+  </table>
+</div>
+
+<div class="section-title">2. Сводный реестр по всем монетам за 24 часа (от лучших к худшим)</div>
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Монета (График)</th><th>Сектор / Тир</th><th style="text-align:center;">Сделок</th>
+        <th>Все закрытые сделки за 24ч</th><th>Открытая позиция сейчас</th><th>Суммарный PnL (% / $)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {"".join(coin_rows_html)}
+    </tbody>
+  </table>
+</div>
+
+<div class="section-title">3. Детальный хронологический журнал всех закрытых сделок за 24 часа ({len(closed_24h)})</div>
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>№</th><th>Монета (График)</th><th>Ордер / Вход / Выход</th><th>Стратегия / Грейд</th>
+        <th>Рынок / Режим</th><th>Скор / Порог</th><th>Валидация 1H (48ч) и ₿</th>
+        <th>Почему решили купить (Триггеры)</th><th>Вход &rarr; Выход (TP / SL)</th><th>Итог PnL и Выход</th>
+      </tr>
+    </thead>
+    <tbody>
+      {"".join(trades_rows_html)}
+    </tbody>
+  </table>
+</div>
+
+<script>
+  const darkLayout = {{
+    paper_bgcolor: '#171c26', plot_bgcolor: '#171c26',
+    font: {{ color: '#e6edf3', size: 11 }},
+    margin: {{ t: 38, b: 38, l: 45, r: 20 }},
+    height: 290
+  }};
+
+  Plotly.newPlot('chart-equity', [{{
+    x: {json.dumps(eq_times, ensure_ascii=False)},
+    y: {json.dumps(eq_vals)},
+    text: {json.dumps(eq_texts, ensure_ascii=False)},
+    mode: 'lines+markers',
+    line: {{ color: '#00e5ff', width: 2.5, shape: 'hv' }},
+    marker: {{ size: 7, color: '#2962ff' }},
+    fill: 'tozeroy',
+    fillcolor: 'rgba(0, 229, 255, 0.08)',
+    hovertemplate: '%{{text}}<br>Кумулятивный PnL: <b>$%{{y:.2f}}</b><extra></extra>'
+  }}], Object.assign({{}}, darkLayout, {{ title: 'Кривая кумулятивного PnL ($) за 24ч' }}), {{responsive: true, displayModeBar: false}});
+
+  Plotly.newPlot('chart-sectors', [{{
+    x: {json.dumps(sec_values)},
+    y: {json.dumps(sec_labels, ensure_ascii=False)},
+    type: 'bar', orientation: 'h',
+    marker: {{ color: {json.dumps(sec_colors)} }},
+    hovertemplate: '%{{y}}: <b>$%{{x:.2f}}</b><extra></extra>'
+  }}], Object.assign({{}}, darkLayout, {{ title: 'PnL по секторам ($) за 24ч', margin: {{ t: 38, b: 35, l: 95, r: 20 }} }}), {{responsive: true, displayModeBar: false}});
+
+  Plotly.newPlot('chart-exits', [{{
+    labels: {json.dumps(exit_labels, ensure_ascii=False)},
+    values: {json.dumps(exit_values)},
+    type: 'pie', hole: 0.45,
+    textinfo: 'label+value',
+    margin: {{ t: 38, b: 20, l: 20, r: 20 }}
+  }}], Object.assign({{}}, darkLayout, {{ title: 'Структура типов выхода (24ч)', showlegend: true }}), {{responsive: true, displayModeBar: false}});
+</script>
+</body>
+</html>"""
+    return html_page
 
 
 async def build_report(period, tz):
