@@ -14,7 +14,7 @@ from bot.strategy.risk import update_position_sl, calc_runner_target
 
 
 class ExecutionRiskWorker:
-    """Критический воркер исполнения ордеров, «Дышащего Коридора» SL/TP (включая 🛡🔥 ABOVE_TP1) и антиспам-нотификаций."""
+    """Критический воркер исполнения ордеров, «Дышащего Коридора» SL/TP и антиспам-нотификаций."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -152,18 +152,19 @@ class ExecutionRiskWorker:
                         old_tp = pos["tp"]
                         pos["tp"] = next_target
                         pos["sl"] = max(pos["sl"], round(old_tp * 0.995, 8))
-                        tp1_ref = float(pos.get("tp1_price") or pos.get("initial_tp") or 0.0)
-                        new_state = "ABOVE_TP1" if (tp1_ref > 0 and pos["sl"] >= tp1_ref * 0.9995) else "TRAILING_RUNNER"
+                        tp1_p = pos.get("tp1_price") or pos.get("initial_tp") or 0.0
+                        new_state = "ABOVE_TP1" if (tp1_p > 0 and pos["sl"] >= tp1_p) else "TRAILING_RUNNER"
                         pos["sl_state"] = new_state
                         pos["_last_notified_sl_str"] = fmt_price(pos["sl"])
                         pos["_last_notified_sl_state"] = new_state
                         pos["_last_sl_notify_ts"] = now_ts
                         state_changed = True
+                        sl_tag = sl_emoji(new_state)
                         paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP🏃🏻‍➡️ поднят по коридору", mode="TP🏃🏻‍➡️", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                         self.bus.publish("NOTIFY", {
                             "text": (
                                 f"TP🏃🏻‍➡️ <b>Потолок коридора расширен</b> · {pair_html(sym, pos)}\n"
-                                f"🎯 {fmt_price(pos['tp'])} · {sl_emoji(new_state)} {fmt_price(pos['sl'])}"
+                                f"🎯 {fmt_price(pos['tp'])} · {sl_tag} {fmt_price(pos['sl'])}"
                             ),
                             "urgent": False,
                         })
