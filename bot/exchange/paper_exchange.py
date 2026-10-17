@@ -15,7 +15,7 @@ MAX_TOTAL_EVENTS = 5000
 
 
 class PaperExchange:
-    """Виртуальная биржа с резервированием состояния в GitHub и персональным буфером истории графиков."""
+    """Виртуальная биржа с сохранением полной аналитики сделок (1H Gatekeeper, reasons, тайминги) для 24ч аудита."""
 
     FEE_PCT = 0.10
 
@@ -58,11 +58,6 @@ class PaperExchange:
             self.chart_events = []
 
     def _prune_chart_events(self) -> list:
-        """
-        Блок 5.2: Сохранение полной 48-часовой истории на графиках.
-        Хранит до 150 событий индивидуально для каждого тикера (общий буфер до 5000),
-        чтобы утренние сделки никогда не затирались к вечеру.
-        """
         if not hasattr(self, "chart_events") or not self.chart_events:
             return []
         by_sym = defaultdict(list)
@@ -167,8 +162,17 @@ class PaperExchange:
                     pos["qty"] = total
                     pos["tp"] = order["tp"]
                     pos["sl"] = order["sl"]
+                    pos["initial_tp"] = order["tp"]
+                    pos["initial_sl"] = order["sl"]
                     pos["max_sl"] = order["sl"]
                     pos["score"] = order.get("score", 0)
+                    pos["thr"] = order.get("thr", 0)
+                    pos["risk_mode"] = order.get("risk_mode", getattr(learner, "current_risk_mode", "NORMAL"))
+                    pos["gate_1h"] = order.get("gate_1h", "1H_TREND_OK")
+                    pos["reason_1h"] = order.get("reason_1h", "")
+                    pos["chg_48h"] = order.get("chg_48h", 0.0)
+                    pos["corr"] = order.get("corr")
+                    pos["reasons"] = order.get("reasons", [])
                     pos["reason_keys"] = order.get("reason_keys", [])
                     pos["patterns"] = order.get("patterns", [])
                     pos["grade"] = order.get("grade", "B")
@@ -178,6 +182,7 @@ class PaperExchange:
                     pos["is_momentum"] = order.get("is_momentum", False)
                     pos["entry_mode"] = order.get("entry_mode", "sniper")
                     pos["max_price"] = order["price"]
+                    pos["order_created"] = order.get("created", int(time.time()))
                     pos["entry_time"] = int(time.time())
                     pos["nearest_sup"] = order.get("nearest_sup")
                     pos["nearest_res"] = order.get("nearest_res")
@@ -294,12 +299,12 @@ class PaperExchange:
         if "TP" in reason:
             exit_type = "TP🏃🏻‍➡️" if pos.get("tp1_done") else "🔥 TP1"
         elif "SL" in reason or "🛡" in reason:
-            if is_be or sl_state == "BREAKEVEN":
+            if is_be:
                 exit_type = "🛡🔒"
-            elif sl_state == "PROFIT_LOCK":
-                exit_type = "🛡💼"
             elif sl_state == "TRAILING_RUNNER":
                 exit_type = "🛡📈"
+            elif sl_state in ("PROFIT_LOCK", "BREAKEVEN") and total_pnl_pct > 0.25:
+                exit_type = "🛡💼"
             else:
                 exit_type = "🛡📉"
         else:
@@ -356,11 +361,35 @@ class PaperExchange:
                 self.usdt -= transferred
                 self.funding += transferred
 
+        exit_ts = int(time.time())
         self.realized.append({
-            "symbol": sym, "pnl": round(total_pnl, 4), "pnl_pct": round(total_pnl_pct, 2),
-            "reason": reason, "time": int(time.time()), "exit_type": exit_type,
-            "sl_state": sl_state, "is_be": is_be, "grade": grade,
-            "sector": sector, "tier": tier,
+            "symbol": sym,
+            "pnl": round(total_pnl, 4),
+            "pnl_pct": round(total_pnl_pct, 2),
+            "reason": reason,
+            "time": exit_ts,
+            "order_created": pos.get("order_created", pos.get("entry_time", exit_ts)),
+            "entry_time": pos.get("entry_time", exit_ts),
+            "entry_price": pos.get("avg", price),
+            "exit_price": price,
+            "initial_tp": pos.get("initial_tp", pos.get("tp")),
+            "initial_sl": pos.get("initial_sl", pos.get("sl")),
+            "tp1_done": pos.get("tp1_done", False),
+            "exit_type": exit_type,
+            "sl_state": sl_state,
+            "is_be": is_be,
+            "grade": grade,
+            "score": pos.get("score", 0.0),
+            "thr": pos.get("thr", 0.0),
+            "risk_mode": pos.get("risk_mode", "NORMAL"),
+            "gate_1h": pos.get("gate_1h", ""),
+            "reason_1h": pos.get("reason_1h", ""),
+            "chg_48h": pos.get("chg_48h", 0.0),
+            "corr": pos.get("corr"),
+            "reasons": pos.get("reasons", []),
+            "reason_keys": pos.get("reason_keys", []),
+            "sector": sector,
+            "tier": tier,
             "is_momentum": pos.get("is_momentum", False),
             "entry_mode": entry_mode,
             "patterns": pos.get("patterns", []),
@@ -368,7 +397,7 @@ class PaperExchange:
         })
         self.trades.append({
             "side": "Sell", "symbol": sym, "qty": pos["qty"],
-            "price": price, "time": int(time.time()),
+            "price": price, "time": exit_ts,
         })
         self.save()
         return {
@@ -412,10 +441,6 @@ class PaperExchange:
         return eq
 
     def get_metrics(self, prices=None, hours=None):
-        """
-        Блок 6.1: Сделки из нейтральной категории БУ (-0.15%..+0.25%) выделяются в be_count
-        и не искажают расчет WinRate (win_count / loss_count).
-        """
         if prices is None:
             prices = {}
 
