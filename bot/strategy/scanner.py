@@ -122,16 +122,16 @@ def is_post_pump_dump(candles_15m: list) -> tuple:
 
 def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int, a15: float) -> tuple:
     """
-    Блок 2.1: Матрица первичной часовой валидации (1H Gatekeeper):
-    Возвращает (gate_status, e21_1h, e50_1h, reason_1h)
-    - 🟢 '1H_TREND_OK': Чистый аптренд (Close > EMA21 > EMA50) или плоская база над растущей EMA50, без перегрева.
-    - 🟡 '1H_SUPPORT_ONLY': Боковик или откат, но цена лежит на подтвержденной плите поддержки (>= 2-3 касания).
+    Матрица 48-часовой валидации часового графика (1H Gatekeeper за 2 суток = 48 свечей):
+    Возвращает (gate_status, e21_1h, e50_1h, reason_1h, chg_48h)
+    - 🟢 '1H_TREND_OK': Устойчивый 48-часовой аптренд (Close >= EMA50, EMA21 >= EMA50, EMA50 растет на горизонте 12-24ч, позиция в верхних 65% 48ч-диапазона). Разрешены sniper и rocket.
+    - 🟡 '1H_SUPPORT_ONLY': Нет аптренда 1H, но цена лежит прямо на подтвержденной часовой плите поддержки (вес >= 3). Разрешен ТОЛЬКО reversal 🧲!
     - 🔴 '1H_BAN':
-        А) Падение в пустом поле под падающей 1H EMA50 без плиты поддержки (CAP, OP, STRK).
-        Б) Остывание сразу после вертикального часового пампа (GLMR).
+        А) 48-часовой даунтренд или слабая структура без плиты поддержки под ценой (CAP, OP, STRK, SEI, FIL).
+        Б) Остывание сразу после вертикального часового пампа (GLMR-фильтр).
     """
     if not candles_1h or len(candles_1h) < 50:
-        return "1H_SUPPORT_ONLY", 0.0, 0.0, "недостаточно 1H истории"
+        return "1H_BAN", 0.0, 0.0, "недостаточно 1H истории (<48ч)", 0.0
 
     closes_1h = [c["close"] for c in candles_1h]
     last_1h = closes_1h[-1]
@@ -139,47 +139,66 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     e50_series = ema(closes_1h, 50)
     e21_1h = e21_series[-1]
     e50_1h = e50_series[-1]
-    e50_prev = e50_series[-4] if len(e50_series) >= 4 else e50_1h
+
+    # Оценка динамики за 2 суток (48 часов)
+    window_48h = candles_1h[-48:]
+    open_48h = window_48h[0]["open"]
+    chg_48h = ((last_1h - open_48h) / open_48h * 100) if open_48h > 0 else 0.0
+    high_48h = max(c["high"] for c in window_48h)
+    low_48h = min(c["low"] for c in window_48h)
+    pos_in_48h = ((last_1h - low_48h) / (high_48h - low_48h)) if high_48h > low_48h else 0.5
+
+    e50_12h_ago = e50_series[-13] if len(e50_series) >= 13 else e50_series[0]
+    e50_24h_ago = e50_series[-25] if len(e50_series) >= 25 else e50_series[0]
+
     r_1h = rsi(closes_1h)
     a_1h = atr(candles_1h)
 
-    # Проверка Б: Остывание после свечи часовой кульминации (кейс GLMR)
-    recent_6_1h = candles_1h[-6:]
-    max_h_6 = max(c["high"] for c in recent_6_1h)
-    min_l_6 = min(c["low"] for c in recent_6_1h)
-    if min_l_6 > 0 and ((max_h_6 - min_l_6) / min_l_6 * 100) >= 11.0:
-        pullback_from_peak = (max_h_6 - last_1h) / (max_h_6 - min_l_6) if max_h_6 > min_l_6 else 0.0
-        # Если после вертикального выстрела идут красные свечи остывания без плоской базы
+    # Проверка Б: Остывание после свечи часовой кульминации за последние 6-12ч (GLMR-фильтр)
+    recent_8_1h = candles_1h[-8:]
+    max_h_8 = max(c["high"] for c in recent_8_1h)
+    min_l_8 = min(c["low"] for c in recent_8_1h)
+    if min_l_8 > 0 and ((max_h_8 - min_l_8) / min_l_8 * 100) >= 11.0:
+        pullback_from_peak = (max_h_8 - last_1h) / (max_h_8 - min_l_8) if max_h_8 > min_l_8 else 0.0
         if 0.25 <= pullback_from_peak <= 0.85 and candles_1h[-1]["close"] < candles_1h[-1]["open"]:
-            return "1H_BAN", e21_1h, e50_1h, "1H остывание после пампа (GLMR-фильтр)"
+            return "1H_BAN", e21_1h, e50_1h, f"1H остывание после пампа (48ч {chg_48h:+.1f}%)", round(chg_48h, 1)
 
-    # Проверка А: Зеленый свет аптренда 1H
-    e50_rising = e50_1h >= e50_prev * 0.9995
-    if (last_1h >= e21_1h >= e50_1h * 0.998 or (last_1h >= e50_1h and e50_rising)) and r_1h <= 76:
-        return "1H_TREND_OK", e21_1h, e50_1h, "1H аптренд"
+    # Проверка А: 48-часовой аптренд (1H_TREND_OK)
+    e50_rising_48h = (e50_1h >= e50_12h_ago * 0.999) and (e50_1h >= e50_24h_ago * 0.996)
+    e50_falling_48h = (e50_1h < e50_12h_ago * 0.997) or (e50_1h < e50_24h_ago * 0.992)
 
-    # Проверка падения под падающей EMA 50 (CAP, OP, STRK)
-    has_strong_slab = bool(nearest_sup and sup_touches >= 3 and a15 > 0 and (last_1h - nearest_sup) <= 2.2 * a15)
-    has_moderate_sup = bool(nearest_sup and sup_touches >= 2 and a15 > 0 and (last_1h - nearest_sup) <= 1.5 * a15)
+    is_uptrend_1h = (
+        last_1h >= e50_1h and
+        (e21_1h >= e50_1h * 0.998 or (last_1h >= e21_1h and e50_rising_48h)) and
+        not e50_falling_48h and
+        pos_in_48h >= 0.35 and
+        r_1h <= 75
+    )
+    if is_uptrend_1h:
+        return "1H_TREND_OK", e21_1h, e50_1h, f"1H аптренд 48ч ({chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1)
 
-    if last_1h < e50_1h and not e50_rising:
-        # Если цена улетела глубоко под падающую 1H EMA50 (> 2.8 ATR_1H) или нет многократной плиты — полный БАН
+    # Проверка наличия подтвержденной часовой плиты поддержки под ценой
+    has_strong_slab = bool(nearest_sup and sup_touches >= 3 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 2.2 * a15)
+    has_moderate_sup = bool(nearest_sup and sup_touches >= 2 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 1.4 * a15)
+
+    if last_1h < e50_1h and e50_falling_48h:
         dist_below_e50_1h = (e50_1h - last_1h) / a_1h if a_1h > 0 else 0.0
-        if not has_strong_slab or dist_below_e50_1h > 3.0:
-            return "1H_BAN", e21_1h, e50_1h, "1H даунтренд в пустом поле"
-        return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"1H плита поддержки ({sup_touches}x)"
+        if has_strong_slab and dist_below_e50_1h <= 3.0:
+            return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"1H плита в даунтренде ({sup_touches}x, 48ч {chg_48h:+.1f}%)", round(chg_48h, 1)
+        return "1H_BAN", e21_1h, e50_1h, f"1H 48ч даунтренд без плиты ({chg_48h:+.1f}%)", round(chg_48h, 1)
 
     if has_strong_slab or has_moderate_sup:
-        return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"1H опора на поддержку ({sup_touches}x)"
+        return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"1H опора на плиту ({sup_touches}x, 48ч {chg_48h:+.1f}%)", round(chg_48h, 1)
 
-    return "1H_SUPPORT_ONLY", e21_1h, e50_1h, "1H нейтральная структура"
+    return "1H_BAN", e21_1h, e50_1h, f"1H нет тренда и нет плиты за 48ч ({chg_48h:+.1f}%)", round(chg_48h, 1)
 
 
 def raw_max_score(regime):
+    """Реалистичный потолок сырых баллов (индикаторы + контекст + паттерн + структура S/R)."""
     m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
     m += max(learner.weight("indep"), learner.weight("news_pos"), learner.weight("hype"))
-    m += 3.5
-    return m
+    m += 6.2  # Запас под паттерн Price Action (+3.0), плиту поддержки (+2.2) и MTF (+1.0)
+    return max(13.5, m)
 
 
 def _returns(closes):
@@ -426,7 +445,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         if saved_mode and saved_mode not in matched_modes:
             matched_modes.append(saved_mode)
 
-    # 5. Динамика 24h + локальный дисконт от свинга (для QNT 18:10)
+    # 5. Динамика 24h + локальный дисконт от свинга
     local_swing_drop = (recent_high - last) / recent_high * 100 if recent_high > last else 0.0
     if 0 < t["change_pct"] < w["chg_hi"]:
         score += learner.weight("chg24h")
@@ -443,10 +462,10 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
     if t["quote_volume"] < 500_000:
         score -= 1.0
 
-    # 6. Уровни S/R и Multi-Touch Support Bonus (Блок 2.3)
+    # 6. Уровни S/R и Multi-Touch Support Bonus (капитальная стена только при весе >= 4)
     nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_15m, candles_1h)
 
-    if nearest_res and res_touches >= 3 and a15 > 0 and not is_open_pos:
+    if nearest_res and res_touches >= 4 and a15 > 0 and not is_open_pos:
         dist_to_res = nearest_res - last
         if dist_to_res < 0.5 * a15 or (dist_to_res / last * 100) < 0.35:
             score -= 3.5
@@ -458,34 +477,33 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         if 0 <= dist_to_sup <= 2.2 * a15:
             sup_is_near = True
             if not is_open_pos and (last > closes[-2] or "reversal" in matched_modes or sup_touches >= 3):
-                # Повышенный бонус за многократную плиту поддержки (>= 3 касаний, как на QNT)
-                sup_bonus = 2.8 if sup_touches >= 3 else 1.5
+                sup_bonus = 2.6 if sup_touches >= 3 else 1.4
                 score += sup_bonus
                 reasons.append(f"плита поддержки ${fmt_price(nearest_sup)} ({sup_touches}x, +{sup_bonus:.1f})")
                 keys.append("support_bounce")
                 if sup_touches >= 3 and "reversal" not in matched_modes and last < e50:
                     matched_modes.append("reversal")
 
-    # 7. Матрица 1H-валидации (1H Gatekeeper)
-    gate_1h, e21_1h, e50_1h, gate_reason = validate_1h_structure(candles_1h, nearest_sup, sup_touches, a15)
+    # 7. Матрица 48-часовой валидации 1H (1H Gatekeeper)
+    gate_1h, e21_1h, e50_1h, gate_reason, chg_48h = validate_1h_structure(candles_1h, nearest_sup, sup_touches, a15)
 
-    if candles_1h and len(candles_1h) >= 25:
+    if candles_1h and len(candles_1h) >= 50:
         closes_1h = [c["close"] for c in candles_1h]
-        last_1h = closes_1h[-1]
         r_1h = rsi(closes_1h)
 
-        # MTF Pullback: если 1H в чистом аптренде, откат к EMA50 на 15m получает приоритет
         if gate_1h == "1H_TREND_OK" and (r_1h < 52 or abs(last - e50) <= 1.2 * a15) and e12 >= e26 * 0.999:
-            score += 2.0
-            reasons.append("MTF: выкуп отката в 1H аптренде (+2.0)")
+            score += 1.8
+            reasons.append("MTF: выкуп отката в 48ч 1H аптренде (+1.8)")
             keys.append("mtf_dip")
         elif gate_1h == "1H_BAN" and not is_open_pos:
             score -= 5.0
             reasons.append(f"🚫 {gate_reason}")
 
-        # В режиме 1H_SUPPORT_ONLY запрещаем пробойные ракеты
-        if gate_1h == "1H_SUPPORT_ONLY" and "rocket" in matched_modes:
-            matched_modes = [m for m in matched_modes if m != "rocket"]
+        # В режиме 1H_SUPPORT_ONLY разрешен ТОЛЬКО reversal от плиты!
+        if gate_1h == "1H_SUPPORT_ONLY":
+            matched_modes = [m for m in matched_modes if m == "reversal"]
+            if not matched_modes and sup_is_near and sup_touches >= 3 and r <= 46:
+                matched_modes = ["reversal"]
 
     has_structure = (
         sup_is_near or
@@ -497,7 +515,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
     confirmed_res, confirmed_sup = get_all_sr_levels(candles_15m, candles_1h)
 
     signal_values = {
-        "rsi": r, "chg24h": t["change_pct"], "volume": vol_ratio,
+        "rsi": round(r, 1), "chg24h": round(t["change_pct"], 2), "volume": round(vol_ratio, 2),
         "nearest_res": nearest_res, "res_touches": res_touches,
         "nearest_sup": nearest_sup, "sup_touches": sup_touches,
         "all_res": confirmed_res,
@@ -508,6 +526,8 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         "e21": e21, "e50": e50,
         "e21_1h": e21_1h, "e50_1h": e50_1h,
         "gate_1h": gate_1h,
+        "reason_1h": gate_reason,
+        "chg_48h": chg_48h,
         "wick_entry_price": wick_entry_price,
         "matched_modes": matched_modes,
         "patterns": pattern_keys,
@@ -549,7 +569,7 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
     if corr > tier_corr_limit and regime == "neutral":
         raw -= 1
     elif abs(corr) < 0.25:
-        raw += learner.weight("indep") * 1.4
+        raw += learner.weight("indep") * 1.3
     elif corr < 0.45:
         raw += learner.weight("indep")
 
@@ -694,12 +714,26 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
             score, reasons, keys, signal_values = score_symbol(candles_15m, candles_1h, tickers[sym], regime)
 
-            # Блок 2.1: Жесткий отсев по часовому валидатору 1H_BAN
-            if signal_values.get("gate_1h") == "1H_BAN":
+            gate_1h = signal_values.get("gate_1h", "1H_BAN")
+            if gate_1h == "1H_BAN":
                 return None
 
             if not signal_values.get("has_structure"):
                 return None
+
+            modes = signal_values.get("matched_modes", [])
+            if gate_1h == "1H_SUPPORT_ONLY":
+                # На 1H_SUPPORT_ONLY запрещены трендовые sniper и rocket — работаем строго от плиты через reversal!
+                if "reversal" not in modes:
+                    return None
+                entry_mode = "reversal"
+            else:
+                if "reversal" in modes:
+                    entry_mode = "reversal"
+                elif "rocket" in modes:
+                    entry_mode = "rocket"
+                else:
+                    entry_mode = "sniper"
 
             base = sym[:-4]
             sector = sectors_map.get(base, "Other")
@@ -708,14 +742,13 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             corr = _corr(_returns([c["close"] for c in candles_15m]), btc_ret)
             tier_corr_limit = TIER_CORR_LIMITS.get(tier, 0.82)
 
-            # Блок 2.6: Иммунитет для независимых монет (corr < 0.25)
-            is_independent_mover = abs(corr) < 0.25 and signal_values.get("gate_1h") == "1H_TREND_OK"
+            is_independent_mover = abs(corr) < 0.25 and gate_1h == "1H_TREND_OK"
 
-            if corr > tier_corr_limit and regime == "neutral":
-                score -= 1
+            if corr > tier_corr_limit and regime in ("neutral", "bear") and entry_mode != "reversal":
+                score -= 1.2
                 reasons.append(f"зеркало BTC ({tier}: corr {corr:.2f})")
             elif is_independent_mover:
-                score += learner.weight("indep") * 1.5
+                score += learner.weight("indep") * 1.3
                 reasons.append(f"иммунитет от BTC (corr {corr:.2f})")
                 keys.append("indep")
             elif corr < 0.45:
@@ -765,18 +798,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
             score10 = (score / raw_max * SCORE_MAX) if raw_max > 0 else 0.0
 
-            modes = signal_values.get("matched_modes", [])
-            if "reversal" in modes:
-                entry_mode = "reversal"
-            elif "rocket" in modes:
-                entry_mode = "rocket"
-            else:
-                entry_mode = "sniper"
-
-            # Если 1H разрешает только работу от плиты — блокируем ракеты и переводим в reversal/sniper от плиты
-            if signal_values.get("gate_1h") == "1H_SUPPORT_ONLY" and entry_mode == "rocket":
-                return None
-
             deriv_t = deriv_tickers.get(sym)
             if deriv_t:
                 funding = deriv_t.get("funding", 0)
@@ -815,7 +836,9 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 "e50": signal_values.get("e50"),
                 "e21_1h": signal_values.get("e21_1h"),
                 "e50_1h": signal_values.get("e50_1h"),
-                "gate_1h": signal_values.get("gate_1h"),
+                "gate_1h": gate_1h,
+                "reason_1h": signal_values.get("reason_1h", ""),
+                "chg_48h": signal_values.get("chg_48h", 0.0),
                 "wick_entry_price": signal_values.get("wick_entry_price"),
                 "is_independent": is_independent_mover,
                 "size_mult": 1.0,
@@ -858,10 +881,11 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
     candidates = []
     for c in scored:
         mode = c.get("entry_mode", "sniper")
-        # Иммунитет от BEAR для независимых трендовых активов (corr < 0.25)
         eff_thrs = neutral_thrs if (regime == "bear" and c.get("is_independent")) else thrs
-        if c["score"] < eff_thrs.get(mode, 6.0):
+        thr = eff_thrs.get(mode, 6.0)
+        if c["score"] < thr:
             continue
+        c["thr"] = thr
         c["is_new"] = c["symbol"] in new_set
         candidates.append(c)
 
