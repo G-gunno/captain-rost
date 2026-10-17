@@ -15,7 +15,7 @@ MAX_TOTAL_EVENTS = 5000
 
 
 class PaperExchange:
-    """Виртуальная биржа с сохранением полной аналитики сделок (1H Gatekeeper, reasons, тайминги, 🛡🔥 ABOVE_TP1) для 24ч аудита."""
+    """Виртуальная биржа с сохранением полной аналитики сделок (1H Gatekeeper, reasons, тайминги) для 24ч аудита."""
 
     FEE_PCT = 0.10
 
@@ -190,9 +190,6 @@ class PaperExchange:
                     pos["sup_touches"] = order.get("sup_touches", 0)
                     pos["res_touches"] = order.get("res_touches", 0)
                     pos["sl_state"] = order.get("sl_state", "SHIELD")
-                    pos["_ema21"] = order.get("_ema21", 0.0)
-                    pos["_ema50"] = order.get("_ema50", 0.0)
-                    pos["_atr15"] = order.get("_atr15", 0.0)
                     pos["_last_sl_notify_ts"] = 0
                     self.trades.append({
                         "side": "Buy",
@@ -299,13 +296,14 @@ class PaperExchange:
 
         sl_state = pos.get("sl_state", "SHIELD")
         is_be = is_neutral_be(total_pnl_pct)
+        tp1_price = pos.get("tp1_price") or pos.get("initial_tp")
 
         if "TP" in reason:
             exit_type = "TP🏃🏻‍➡️" if pos.get("tp1_done") else "🔥 TP1"
         elif "SL" in reason or "🛡" in reason:
             if is_be:
                 exit_type = "🛡🔒"
-            elif sl_state == "ABOVE_TP1":
+            elif sl_state == "ABOVE_TP1" or (pos.get("tp1_done") and tp1_price and price >= tp1_price * 0.9995):
                 exit_type = "🛡🔥"
             elif sl_state == "TRAILING_RUNNER":
                 exit_type = "🛡📈"
@@ -326,7 +324,6 @@ class PaperExchange:
             soft = True
 
         runner_bonus = 0.0
-        tp1_price = pos.get("tp1_price")
         max_price = pos.get("max_price", 0.0)
         if tp1_price and max_price > tp1_price:
             runner_bonus = (max_price - tp1_price) / tp1_price * 100
