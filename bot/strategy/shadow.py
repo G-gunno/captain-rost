@@ -143,10 +143,6 @@ class Shadow:
         self.save()
 
     def _combined_agg(self) -> dict:
-        """
-        Объединяет закрытую 24ч статистику (self.agg) с оперативным контуром активных эпизодов
-        старше 1 часа (age >= 3600), чтобы автотюн и /learn работали уже в первые часы после сброса!
-        """
         merged = {}
         for k, v in self.agg.items():
             merged[k] = {
@@ -273,14 +269,15 @@ class Shadow:
                     mode_traded += a["traded"]
                     mode_sum24 += a.get("sum24", 0.0)
 
-            if mode_n >= 5:
+            # Честный автотюн: накидываем жесткость только при глубоком минусе и слабом пампе
+            if mode_n >= 8:
                 pump_rate = mode_pumps / mode_n
                 avg_24 = mode_sum24 / mode_n
                 missed = max(0, mode_pumps - mode_traded)
 
-                if avg_24 < -0.5 or pump_rate < 0.22:
-                    nudge += 0.25
-                elif missed >= 3 and pump_rate >= 0.40 and avg_24 > 0.5:
+                if avg_24 < -0.6 and pump_rate < 0.15:
+                    nudge += 0.20
+                elif missed >= 2 and pump_rate >= 0.30 and avg_24 > 0.3:
                     nudge -= 0.20
 
             self.tuning[f"nudge_{mode}"] = round(max(-0.5, min(0.5, nudge)), 2)
