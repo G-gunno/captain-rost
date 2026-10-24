@@ -1,6 +1,5 @@
 from bot.strategy.learner import learner
 
-# Блок 6.3: Оптимизация нижних границ сумм покупок (исключаем микро-ордера по $10-$15)
 TIERS = [
     (150, 18, 30),
     (250, 25, 45),
@@ -32,7 +31,6 @@ TIER_ROCKET_BOUNDS = {
     "MICRO": (-0.0080, -0.0035),
 }
 
-# Блок 2.2: Лимитный вход в глубину тени для reversal (вместо покупки по рынку с +0.15%)
 TIER_REVERSAL_BOUNDS = {
     "TOP20": (-0.0055, -0.0018),
     "MID":   (-0.0080, -0.0025),
@@ -49,7 +47,6 @@ def tier_limits(equity):
 
 
 def min_order_threshold(equity: float) -> float:
-    """Минимальный допустимый размер ордера для фильтрации микро-покупок."""
     base_min, _ = tier_limits(equity)
     return max(18.0, round(base_min * 0.85, 2))
 
@@ -85,9 +82,11 @@ def buy_size(equity, score, thr, liquidity, free_usdt, entry_mode="sniper", grad
     if kelly is not None:
         size *= (0.65 + 0.35 * kelly)
 
-    # Блок 6.2: Динамический коэффициент доверия к Grade A+ [💎]
+    # Правильная пирамида сайзинга: [💎] A+ всегда получает приоритетный объём (0.95x..1.15x), а [B] — 0.70x
     if grade == "A+":
-        size *= learner.grade_a_trust_mult()
+        size *= max(0.95, learner.grade_a_trust_mult())
+    else:
+        size *= 0.70
 
     min_allowed = min_order_threshold(equity)
     size = max(min_allowed, min(size, max_allowed))
@@ -108,7 +107,6 @@ def entry_offset(score, thr, regime, atr_pct, entry_mode="sniper", tier="SMALL",
         raw = -atr_pct / 100 * 0.20 * (1.0 - strength_alpha * 0.4)
         return max(bounds[0], min(bounds[1], raw))
 
-    # Блок 2.2: Вход в глубину тени на проливах (Second Test / Base Entry)
     if entry_mode == "reversal":
         bounds = TIER_REVERSAL_BOUNDS.get(tier, TIER_REVERSAL_BOUNDS["SMALL"])
         raw = -atr_pct / 100 * 0.35 * (1.0 - strength_alpha * 0.25)
