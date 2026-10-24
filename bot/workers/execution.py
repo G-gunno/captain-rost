@@ -112,13 +112,14 @@ class ExecutionRiskWorker:
                 })
                 continue
 
-            # 2. Исполнение тейк-профита (🔥 TP1 и TP🏃🏻‍➡️ с защитой на кульминации)
+            # 2. Исполнение тейк-профита (🔥 TP1 и конвейер 🛡🔥 / TP🏃🏻‍➡️ без обрезки ракет на взлёте)
             if last >= pos["tp"]:
                 candles_15m = await market_data.get_kline(sym, "15", 120)
                 candles_1h = await market_data.get_kline(sym, "60", 250)
 
                 if not pos.get("tp1_done"):
-                    tp1_ratio = 0.65 if pos.get("entry_mode") == "reversal" else 0.50
+                    # Фиксируем 40% (для тренда) и 50% (для реверсала), оставляя 60%/50% на 🛡🔥 и TP🏃🏻‍➡️
+                    tp1_ratio = 0.50 if pos.get("entry_mode") == "reversal" else 0.40
                     part_qty = pos["qty"] * tp1_ratio
                     ex = paper.sell_partial(sym, part_qty, pos["tp"], "🔥 TP1")
                     pos["tp1_done"] = True
@@ -126,7 +127,7 @@ class ExecutionRiskWorker:
                     shadow.mark_success(sym)
 
                     next_target, _, _ = calc_runner_target(sym, last, candles_15m, candles_1h, pos=pos)
-                    pos["tp"] = max(pos["tp"] * 1.012, next_target)
+                    pos["tp"] = max(pos["tp"] * 1.015, next_target)
 
                     _, new_sl, new_state, _ = update_position_sl(pos, max(pos.get("max_price", last), last), last_price=last, candles_15m=candles_15m)
                     pos["sl"] = new_sl
@@ -165,6 +166,28 @@ class ExecutionRiskWorker:
                             "text": (
                                 f"TP🏃🏻‍➡️ <b>Потолок коридора расширен</b> · {pair_html(sym, pos)}\n"
                                 f"🎯 {fmt_price(pos['tp'])} · {sl_tag} {fmt_price(pos['sl'])}"
+                            ),
+                            "urgent": False,
+                        })
+                    elif phase_reason in ("climax_freeze", "shelf_freeze"):
+                        # Вместо принудительной рыночной продажи на импульсе (кейс AXL) зажимаем ультра-стоп 🛡🔥 и двигаем потолок выше!
+                        old_tp = pos["tp"]
+                        candle_low = candles_15m[-1]["low"] if candles_15m else last * 0.993
+                        tight_sl = round(max(pos["sl"], old_tp * 0.995, candle_low * 0.998, last * 0.993), 8)
+                        if tight_sl >= last * 0.997:
+                            tight_sl = round(last * 0.995, 8)
+                        pos["sl"] = tight_sl
+                        pos["sl_state"] = "ABOVE_TP1"
+                        pos["tp"] = round(max(old_tp, last) * 1.018, 8)
+                        pos["_last_notified_sl_str"] = fmt_price(pos["sl"])
+                        pos["_last_notified_sl_state"] = "ABOVE_TP1"
+                        pos["_last_sl_notify_ts"] = now_ts
+                        state_changed = True
+                        paper.log_event(sym, "tp_runner_raised", pos["tp"], f"🛡🔥 Ультра-трейлинг ({phase_reason})", mode="🛡🔥", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                        self.bus.publish("NOTIFY", {
+                            "text": (
+                                f"🛡🔥 <b>Ультра-трейлинг на импульсе</b> · {pair_html(sym, pos)}\n"
+                                f"TP🏃🏻‍➡️ {fmt_price(pos['tp'])} · 🛡🔥 {fmt_price(pos['sl'])}"
                             ),
                             "urgent": False,
                         })
