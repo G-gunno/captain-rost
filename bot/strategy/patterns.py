@@ -17,6 +17,13 @@ def detect_patterns(candles_15m: list, a15: float, e50: float, e21: float, recen
     vol_ratio_closed = (closed["volume"] / avg_vol) if avg_vol > 0 else 1.0
     r = rsi(closes)
 
+    # Фильтр Anti-Waterfall (защита от ловли отвесного водопада > 10% без 2 свечей удержания дна — кейс ICNT)
+    local_drop_pct = ((recent_high - curr["close"]) / recent_high * 100) if recent_high > curr["close"] else 0.0
+    waterfall_stabilized = (
+        local_drop_pct <= 10.0 or
+        (closed["low"] >= prev2["low"] * 0.9985 and curr["low"] >= closed["low"] * 0.9985 and closed["close"] > closed["open"])
+    )
+
     # 1. SPRING PINBAR
     pinbar_found = False
     pin_wick_pct = 0.0
@@ -45,7 +52,7 @@ def detect_patterns(candles_15m: list, a15: float, e50: float, e21: float, recen
             wick_entry_price = round(curr_body_low - 0.45 * curr_lwick, 8)
 
     if pinbar_found:
-        if r <= 42 or curr["close"] < e50:
+        if (r <= 42 or curr["close"] < e50) and waterfall_stabilized:
             patterns.append({
                 "key": "pinbar",
                 "name": f"Пин-бар выкупа на дне (хвост {pin_wick_pct:.0f}%, vol x{pin_vol:.1f})",
@@ -62,7 +69,7 @@ def detect_patterns(candles_15m: list, a15: float, e50: float, e21: float, recen
                 "wick_entry_price": wick_entry_price,
             })
 
-    # 2. BULLISH DIVERGENCE (Ужесточено: rsi_past обязана быть <= 36.0 в зоне реальной перепроданности)
+    # 2. BULLISH DIVERGENCE (Старт строго из перепроданности rsi_past <= 36.0 + защита от водопада)
     rsi_now = r
     past_closes = closes[:-6]
     rsi_past = rsi(past_closes)
@@ -70,7 +77,7 @@ def detect_patterns(candles_15m: list, a15: float, e50: float, e21: float, recen
     low_past = min(c["low"] for c in candles_15m[-18:-6])
     turning_up = (closed["close"] > closed["open"] and curr["close"] >= closed["close"] * 0.999) or (curr["close"] > closed["high"])
 
-    if low_now <= low_past * 1.003 and rsi_past <= 36.0 and rsi_now > (rsi_past + 3.5) and rsi_now <= 46 and turning_up:
+    if waterfall_stabilized and low_now <= low_past * 1.003 and rsi_past <= 36.0 and rsi_now > (rsi_past + 3.5) and rsi_now <= 46 and turning_up:
         w_base_entry = round(low_now + (curr["close"] - low_now) * 0.32, 8)
         patterns.append({
             "key": "divergence",
@@ -150,8 +157,8 @@ def detect_patterns(candles_15m: list, a15: float, e50: float, e21: float, recen
                     "base_bonus": 3.0,
                 })
 
-    # 5. FAILED AUCTION (Бычье поглощение — только по тренду над EMA 50)
-    if curr["close"] >= e50 * 0.995:
+    # 5. FAILED AUCTION (Бычье поглощение — строго в аптренде над EMA21 и EMA50)
+    if curr["close"] >= e50 * 0.998 and e21 >= e50 * 0.999:
         closed_engulf = (
             prev2["close"] < prev2["open"] and
             closed["close"] > closed["open"] and
