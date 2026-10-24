@@ -151,57 +151,54 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     r_1h = rsi(closes_1h)
     a_1h = atr(candles_1h)
 
-    # Точная проверка пост-памп обвала за последние 16 часов:
-    # Сначала должен быть реальный памп >= 10% (min_before_peak -> max_h_16), а затем слив с пика >= 25% под EMA21 или красной свечой
     recent_16_1h = candles_1h[-16:] if len(candles_1h) >= 16 else candles_1h
     high_idx_16 = max(range(len(recent_16_1h)), key=lambda i: recent_16_1h[i]["high"])
     max_h_16 = recent_16_1h[high_idx_16]["high"]
     if 2 <= high_idx_16 <= len(recent_16_1h) - 2:
         min_before_peak = min(c["low"] for c in recent_16_1h[:high_idx_16 + 1])
         pump_1h_pct = ((max_h_16 - min_before_peak) / min_before_peak * 100) if min_before_peak > 0 else 0.0
-        if pump_1h_pct >= 10.0:
+        if pump_1h_pct >= 12.0:
             pullback_from_peak = (max_h_16 - last_1h) / (max_h_16 - min_before_peak) if max_h_16 > min_before_peak else 0.0
-            if pullback_from_peak >= 0.25 and (last_1h < e21_1h or candles_1h[-1]["close"] < candles_1h[-1]["open"]):
+            if pullback_from_peak >= 0.30 and (last_1h < e21_1h or candles_1h[-1]["close"] < candles_1h[-1]["open"]):
                 return "1H_BAN", e21_1h, e50_1h, f"1H остывание после пампа (+{pump_1h_pct:.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    e21_falling_1h = (e21_1h < e21_3h_ago * 0.9985) and (last_1h < e21_1h)
-    e50_rising_48h = (e50_1h >= e50_12h_ago * 0.999) and (e50_1h >= e50_24h_ago * 0.996)
-    e50_falling_48h = (e50_1h < e50_12h_ago * 0.997) or (e50_1h < e50_24h_ago * 0.992)
+    e21_falling_1h = (e21_1h < e21_3h_ago * 0.997) and (last_1h < e21_1h * 0.995)
+    e50_falling_48h = (e50_1h < e50_12h_ago * 0.995) and (e50_1h < e50_24h_ago * 0.990)
 
+    # Разрешаем откат к 1H EMA50 (last_1h >= e50_1h * 0.997) и расширяем потолок диапазона до 0.85
     is_uptrend_1h = (
-        last_1h >= e50_1h and
-        last_1h >= e21_1h * 0.998 and
-        e21_1h >= e50_1h * 0.998 and
+        last_1h >= e50_1h * 0.997 and
+        e21_1h >= e50_1h * 0.996 and
         not e21_falling_1h and
         not e50_falling_48h and
-        0.35 <= pos_in_48h <= 0.72 and
-        chg_48h <= 16.5 and
-        r_1h <= 72
+        0.25 <= pos_in_48h <= 0.85 and
+        chg_48h <= 22.0 and
+        r_1h <= 75
     )
     if is_uptrend_1h:
         return "1H_TREND_OK", e21_1h, e50_1h, f"1H аптренд 48ч ({chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    if pos_in_48h > 0.72 or chg_48h > 16.5:
+    if pos_in_48h > 0.85 or chg_48h > 22.0:
         return "1H_BAN", e21_1h, e50_1h, f"1H крыша/перегрев 48ч ({chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    has_strong_slab = bool(nearest_sup and sup_touches >= 3 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 2.2 * a15)
-    has_moderate_sup = bool(nearest_sup and sup_touches >= 2 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 1.5 * a15)
+    has_strong_slab = bool(nearest_sup and sup_touches >= 3 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 2.5 * a15)
+    has_moderate_sup = bool(nearest_sup and sup_touches >= 2 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 1.8 * a15)
 
     bottom_reclaim = False
-    if pos_in_48h <= 0.30 and has_moderate_sup and candles_15m and len(candles_15m) >= 25:
+    if pos_in_48h <= 0.40 and has_moderate_sup and candles_15m and len(candles_15m) >= 25:
         c15_closes = [c["close"] for c in candles_15m]
         e21_15m = ema(c15_closes, 21)[-1]
-        if c15_closes[-1] >= e21_15m and candles_15m[-2]["close"] > candles_15m[-2]["open"]:
+        if c15_closes[-1] >= e21_15m * 0.998 and candles_15m[-2]["close"] > candles_15m[-2]["open"]:
             bottom_reclaim = True
 
     if last_1h < e50_1h and e50_falling_48h:
         dist_below_e50_1h = (e50_1h - last_1h) / a_1h if a_1h > 0 else 0.0
-        if (has_strong_slab or bottom_reclaim) and dist_below_e50_1h <= 3.0 and pos_in_48h <= 0.50:
+        if (has_strong_slab or bottom_reclaim) and dist_below_e50_1h <= 3.5 and pos_in_48h <= 0.60:
             tag_str = "разворот со дна 48ч" if bottom_reclaim else f"1H плита в даунтренде ({sup_touches}x)"
             return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"{tag_str} (48ч {chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
         return "1H_BAN", e21_1h, e50_1h, f"1H 48ч даунтренд без плиты ({chg_48h:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    if (has_strong_slab or has_moderate_sup or bottom_reclaim) and pos_in_48h <= 0.55:
+    if (has_strong_slab or has_moderate_sup or bottom_reclaim) and pos_in_48h <= 0.65:
         return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"1H опора на плиту ({sup_touches}x, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
     return "1H_BAN", e21_1h, e50_1h, f"1H нет тренда и нет плиты за 48ч ({chg_48h:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
@@ -210,9 +207,9 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
 def raw_max_score(regime):
     m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
     m += max(learner.weight("indep"), learner.weight("news_pos"), learner.weight("hype"))
-    m += 6.2
-    return max(13.5, m)
-
+    # Снижаем надбавку с 6.2 до 4.2, чтобы сильные трендовые сетапы с 1 бонусом набирали 6.0-6.8 баллов
+    m += 4.2
+    return max(11.5, m)
 
 def _returns(closes):
     return [(b - a) / a for a, b in zip(closes, closes[1:]) if a]
@@ -530,7 +527,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         closes_1h = [c["close"] for c in candles_1h]
         r_1h = rsi(closes_1h)
 
-        if gate_1h == "1H_TREND_OK" and (r_1h < 52 or abs(last - e50) <= 1.2 * a15) and e12 >= e26 * 0.999:
+        if gate_1h == "1H_TREND_OK" and (r_1h < 58 or abs(last - e21) <= 1.2 * a15 or abs(last - e50) <= 1.5 * a15) and e12 >= e26 * 0.998:
             score += 1.8
             reasons.append("MTF: выкуп отката в 48ч 1H аптренде (+1.8)")
             keys.append("mtf_dip")
