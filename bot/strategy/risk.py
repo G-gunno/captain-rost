@@ -11,13 +11,12 @@ TIER_SL_FLOOR = {
 }
 
 TIER_TP_FLOOR = {
-    "TOP20": 0.010,  # 1.0%
-    "MID":   0.013,  # 1.3%
-    "SMALL": 0.016,  # 1.6%
-    "MICRO": 0.018,  # 1.8%
+    "TOP20": 0.012,  # 1.2%
+    "MID":   0.015,  # 1.5%
+    "SMALL": 0.018,  # 1.8%
+    "MICRO": 0.020,  # 2.0%
 }
 
-# Снижены потолки максимального стопа для защиты капитала микро/малых тиров
 TIER_MAX_SL = {
     "TOP20": 2.0,
     "MID":   2.2,
@@ -46,23 +45,23 @@ TRADE_POLICIES = {
         "risk_per_trade_core": 0.75,
         "risk_per_trade_alt": 0.50,
         "min_rr_sniper": 1.15,
-        "min_rr_alt": 1.00,
+        "min_rr_alt": 1.05,
         "require_grade_a_for_alt": True,
     },
     "NORMAL": {
         "max_portfolio_risk_pct": 3.0,
         "risk_per_trade_core": 1.00,
         "risk_per_trade_alt": 0.75,
-        "min_rr_sniper": 1.05,
-        "min_rr_alt": 0.95,
+        "min_rr_sniper": 1.10,
+        "min_rr_alt": 1.00,
         "require_grade_a_for_alt": False,
     },
     "AGGRESSIVE": {
         "max_portfolio_risk_pct": 5.0,
         "risk_per_trade_core": 1.25,
         "risk_per_trade_alt": 1.00,
-        "min_rr_sniper": 1.00,
-        "min_rr_alt": 0.90,
+        "min_rr_sniper": 1.05,
+        "min_rr_alt": 0.95,
         "require_grade_a_for_alt": False,
     },
 }
@@ -81,6 +80,10 @@ def calc_breakeven_price(avg_price: float, fee_pct: float = 0.10) -> float:
 
 
 def evaluate_setup_grade(cand: dict) -> str:
+    """
+    Строгий отбор сетапов [💎] Grade A+:
+    Без подтвержденного сильного паттерна (pinbar, divergence, vcp, breakout) статус A+ не выдается!
+    """
     pos_in_48h = cand.get("pos_in_48h", 0.5)
     corr = abs(cand.get("corr", 1.0))
     entry_mode = cand.get("entry_mode", "sniper")
@@ -90,17 +93,15 @@ def evaluate_setup_grade(cand: dict) -> str:
     if corr > 0.55:
         return "B"
 
-    confluence = 0
     patterns = cand.get("patterns", [])
+    strong_pats = [p for p in patterns if p in ("pinbar", "divergence", "vcp", "breakout")]
+    if not strong_pats:
+        return "B"
+
+    confluence = 2
     keys = cand.get("reason_keys", [])
     sv = cand.get("signal_values", {})
     sup_touches = cand.get("sup_touches", 0)
-
-    strong_pats = [p for p in patterns if p in ("pinbar", "divergence", "vcp", "breakout")]
-    if len(strong_pats) >= 1:
-        confluence += 2
-    elif len(patterns) >= 1:
-        confluence += 1
 
     if sup_touches >= 4:
         confluence += 2
@@ -115,9 +116,6 @@ def evaluate_setup_grade(cand: dict) -> str:
 
     if corr < 0.25:
         confluence += 1
-
-    if not strong_pats and sup_touches < 4:
-        return "B"
 
     req_confluence = 5 if getattr(learner, "grade_a_streak", 0) <= -2 else 4
     return "A+" if confluence >= req_confluence else "B"
@@ -152,7 +150,7 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
                         ema50: float = None, e21_1h: float = None, e50_1h: float = None):
     tier = tier or "SMALL"
     sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.015)
-    tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.016)
+    tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.018)
     max_sl_allowed = TIER_MAX_SL.get(tier, 2.0)
 
     sl_tuning = shadow.sl_mult()
@@ -167,7 +165,7 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
             sl = round(entry - sl_dist, 8)
 
     if sl_dist <= 0:
-        base_mult = 0.85 if is_mom else (1.50 if entry_mode == "reversal" else 1.20)
+        base_mult = 0.85 if is_mom else (1.45 if entry_mode == "reversal" else 1.20)
         sl_dist_raw = max(base_mult * a * sl_tuning, entry * sl_floor_pct)
         sl_dist = min(sl_dist_raw, entry * (max_sl_allowed / 100.0))
         sl = round(entry - sl_dist, 8)
@@ -191,29 +189,32 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     if sl >= entry or (sl_dist / entry * 100) > max_sl_allowed:
         return None, None, False, "Недопустимая дистанция SL"
 
-    tp_dist_raw = max(1.65 * a * tp_tuning, sl_dist * 1.35, entry * tp_floor_pct)
+    tp_dist_raw = max(1.75 * a * tp_tuning, sl_dist * 1.40, entry * tp_floor_pct)
     tp = round(entry + tp_dist_raw, 8)
     if min_rr is None:
-        min_rr = 1.05 if entry_mode == "sniper" else 0.95
+        min_rr = 1.10 if entry_mode == "sniper" else 1.05
 
-    if entry_mode == "reversal" and e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry * 1.008:
+    if entry_mode == "reversal" and e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry * 1.010:
         cap_1h = round(e21_1h * 0.998, 8)
-        if cap_1h < tp and (cap_1h - entry) / sl_dist >= 0.85:
-            tp = cap_1h
-            min_rr = min(min_rr, 0.85)
+        if cap_1h < tp:
+            if (cap_1h - entry) / sl_dist >= 1.05:
+                tp = cap_1h
+                min_rr = min(min_rr, 1.05)
+            else:
+                return None, None, False, f"Потолок 1H EMA21 зажимает RR ({((cap_1h - entry)/sl_dist):.2f} < 1.05)"
 
     if res and res > entry and res_touches >= 4:
         res_dist_pct = (res - entry) / entry * 100
-        if res_dist_pct < 0.35:
-            return None, None, False, f"Капитальная стена 1H в упор ({res_dist_pct:.2f}% < 0.35%)"
+        if res_dist_pct < 0.45:
+            return None, None, False, f"Капитальная стена 1H в упор ({res_dist_pct:.2f}% < 0.45%)"
 
         res_cap_tp = round(res * 0.997, 8)
         if res_cap_tp < tp:
-            if (res_cap_tp - entry) / sl_dist >= 0.85:
+            if (res_cap_tp - entry) / sl_dist >= 1.05:
                 tp = res_cap_tp
-                min_rr = min(min_rr, 0.85)
+                min_rr = min(min_rr, 1.05)
             else:
-                return None, None, False, f"Капитальная стена 1H не дает забрать 0.85x RR (RR={(res_cap_tp - entry)/sl_dist:.2f})"
+                return None, None, False, f"Капитальная стена 1H не дает забрать 1.05x RR (RR={(res_cap_tp - entry)/sl_dist:.2f})"
 
     rr = (tp - entry) / sl_dist
     if tp <= entry or round(rr, 2) < min_rr:
@@ -233,8 +234,8 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
     a15 = atr(candles_15m)
 
     dist_from_e50_atr = ((current_price - e50) / a15) if a15 > 0 else 0.0
-    if r15 > 75 or dist_from_e50_atr > 3.5:
-        climax_tp = round(max(current_price, candles_15m[-1]["high"]) * 1.001, 8)
+    if r15 > 76 or dist_from_e50_atr > 3.8:
+        climax_tp = round(max(current_price, candles_15m[-1]["high"]) * 1.018, 8)
         return climax_tp, False, "climax_freeze"
 
     entry_mode = (pos or {}).get("entry_mode", "sniper")
@@ -249,7 +250,7 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
     recent_box = (max(c["high"] for c in candles_15m[-6:]) - min(c["low"] for c in candles_15m[-6:])) / current_price if current_price > 0 else 0.0
     if recent_box <= 0.015 and e21 <= e50 * 1.001:
         old_tp = (pos or {}).get("tp", current_price * 1.02)
-        return round(max(old_tp, current_price * 1.012), 8), False, "shelf_freeze"
+        return round(max(old_tp, current_price * 1.015), 8), False, "shelf_freeze"
 
     all_res, _ = get_all_sr_levels(candles_15m, candles_1h)
     res_above = [r[0] for r in all_res if r[0] > current_price * 1.012 and r[1] >= 4]
@@ -306,7 +307,7 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
     ema_ratchet_sl = 0.0
     if a15 > 0 and e21 > 0 and e50 > 0:
         if is_climax and profit_pct >= 1.2:
-            ema_ratchet_sl = e21 - 0.40 * a15
+            ema_ratchet_sl = e21 - 0.35 * a15
         elif is_rocket:
             if last_p > e21:
                 ema_ratchet_sl = e21 - 0.45 * a15
@@ -324,7 +325,15 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
         tp1_ref = float(pos.get("tp1_price") or pos.get("initial_tp") or 0.0)
         runner_dist = cfg["runner_dist"] * (0.80 if is_rocket else 1.0)
         runner_trail = round(max_p * (1 - runner_dist), 8)
-        candidate = max(breakeven, runner_trail, ema_ratchet_sl)
+
+        # После взятия TP1 сразу запираем +45% высоты первого тейка (никогда не откатываемся в голый ноль!)
+        tp1_lock = round(avg_p + (tp1_ref - avg_p) * 0.45, 8) if tp1_ref > avg_p else breakeven
+
+        # Ускоренный переход в 🛡🔥 ABOVE_TP1: как только цена прошла +0.30 ATR (или +0.4%) выше TP1, стоп шагает за TP1!
+        if tp1_ref > 0 and ((a15 > 0 and max_p >= tp1_ref + 0.30 * a15) or max_p >= tp1_ref * 1.004):
+            tp1_lock = max(tp1_lock, round(tp1_ref * 1.0005, 8))
+
+        candidate = max(breakeven, tp1_lock, runner_trail, ema_ratchet_sl)
         if candidate > new_sl:
             new_sl = candidate
 
