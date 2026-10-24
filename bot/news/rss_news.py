@@ -33,7 +33,6 @@ POS_WORDS = [
 
 
 def _count(words, text):
-    """Считает совпадения по границам слов (bank != ban)."""
     total = 0
     for w in words:
         pat = re.compile(r'\b' + re.escape(w) + r'\b', re.IGNORECASE)
@@ -44,8 +43,6 @@ def _count(words, text):
 
 def _parse(xml_text):
     items = []
-    
-    # Попытка 1: строгий XML парсер
     try:
         root = ET.fromstring(xml_text)
         for item in root.iter('item'):
@@ -56,21 +53,16 @@ def _parse(xml_text):
                 'ts': int(time.time()),
             })
         return items
-    except ET.ParseError:
-        pass # Идем в Fallback
-    except Exception as e:
-        logger.debug(f"RSS XML parse failed, trying regex fallback: {e}")
+    except Exception:
+        pass
 
-    # Попытка 2: Бронебойный Regex (Fallback)
     try:
         item_pattern = re.compile(r'<item[^>]*>(.*?)</item>', re.IGNORECASE | re.DOTALL)
         for block in item_pattern.finditer(xml_text):
             chunk = block.group(1)
-            
             title_m = re.search(r'<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>', chunk, re.IGNORECASE | re.DOTALL)
             desc_m = re.search(r'<description[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</description>', chunk, re.IGNORECASE | re.DOTALL)
             link_m = re.search(r'<link[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>', chunk, re.IGNORECASE | re.DOTALL)
-            
             items.append({
                 'title': title_m.group(1).strip() if title_m else '',
                 'desc': desc_m.group(1).strip() if desc_m else '',
@@ -79,15 +71,11 @@ def _parse(xml_text):
             })
     except Exception as e:
         logger.error(f"RSS regex fallback failed: {e}")
-
     return items
 
 
 def _parse_listings(xml_text):
-    """Извлекает новые листинги из RSS Bybit — устойчиво к невалидному XML."""
     listings = []
-
-    # Попытка 1: стандартный XML-парсер
     try:
         root = ET.fromstring(xml_text)
         for item in root.iter('item'):
@@ -98,41 +86,28 @@ def _parse_listings(xml_text):
             if entry:
                 listings.append(entry)
         return listings
-    except ET.ParseError:
-        pass  # невалидный XML — идём в fallback
-    except Exception as e:
-        logger.debug(f"Listings ET parse failed, trying regex fallback: {e}")
+    except Exception:
+        pass
 
-    # Попытка 2: regex-fallback — работает с битым XML/HTML
     try:
-        item_pattern = re.compile(
-            r'<item[^>]*>(.*?)</item>',
-            re.IGNORECASE | re.DOTALL
-        )
+        item_pattern = re.compile(r'<item[^>]*>(.*?)</item>', re.IGNORECASE | re.DOTALL)
         for block in item_pattern.finditer(xml_text):
             chunk = block.group(1)
-            title_m = re.search(r'<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>',
-                                chunk, re.IGNORECASE | re.DOTALL)
-            link_m = re.search(r'<link[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>',
-                               chunk, re.IGNORECASE | re.DOTALL)
-            date_m = re.search(r'<pubDate[^>]*>(.*?)</pubDate>',
-                               chunk, re.IGNORECASE | re.DOTALL)
+            title_m = re.search(r'<title[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>', chunk, re.IGNORECASE | re.DOTALL)
+            link_m = re.search(r'<link[^>]*>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</link>', chunk, re.IGNORECASE | re.DOTALL)
+            date_m = re.search(r'<pubDate[^>]*>(.*?)</pubDate>', chunk, re.IGNORECASE | re.DOTALL)
             title = title_m.group(1).strip() if title_m else ''
             link = link_m.group(1).strip() if link_m else ''
             pub_date = date_m.group(1).strip() if date_m else None
             entry = _extract_listing(title, link, pub_date)
             if entry:
                 listings.append(entry)
-        if listings:
-            logger.info(f"Listings parsed via regex fallback: {len(listings)} items")
     except Exception as e:
-        logger.error(f"Listings regex fallback also failed: {e}")
-
+        logger.error(f"Listings regex fallback failed: {e}")
     return listings
 
 
 def _extract_listing(title, link, pub_date):
-    """Если заголовок про новый листинг — возвращает запись, иначе None."""
     match = re.search(r'New Listing:?\s+([A-Z0-9]+)\s*USDT', title, re.IGNORECASE)
     if not match:
         match = re.search(r'\b([A-Z0-9]{2,10})\s*USDT\s+(?:Now\s+)?Listed', title, re.IGNORECASE)
@@ -151,9 +126,7 @@ def _extract_listing(title, link, pub_date):
 
 
 async def fetch_news_cache(force=False):
-    """Свежие заголовки из RSS (кэш 15 минут)."""
     now = time.time()
-    # Если force=True, игнорируем кэш и идем в сеть
     if not force and _cache["items"] is not None and now - _cache["ts"] < 900:
         return _cache["items"]
     all_items = []
@@ -169,15 +142,11 @@ async def fetch_news_cache(force=False):
 
 
 async def fetch_listings_cache(force=False):
-    """Новые листинги Bybit (кэш 1 час)."""
     now = time.time()
     if not force and _cache["listings"] is not None and now - _cache["listings_ts"] < 3600:
         return _cache["listings"]
     listings = []
-    for url in [
-        "https://announcements.bybit.com/en/rss",
-        "https://announcements.bybit.com/rss",
-    ]:
+    for url in ["https://announcements.bybit.com/en/rss", "https://announcements.bybit.com/rss"]:
         try:
             async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
                 r = await c.get(url)
@@ -192,13 +161,18 @@ async def fetch_listings_cache(force=False):
 
 
 def check_sentiment(items, keys):
-    """Новостной фон по монете: (негатив, позитив, упоминания, заголовки)."""
+    """Новостной фон по монете с защитой коротких тикеров через границы слов \b."""
     neg = pos = mentions = 0
     heads = []
-    keys_low = [k.lower() for k in keys if k]
+    valid_keys = [k.strip() for k in keys if k and len(k.strip()) >= 2]
+    if not valid_keys:
+        return 0, 0, 0, []
+
+    key_patterns = [re.compile(r'\b' + re.escape(k) + r'\b', re.IGNORECASE) for k in valid_keys]
+
     for it in items:
         text = it["title"] + " " + it["desc"]
-        if not any(k in text.lower() for k in keys_low):
+        if not any(pat.search(text) for pat in key_patterns):
             continue
         mentions += 1
         n = _count(NEG_WORDS, text)
@@ -213,7 +187,6 @@ def check_sentiment(items, keys):
 
 
 def get_stats():
-    """Статистика RSS-лент для мониторинга."""
     now = time.time()
     cache_age = now - _cache["ts"] if _cache["ts"] else None
     items = _cache["items"] or []
@@ -231,10 +204,7 @@ def get_stats():
             pos_examples.append(item["title"][:80])
 
     now_ts = int(time.time())
-    fresh_listings = [
-        l for l in listings
-        if 86400 <= now_ts - l['ts'] <= 1209600  # 24ч – 14 дней
-    ]
+    fresh_listings = [l for l in listings if 86400 <= now_ts - l['ts'] <= 1209600]
 
     return {
         "cache_age_min": round(cache_age / 60, 1) if cache_age else None,
