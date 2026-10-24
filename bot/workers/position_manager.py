@@ -103,7 +103,7 @@ class PositionManagerWorker:
             base = sym[:-4]
             name = await get_coin_name(base)
             neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
-            is_toxic = neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33)
+            is_toxic = neg >= 2 and neg >= (pos_news * 2) and neg >= (mentions * 0.33)
 
             if is_toxic:
                 bot_state.set_cooldown(sym, 7200)
@@ -115,11 +115,12 @@ class PositionManagerWorker:
                     continue
 
             entry_mode = pos.get("entry_mode", "sniper")
-            trend_broken = (last < e50 * 0.996 and e21 < (e50 * 0.997))
+            trend_broken = (last < e50 - 0.5 * a and e21 < e50 * 0.995)
             pos_age = current_time - pos.get("entry_time", current_time)
 
             should_exit_early = False
-            if pos_age >= 900 and not is_toxic:
+            # Увеличен тайм-аут раннего выхода до 30 минут с подтверждением по 2 свечам
+            if pos_age >= 1800 and not is_toxic:
                 if entry_mode != "reversal" and trend_broken:
                     should_exit_early = True
 
@@ -170,7 +171,7 @@ class PositionManagerWorker:
                     self._notify(f"TP🏃🏻‍➡️ <b>Потолок коридора поднят</b> · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · {sl_tag} {fmt_price(pos['sl'])}")
 
         # =====================================================================
-        # 2. ПРОВЕРКА НЕИСПОЛНЕННЫХ ОРДЕРОВ (С ПРОЗРАЧНЫМ ЛОГИРОВАНИЕМ СНЯТИЯ)
+        # 2. ПРОВЕРКА НЕИСПОЛНЕННЫХ ОРДЕРОВ (Иммунитет 15 минут)
         # =====================================================================
         for order in list(paper.orders):
             sym = order["symbol"]
@@ -182,7 +183,7 @@ class PositionManagerWorker:
             name = await get_coin_name(base)
             neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
 
-            if neg > 0 and neg >= (pos_news * 2) and neg >= (mentions * 0.33):
+            if neg >= 2 and neg >= (pos_news * 2) and neg >= (mentions * 0.33):
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Токсичные новости", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 7200)
@@ -226,7 +227,8 @@ class PositionManagerWorker:
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ ({init_score:.1f}-{score_now:.1f})")
                 continue
 
-            if not base_intact and score_now < (thr - 1.5):
+            # Иммунитет свежего ордера (15 минут): не отменяем по ослаблению сигнала раньше чем через 900с
+            if order_age >= 900 and not base_intact and score_now < (thr - 1.5):
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], f"Ослаб ({score_now:.1f})", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 300)
@@ -250,7 +252,6 @@ class PositionManagerWorker:
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ ({init_score:.1f}-{score_now:.1f})")
                 continue
 
-            # Зона заморозки (Freeze Zone): реквот не чаще раза в 8 минут
             last_move_ts = order.get("last_move_ts", order["created"])
             if (current_time - last_move_ts) < 480:
                 continue
@@ -277,7 +278,6 @@ class PositionManagerWorker:
                     action_type = "correct"
                     price_icon = "⬇️"
 
-            # В режиме BEAR и при политике STRICT запрещено двигать лимитки вверх (hunt_up)!
             elif ideal_price > old_price and dev_pct >= 0.38 and not in_freeze_zone and regime != "bear" and new_mode != "STRICT":
                 can_shift_up = (is_accum and t["last"] <= (e50 * 1.012)) or (entry_mode == "sniper" and t["last"] <= (e21 * 1.008))
                 if can_shift_up:
