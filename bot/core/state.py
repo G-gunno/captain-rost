@@ -11,9 +11,11 @@ class BotState:
         self.trading_enabled = True
         self.paused = False
         self.fomo_cooldowns = {}
-        self.cooldown_meta = {}      # sym -> {"structural_reset": bool, "reason": str, "ts": int}
+        self.cooldown_meta = {}      # sym -> {"structural_reset": bool, "reason": str, "set_at": int, "until": int}
         self.consecutive_sl = {}     # sym -> count of consecutive stop-losses
         self.last_sl_price = {}      # sym -> price of last stop-loss
+        self.last_win_price = {}     # sym -> exit price of last profitable trade
+        self.last_win_ts = {}        # sym -> timestamp of last profitable trade
         self.current_regime = "neutral"
 
     def set_cooldown(self, sym: str, seconds: int, structural_reset: bool = False, reason: str = ""):
@@ -28,16 +30,23 @@ class BotState:
 
     def record_trade_exit(self, sym: str, pnl_pct: float, exit_price: float, is_sl: bool = False):
         """
-        Блок 4: Прогрессивный карантин монеты (Escalating Cooldown) со структурным сбросом:
-        - Плюс или БУ (>= -0.15%) -> пауза 15 минут (900с), сброс серии стопов.
+        Прогрессивный карантин монеты (Escalating & Post-Peak Cooldown):
+        - Реальный профит (> +0.25%) -> пауза 45 минут (2700с) для защиты от входа в остывающий памп (кейс SENT #2).
+        - Нейтральный БУ (-0.15% .. +0.25%) -> пауза 15 минут (900с).
         - 1-й стоп-лосс -> пауза 45 минут (2700с), фиксация уровня стопа.
-        - 2-й и более стоп подряд -> карантин до 4 часов (14400с) с правом досрочного
-          структурного сброса при возврате цены над EMA 21 (кейс WAL).
+        - 2-й и более стоп подряд -> карантин 4 часа (14400с).
         """
+        now_ts = int(time.time())
         if not is_sl or pnl_pct >= -0.15:
             self.consecutive_sl[sym] = 0
             self.last_sl_price.pop(sym, None)
-            self.set_cooldown(sym, 900, structural_reset=True, reason="win_or_be")
+            if pnl_pct > 0.25:
+                self.last_win_price[sym] = float(exit_price)
+                self.last_win_ts[sym] = now_ts
+                self.set_cooldown(sym, 2700, structural_reset=False, reason="post_peak_win")
+                logger.info(f"Cooldown {sym}: профитный выход ({pnl_pct:+.2f}%) -> пауза 45 мин (защита от остывания с пика)")
+            else:
+                self.set_cooldown(sym, 900, structural_reset=True, reason="neutral_be")
             return
 
         streak = self.consecutive_sl.get(sym, 0) + 1
@@ -52,10 +61,6 @@ class BotState:
             logger.info(f"Cooldown {sym}: {streak}-й стоп подряд -> карантин до 4ч (со структурным сбросом над EMA21)")
 
     def check_structural_reset(self, sym: str, last_price: float, ema21_15m: float, ema50_15m: float = 0.0) -> bool:
-        """
-        Если монета на карантине после стопов, но уже сформировала базу (минимум 15 мин прошло)
-        и пробила EMA 21 наверх на 15m — карантин автоматически сгорает!
-        """
         if sym not in self.fomo_cooldowns:
             return True
 
@@ -69,7 +74,6 @@ class BotState:
         if not meta.get("structural_reset"):
             return False
 
-        # Минимальная пауза 15 минут после стопа для формирования свежей базы
         elapsed = now - meta.get("set_at", 0)
         if elapsed < 900:
             return False
@@ -83,11 +87,20 @@ class BotState:
 
         return False
 
+    def can_enter_sniper(self, sym: str, current_price: float, patterns: list = None) -> tuple:
+        """
+        Блокирует повторный трендовый вход sniper в течение 2 часов после профитного выхода,
+        если цена сползает ниже точки нашего выхода и не сформировала свежий VCP или Breakout (кейс SENT #2).
+        """
+        win_p = self.last_win_price.get(sym)
+        win_ts = self.last_win_ts.get(sym, 0)
+        if win_p and (time.time() - win_ts) < 7200:
+            pats = patterns or []
+            if current_price < win_p * 0.998 and not any(p in pats for p in ("vcp", "breakout")):
+                return False, f"остывание ниже пика выхода (${win_p:.4f}) без паттерна VCP/Breakout"
+        return True, "OK"
+
     def can_enter_reversal(self, sym: str, current_price: float, ema21_15m: float) -> tuple:
-        """
-        Блокировка повторной ловли ножа: запрет нового входа reversal,
-        пока цена ниже уровня предыдущего стопа и не вернулась выше EMA 21 на 15m.
-        """
         last_sl = self.last_sl_price.get(sym)
         if last_sl and current_price < last_sl:
             if ema21_15m <= 0 or current_price < ema21_15m:
@@ -129,6 +142,8 @@ class BotState:
         self.cooldown_meta.clear()
         self.consecutive_sl.clear()
         self.last_sl_price.clear()
+        self.last_win_price.clear()
+        self.last_win_ts.clear()
         try:
             if PAUSED_FILE.exists():
                 PAUSED_FILE.unlink()
