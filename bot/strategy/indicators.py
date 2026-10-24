@@ -64,7 +64,8 @@ def _count_spaced_touches(price_target: float, points: list, tol: float = 0.005)
 
     touches_weight = 0
     last_idx_by_tf = {}
-    has_1h_touch = False
+    h1_touches_count = 0
+
     for item in sorted(matched, key=lambda x: (x[1], x[2])):
         p_val, tf_tag, idx, min_gap = item[0], item[1], item[2], item[3]
         w = item[4] if len(item) > 4 else 1
@@ -72,11 +73,16 @@ def _count_spaced_touches(price_target: float, points: list, tol: float = 0.005)
         if prev_idx is None or (idx - prev_idx) >= min_gap:
             touches_weight += w
             if tf_tag == "1h":
-                has_1h_touch = True
+                h1_touches_count += 1
             last_idx_by_tf[tf_tag] = idx
 
-    # Жесткое правило: статус «Капитальной стены» (вес >= 4) дается ТОЛЬКО при наличии минимум 1 часового (1h) касания!
-    if touches_weight >= 4 and not has_1h_touch:
+    # Если есть часовое касание, вычитаем 1 дублирующий 15m-экстремум того же самого пика
+    if h1_touches_count > 0 and "15m" in last_idx_by_tf:
+        touches_weight = max(2, touches_weight - 1)
+
+    # Статус «Капитальной стены» (вес >= 4) дается ТОЛЬКО при наличии минимум 2 часовых касаний
+    # или 1 часового + минимум 2 независимых 15m касаний
+    if touches_weight >= 4 and h1_touches_count == 0:
         touches_weight = 3
 
     return touches_weight
