@@ -41,7 +41,6 @@ def atr(candles, period=14):
 
 
 def _dedup_levels(levels):
-    """Объединяет близкие уровни в пределах 0.5%, оставляя уровень с максимальным весом касаний."""
     if not levels:
         return []
     deduped = []
@@ -57,13 +56,6 @@ def _dedup_levels(levels):
 
 
 def _count_spaced_touches(price_target: float, points: list, tol: float = 0.005) -> int:
-    """
-    Считает структурный вес уровня с требованием разнесения касаний во времени:
-    - Независимые часовые (1H) свинги (разнесенные минимум на 3 часа) дают вес 2.
-    - Независимые 15m свинги (разнесенные минимум на 4 свечи = 1 час) дают вес 1.
-    Благодаря этому 3 мелких касания на 15m внутри локальной пилы имеют вес 3 (обычный уровень),
-    а статус «Капитальной стены» (вес >= 4) получают только реальные часовые и многократные плиты.
-    """
     if price_target <= 0:
         return 0
     matched = [pt for pt in points if abs(pt[0] - price_target) / price_target <= tol]
@@ -72,25 +64,31 @@ def _count_spaced_touches(price_target: float, points: list, tol: float = 0.005)
 
     touches_weight = 0
     last_idx_by_tf = {}
+    has_1h_touch = False
     for item in sorted(matched, key=lambda x: (x[1], x[2])):
         p_val, tf_tag, idx, min_gap = item[0], item[1], item[2], item[3]
         w = item[4] if len(item) > 4 else 1
         prev_idx = last_idx_by_tf.get(tf_tag)
         if prev_idx is None or (idx - prev_idx) >= min_gap:
             touches_weight += w
+            if tf_tag == "1h":
+                has_1h_touch = True
             last_idx_by_tf[tf_tag] = idx
+
+    # Жесткое правило: статус «Капитальной стены» (вес >= 4) дается ТОЛЬКО при наличии минимум 1 часового (1h) касания!
+    if touches_weight >= 4 and not has_1h_touch:
+        touches_weight = 3
+
     return touches_weight
 
 
 def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72):
-    """Возвращает подтвержденные уровни S/R (сопротивления и поддержки) за 48-72ч."""
     if not candles_15m or len(candles_15m) < 15:
         return [], []
 
     high_points = []
     low_points = []
 
-    # 1. Анализ 1H свечей (разнесенные часовые фракталы имеют структурный вес 2)
     if candles_1h and isinstance(candles_1h, list) and len(candles_1h) >= 20:
         recent_1h = candles_1h[-window_1h:] if len(candles_1h) >= window_1h else candles_1h
         n1 = len(recent_1h)
@@ -102,7 +100,6 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72
             if all(l <= recent_1h[i + j]["low"] for j in (-2, -1, 1, 2)):
                 low_points.append((l, "1h", i, 3, 2))
 
-    # 2. Анализ 15m свечей (локальные 15m фракталы имеют вес 1, шаг >= 4 свечи)
     recent_15m = candles_15m[-window_15m:] if len(candles_15m) >= window_15m else candles_15m
     n15 = len(recent_15m)
     for i in range(3, n15 - 1):
@@ -133,11 +130,6 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72
 
 
 def find_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72, window=None):
-    """
-    Поиск ближайших подтвержденных уровней:
-    - Сопротивление: выше текущей цены (> +0.25%)
-    - Поддержка: ниже текущей цены (< -0.15%)
-    """
     if window is not None:
         window_15m = window
 
