@@ -17,12 +17,12 @@ TIER_TP_FLOOR = {
     "MICRO": 0.018,  # 1.8%
 }
 
-# Снижены потолки максимального стопа, чтобы исключить одиночные пробои по -4.15% (кейс ERA)
+# Снижены потолки максимального стопа для защиты капитала микро/малых тиров
 TIER_MAX_SL = {
     "TOP20": 2.0,
-    "MID":   2.4,
-    "SMALL": 2.6,
-    "MICRO": 2.9,
+    "MID":   2.2,
+    "SMALL": 2.0,
+    "MICRO": 2.2,
 }
 
 TIER_TRAIL_CONFIG = {
@@ -73,7 +73,6 @@ def get_trade_policy(risk_mode: str = "NORMAL") -> dict:
 
 
 def calc_breakeven_price(avg_price: float, fee_pct: float = 0.10) -> float:
-    """Точный математический безубыток с учетом двойной комиссии Bybit + микро-запас."""
     if avg_price <= 0:
         return 0.0
     f = fee_pct / 100.0
@@ -82,11 +81,6 @@ def calc_breakeven_price(avg_price: float, fee_pct: float = 0.10) -> float:
 
 
 def evaluate_setup_grade(cand: dict) -> str:
-    """
-    Строгий отбор сетапов высшей категории [💎] Grade A+:
-    - Запрет выдавать [💎] A+ на крыше 48-часового диапазона (pos_in_48h > 0.70) или при высокой корреляции с BTC (> 0.55).
-    - Обязательное схождение структурных факторов: сильный паттерн Price Action / часовая плита >= 4x + объем + MTF.
-    """
     pos_in_48h = cand.get("pos_in_48h", 0.5)
     corr = abs(cand.get("corr", 1.0))
     entry_mode = cand.get("entry_mode", "sniper")
@@ -130,7 +124,6 @@ def evaluate_setup_grade(cand: dict) -> str:
 
 
 def calc_total_open_risk_pct(positions: dict, orders: list, equity: float) -> float:
-    """Считает текущий открытый риск портфеля (Portfolio VaR) по активным стопам."""
     if equity <= 0:
         return 0.0
     total_risk_usdt = 0.0
@@ -157,16 +150,10 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
                         is_mom: bool = False, entry_mode: str = "sniper",
                         min_rr: float = None, recent_low_6: float = None,
                         ema50: float = None, e21_1h: float = None, e50_1h: float = None):
-    """
-    Умная постановка первичного Стоп-лосса и Тейк-профита:
-    1. Wick Low Protection: стоп ниже хвоста последних 6 свечей (recent_low_6 * 0.997).
-    2. Буфер под EMA 50 в аптренде (EMA 50 - 0.6 * ATR).
-    3. Капитальной стеной сопротивления считается только уровень с весом >= 4 (часовая/многократная плита).
-    """
     tier = tier or "SMALL"
     sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.015)
     tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.016)
-    max_sl_allowed = TIER_MAX_SL.get(tier, 2.6)
+    max_sl_allowed = TIER_MAX_SL.get(tier, 2.0)
 
     sl_tuning = shadow.sl_mult()
     tp_tuning = shadow.tp_mult()
@@ -281,14 +268,6 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
 
 
 def update_position_sl(pos: dict, max_p: float, last_price: float = None, candles_15m: list = None) -> tuple:
-    """
-    Дышащий Коридор с 5 фазами стопа:
-    - SHIELD (🛡📉): первичный стоп
-    - BREAKEVEN (🛡🔒): безубыток
-    - PROFIT_LOCK (🛡💼): фиксация прибыли ДО взятия TP1 (с ускоренным поджатием для 🚀 rocket — кейс MANA)
-    - TRAILING_RUNNER (🛡📈): динамический трейлинг ПОСЛЕ взятия TP1 (ниже уровня TP1)
-    - ABOVE_TP1 (🛡🔥): стоп-лосс перешагнул ВЫШЕ уровня первого тейка (TP1)!
-    """
     avg_p = pos.get("avg", 0.0)
     if avg_p <= 0:
         return False, pos.get("sl"), pos.get("sl_state", "SHIELD"), ""
@@ -329,9 +308,8 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
         if is_climax and profit_pct >= 1.2:
             ema_ratchet_sl = e21 - 0.40 * a15
         elif is_rocket:
-            # Для ракеты 🚀 поджимаем стоп значительно плотнее под быструю EMA 21
             if last_p > e21:
-                ema_ratchet_sl = e21 - 0.35 * a15
+                ema_ratchet_sl = e21 - 0.45 * a15
         elif entry_mode == "sniper":
             if last_p > e50:
                 ema_ratchet_sl = e50 - 0.80 * a15
@@ -350,7 +328,6 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
         if candidate > new_sl:
             new_sl = candidate
 
-        # Если стоп поднялся до или выше цены первого тейка TP1 -> присваиваем элитный статус 🛡🔥 ABOVE_TP1!
         if tp1_ref > 0 and new_sl >= tp1_ref * 0.9995:
             new_state = "ABOVE_TP1"
         elif new_sl > breakeven * 1.003:
@@ -358,23 +335,17 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
         else:
             new_state = "BREAKEVEN"
     else:
-        # 1. Агрессивная защита импульса для 🚀 Ракета ДО взятия TP1 (кейс MANA)
         if is_rocket:
-            # При прохождении >= 45% пути к TP1 (или +1.15% профита) — перенос в безубыток 🛡🔒
-            if profit_pct >= max(1.15, tp_target_pct * 0.45):
+            if profit_pct >= max(1.0, tp_target_pct * 0.50):
                 if breakeven > new_sl:
                     new_sl = breakeven
                     new_state = "BREAKEVEN"
-            # При прохождении >= 62% пути к TP1 (или +1.65% профита) — жесткий профит-лок 🛡💼 (фиксируем 48% импульса)
-            if profit_pct >= max(1.65, tp_target_pct * 0.62):
-                rocket_lock = round(avg_p + (max_p - avg_p) * 0.48, 8)
-                rocket_trail = round(max_p * (1 - cfg["lock_dist"] * 0.80), 8)
-                candidate = max(breakeven, rocket_lock, rocket_trail, ema_ratchet_sl)
-                if candidate > new_sl:
-                    new_sl = candidate
+            if a15 > 0 and e21 > 0 and last_p > e21:
+                e21_sl = e21 - 0.45 * a15
+                if e21_sl > new_sl:
+                    new_sl = e21_sl
                     new_state = "PROFIT_LOCK" if new_sl > breakeven * 1.002 else "BREAKEVEN"
 
-        # 2. Стандартный храповик по EMA и порогу lock_trigger_pct
         if ema_ratchet_sl > new_sl and profit_pct >= 0.8:
             new_sl = ema_ratchet_sl
             if new_sl >= breakeven * 1.003:
