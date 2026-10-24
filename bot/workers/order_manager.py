@@ -140,6 +140,11 @@ class OrderManagerWorker:
                 if not can_rev:
                     logger.info(f"OrderManager: {sym} reversal заблокирован -> {rev_reason}")
                     continue
+            elif entry_mode == "sniper":
+                can_snp, snp_reason = bot_state.can_enter_sniper(sym, cand["last"], patterns)
+                if not can_snp:
+                    logger.info(f"OrderManager: {sym} sniper заблокирован -> {snp_reason}")
+                    continue
 
             grade = evaluate_setup_grade(cand)
             if policy["require_grade_a_for_alt"] and entry_mode in ("reversal", "rocket"):
@@ -195,7 +200,7 @@ class OrderManagerWorker:
 
             min_rr = policy["min_rr_sniper"] if entry_mode == "sniper" else policy["min_rr_alt"]
 
-            # 1. СНАЧАЛА ПОЛНАЯ ВАЛИДАЦИЯ SL/TP/RR (никаких снятий старых ордеров, если новый кандидат не прошел валидацию!)
+            # 1. СНАЧАЛА 100% ВАЛИДАЦИЯ SL/TP/RR (ни один старый ордер не снимается вхолостую!)
             sl, tp, is_valid, rej_reason = calc_initial_sl_tp(
                 symbol=sym, entry=entry, tier=tier, a=a,
                 sup=sup, sup_touches=sup_touches,
@@ -212,10 +217,22 @@ class OrderManagerWorker:
                 logger.info(f"OrderManager: {sym} отклонён -> {rej_reason}")
                 continue
 
+            # 2. КОНТРОЛЬ ДИВЕРСИФИКАЦИИ СЕКТОРА (с умной ротацией внутри сектора только для валидного ордера)
+            lim = other_lim if sector == "Other" else sec_lim
+            sector_count = sum(1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector)
+            sector_orders = sum(1 for o in paper.orders if (o.get("sector") or "Other") == sector)
+            if (sector_count + sector_orders) >= lim:
+                if sector_orders > 0 and self._try_rotate_order(cand, grade, tickers, filter_sector=sector, reason_tag=f"лимит сектора {sector}"):
+                    pass
+                else:
+                    logger.debug(f"OrderManager: {sym} пропущен (лимит сектора {sector}: {lim})")
+                    continue
+
             sl_dist_pct = (entry - sl) / entry * 100
             if sl_dist_pct <= 0:
                 continue
 
+            # 3. КОНТРОЛЬ БЮДЖЕТА РИСКА PORTFOLIО VaR И СВОБОДНОГО USDT (с ротацией при нехватке средств)
             trade_risk_budget_pct = policy["risk_per_trade_core"] if entry_mode == "sniper" else policy["risk_per_trade_alt"]
             current_risk_pct = calc_total_open_risk_pct(paper.positions, paper.orders, equity)
             avail_risk_budget_pct = policy["max_portfolio_risk_pct"] - current_risk_pct
