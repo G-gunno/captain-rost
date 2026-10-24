@@ -98,7 +98,8 @@ class PositionManagerWorker:
 
             last = t["last"]
             pnl_pct = (last - pos["avg"]) / pos["avg"] * 100 if pos["avg"] else 0
-            e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
+            e21_series = ema(closes, 21)
+            e21, e50 = e21_series[-1], ema(closes, 50)[-1]
 
             base = sym[:-4]
             name = await get_coin_name(base)
@@ -115,11 +116,21 @@ class PositionManagerWorker:
                     continue
 
             entry_mode = pos.get("entry_mode", "sniper")
-            trend_broken = (last < e50 - 0.5 * a and e21 < e50 * 0.995)
+            e21_falling = len(e21_series) >= 4 and e21 < e21_series[-3] * 0.9995
+            closed_2_below = (
+                len(candles) >= 3 and
+                candles[-2]["close"] < (e50 - 0.55 * a) and
+                candles[-3]["close"] < (e50 - 0.55 * a)
+            )
+            trend_broken = (
+                closed_2_below and
+                last < (e50 - 0.55 * a) and
+                (e21 < e50 * 0.997 or e21_falling)
+            )
             pos_age = current_time - pos.get("entry_time", current_time)
 
             should_exit_early = False
-            # Увеличен тайм-аут раннего выхода до 30 минут с подтверждением по 2 свечам
+            # Досрочный выход только спустя >= 30 минут при закрытии 2 свечей подряд глубже EMA50 - 0.55*ATR
             if pos_age >= 1800 and not is_toxic:
                 if entry_mode != "reversal" and trend_broken:
                     should_exit_early = True
@@ -158,7 +169,7 @@ class PositionManagerWorker:
 
             if pos.get("tp1_done") and last >= (pos["tp"] - 0.5 * a):
                 candles_1h = await market_data.get_kline(sym, "60", 250)
-                next_target, can_expand, _ = calc_runner_target(sym, last, candles, candles_1h, pos=pos)
+                next_target, can_expand, phase_reason = calc_runner_target(sym, last, candles, candles_1h, pos=pos)
                 if can_expand and next_target > pos["tp"] * 1.006:
                     old_tp = pos["tp"]
                     pos["tp"] = next_target
