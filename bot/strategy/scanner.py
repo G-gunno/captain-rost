@@ -151,7 +151,7 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     r_1h = rsi(closes_1h)
     a_1h = atr(candles_1h)
 
-    # Расширенное окно 16 часов для поиска пика и фиксации остывания после пампа (кейсы ALT #1, ICNT)
+    # Расширенное окно 16 часов для поиска пика и фиксации остывания после пампа (кейсы ALT #1, ICNT, SENT #2)
     recent_16_1h = candles_1h[-16:] if len(candles_1h) >= 16 else candles_1h
     max_h_16 = max(c["high"] for c in recent_16_1h)
     min_l_16 = min(c["low"] for c in recent_16_1h)
@@ -501,14 +501,16 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         dist_to_sup = last - nearest_sup
         if 0 <= dist_to_sup <= 2.2 * a15:
             sup_is_near = True
-            # Улучшение: подтверждение удержания плиты (Slab Hold) последней закрытой 15m свечой
-            closed_candle_holds_sup = (candles_15m[-2]["close"] >= nearest_sup * 0.999) and (candles_15m[-2]["close"] >= candles_15m[-2]["open"] or (candles_15m[-2]["close"] - candles_15m[-2]["low"]) >= 0.5 * (candles_15m[-2]["high"] - candles_15m[-2]["low"]))
+            closed_candle_holds_sup = (
+                (candles_15m[-2]["close"] >= nearest_sup * 0.999) and
+                (candles_15m[-2]["close"] >= candles_15m[-2]["open"] or
+                 (candles_15m[-2]["close"] - candles_15m[-2]["low"]) >= 0.5 * (candles_15m[-2]["high"] - candles_15m[-2]["low"]))
+            )
             if not is_open_pos and (last > closes[-2] or "reversal" in matched_modes or (sup_touches >= 3 and closed_candle_holds_sup)):
                 sup_bonus = 2.6 if sup_touches >= 3 else 1.4
                 score += sup_bonus
                 reasons.append(f"плита поддержки ${fmt_price(nearest_sup)} ({sup_touches}x, +{sup_bonus:.1f})")
                 keys.append("support_bounce")
-                # Условие активации reversal: теперь строго при наличии подтвержденного паттерна дна (pinbar или divergence)
                 if sup_touches >= 3 and "reversal" not in matched_modes and any(p in pattern_keys for p in ("pinbar", "divergence")):
                     matched_modes.append("reversal")
 
@@ -666,28 +668,27 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
     by_vol = sorted(tradable, key=lambda s: tickers[s]["quote_volume"], reverse=True)[:40]
     by_chg = sorted([s for s in tradable if 0 < tickers[s]["change_pct"] < 25], key=lambda s: tickers[s]["change_pct"], reverse=True)[:20]
-
-    by_momentum = []
-    for sym in tradable[:50]:
-        candles = await market_data.get_kline(sym, "60", 168)
-        if len(candles) >= 100:
-            chg_7d = (candles[-1]["close"] - candles[0]["close"]) / candles[0]["close"] * 100
-            if 5 < chg_7d < 50:
-                by_momentum.append((sym, chg_7d))
-    by_momentum = [s for s, _ in sorted(by_momentum, key=lambda x: x[1], reverse=True)][:15]
-
-    by_volatility = []
-    for sym in tradable[:50]:
-        candles = await market_data.get_kline(sym, "15", 60)
-        if len(candles) >= 30:
-            a = atr(candles)
-            last = candles[-1]["close"]
-            atr_pct = (a / last) * 100 if last else 0
-            if atr_pct > 2.5:
-                by_volatility.append((sym, atr_pct))
-    by_volatility = [s for s, _ in sorted(by_volatility, key=lambda x: x[1], reverse=True)][:10]
-
     by_dip = sorted([s for s in tradable if tickers[s]["change_pct"] <= -6.0], key=lambda s: tickers[s]["change_pct"])[:15]
+
+    pre_sem = asyncio.Semaphore(10)
+
+    async def _check_mom_vol(sym):
+        async with pre_sem:
+            c1h, c15 = await asyncio.gather(
+                market_data.get_kline(sym, "60", 168),
+                market_data.get_kline(sym, "15", 60),
+            )
+            chg_7d = 0.0
+            if len(c1h) >= 100 and c1h[0]["close"] > 0:
+                chg_7d = (c1h[-1]["close"] - c1h[0]["close"]) / c1h[0]["close"] * 100
+            atr_pct_val = 0.0
+            if len(c15) >= 30 and c15[-1]["close"] > 0:
+                atr_pct_val = (atr(c15) / c15[-1]["close"]) * 100
+            return sym, chg_7d, atr_pct_val
+
+    pre_stats = await asyncio.gather(*[_check_mom_vol(s) for s in by_vol])
+    by_momentum = [s for s, chg7, _ in sorted(pre_stats, key=lambda x: x[1], reverse=True) if 5 < chg7 < 50][:15]
+    by_volatility = [s for s, _, atrp in sorted(pre_stats, key=lambda x: x[2], reverse=True) if atrp > 2.5][:10]
 
     sources = await fetch_new_listings()
     try:
@@ -772,13 +773,21 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 else:
                     entry_mode = "sniper"
 
-            # Улучшение: Дисциплина снайпера — запрет входа, если на 15m EMA21 < EMA50
+            # Трендовая дисциплина sniper / rocket на 15m:
+            # 1) Быстрая EMA21 обязана быть >= EMA50
+            # 2) Если у sniper нет паттерна Price Action (patterns == []), вход разрешен ТОЛЬКО на зеленой закрытой 15m свече и растущей EMA21
             if entry_mode in ("sniper", "rocket") and candles_15m and len(candles_15m) >= 50:
                 c15_closes = [c["close"] for c in candles_15m]
-                e21_15 = ema(c15_closes, 21)[-1]
+                e21_series_15 = ema(c15_closes, 21)
+                e21_15 = e21_series_15[-1]
                 e50_15 = ema(c15_closes, 50)[-1]
                 if e21_15 < e50_15 * 0.999:
                     return None
+                if entry_mode == "sniper" and not signal_values.get("patterns"):
+                    closed_15 = candles_15m[-2]
+                    e21_rising_15 = len(e21_series_15) >= 4 and e21_15 >= e21_series_15[-4] * 0.9998
+                    if closed_15["close"] <= closed_15["open"] or last_price < closed_15["close"] * 0.999 or not e21_rising_15:
+                        return None
 
             if signal_values.get("recent_rejection") and entry_mode in ("sniper", "rocket"):
                 return None
