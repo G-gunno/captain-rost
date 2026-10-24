@@ -80,10 +80,6 @@ def calc_breakeven_price(avg_price: float, fee_pct: float = 0.10) -> float:
 
 
 def evaluate_setup_grade(cand: dict) -> str:
-    """
-    Строгий отбор сетапов [💎] Grade A+:
-    Без подтвержденного сильного паттерна (pinbar, divergence, vcp, breakout) статус A+ не выдается!
-    """
     pos_in_48h = cand.get("pos_in_48h", 0.5)
     corr = abs(cand.get("corr", 1.0))
     entry_mode = cand.get("entry_mode", "sniper")
@@ -189,19 +185,22 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     if sl >= entry or (sl_dist / entry * 100) > max_sl_allowed:
         return None, None, False, "Недопустимая дистанция SL"
 
-    tp_dist_raw = max(1.75 * a * tp_tuning, sl_dist * 1.40, entry * tp_floor_pct)
+    # Оптимизировано: снижаем порог TP до 1.25x RR для более быстрого взятия TP1
+    tp_atr_mult = 1.45 if entry_mode == "reversal" else (1.65 if is_mom else 1.50)
+    rr_target = 1.20 if entry_mode == "reversal" else 1.25
+    tp_dist_raw = max(tp_atr_mult * a * tp_tuning, sl_dist * rr_target, entry * tp_floor_pct)
     tp = round(entry + tp_dist_raw, 8)
     if min_rr is None:
-        min_rr = 1.10 if entry_mode == "sniper" else 1.05
+        min_rr = 1.08 if entry_mode == "sniper" else 1.02
 
     if entry_mode == "reversal" and e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry * 1.010:
         cap_1h = round(e21_1h * 0.998, 8)
         if cap_1h < tp:
-            if (cap_1h - entry) / sl_dist >= 1.05:
+            if (cap_1h - entry) / sl_dist >= 1.02:
                 tp = cap_1h
-                min_rr = min(min_rr, 1.05)
+                min_rr = min(min_rr, 1.02)
             else:
-                return None, None, False, f"Потолок 1H EMA21 зажимает RR ({((cap_1h - entry)/sl_dist):.2f} < 1.05)"
+                return None, None, False, f"Потолок 1H EMA21 зажимает RR"
 
     if res and res > entry and res_touches >= 4:
         res_dist_pct = (res - entry) / entry * 100
@@ -210,11 +209,11 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
 
         res_cap_tp = round(res * 0.997, 8)
         if res_cap_tp < tp:
-            if (res_cap_tp - entry) / sl_dist >= 1.05:
+            if (res_cap_tp - entry) / sl_dist >= 1.02:
                 tp = res_cap_tp
-                min_rr = min(min_rr, 1.05)
+                min_rr = min(min_rr, 1.02)
             else:
-                return None, None, False, f"Капитальная стена 1H не дает забрать 1.05x RR (RR={(res_cap_tp - entry)/sl_dist:.2f})"
+                return None, None, False, f"Капитальная стена 1H не дает забрать RR"
 
     rr = (tp - entry) / sl_dist
     if tp <= entry or round(rr, 2) < min_rr:
@@ -326,10 +325,8 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
         runner_dist = cfg["runner_dist"] * (0.80 if is_rocket else 1.0)
         runner_trail = round(max_p * (1 - runner_dist), 8)
 
-        # После взятия TP1 сразу запираем +45% высоты первого тейка (никогда не откатываемся в голый ноль!)
         tp1_lock = round(avg_p + (tp1_ref - avg_p) * 0.45, 8) if tp1_ref > avg_p else breakeven
 
-        # Ускоренный переход в 🛡🔥 ABOVE_TP1: как только цена прошла +0.30 ATR (или +0.4%) выше TP1, стоп шагает за TP1!
         if tp1_ref > 0 and ((a15 > 0 and max_p >= tp1_ref + 0.30 * a15) or max_p >= tp1_ref * 1.004):
             tp1_lock = max(tp1_lock, round(tp1_ref * 1.0005, 8))
 
@@ -355,7 +352,9 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
                     new_sl = e21_sl
                     new_state = "PROFIT_LOCK" if new_sl > breakeven * 1.002 else "BREAKEVEN"
 
-        if ema_ratchet_sl > new_sl and profit_pct >= 0.8:
+        # Защита от раннего выбивания: поднимаем порог срабатывания храповика до 75% пути к TP1
+        ratchet_trigger = max(1.35, tp_target_pct * 0.75)
+        if ema_ratchet_sl > new_sl and profit_pct >= ratchet_trigger:
             new_sl = ema_ratchet_sl
             if new_sl >= breakeven * 1.003:
                 new_state = "PROFIT_LOCK"
