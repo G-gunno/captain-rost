@@ -151,14 +151,18 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     r_1h = rsi(closes_1h)
     a_1h = atr(candles_1h)
 
-    # Расширенное окно 16 часов для поиска пика и фиксации остывания после пампа (кейсы ALT #1, ICNT, SENT #2)
+    # Точная проверка пост-памп обвала за последние 16 часов:
+    # Сначала должен быть реальный памп >= 10% (min_before_peak -> max_h_16), а затем слив с пика >= 25% под EMA21 или красной свечой
     recent_16_1h = candles_1h[-16:] if len(candles_1h) >= 16 else candles_1h
-    max_h_16 = max(c["high"] for c in recent_16_1h)
-    min_l_16 = min(c["low"] for c in recent_16_1h)
-    if min_l_16 > 0 and ((max_h_16 - min_l_16) / min_l_16 * 100) >= 5.5:
-        pullback_from_peak = (max_h_16 - last_1h) / (max_h_16 - min_l_16) if max_h_16 > min_l_16 else 0.0
-        if pullback_from_peak >= 0.20 and (candles_1h[-1]["close"] < candles_1h[-1]["open"] or last_1h < e21_1h):
-            return "1H_BAN", e21_1h, e50_1h, f"1H остывание после пампа (48ч {chg_48h:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
+    high_idx_16 = max(range(len(recent_16_1h)), key=lambda i: recent_16_1h[i]["high"])
+    max_h_16 = recent_16_1h[high_idx_16]["high"]
+    if 2 <= high_idx_16 <= len(recent_16_1h) - 2:
+        min_before_peak = min(c["low"] for c in recent_16_1h[:high_idx_16 + 1])
+        pump_1h_pct = ((max_h_16 - min_before_peak) / min_before_peak * 100) if min_before_peak > 0 else 0.0
+        if pump_1h_pct >= 10.0:
+            pullback_from_peak = (max_h_16 - last_1h) / (max_h_16 - min_before_peak) if max_h_16 > min_before_peak else 0.0
+            if pullback_from_peak >= 0.25 and (last_1h < e21_1h or candles_1h[-1]["close"] < candles_1h[-1]["open"]):
+                return "1H_BAN", e21_1h, e50_1h, f"1H остывание после пампа (+{pump_1h_pct:.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
     e21_falling_1h = (e21_1h < e21_3h_ago * 0.9985) and (last_1h < e21_1h)
     e50_rising_48h = (e50_1h >= e50_12h_ago * 0.999) and (e50_1h >= e50_24h_ago * 0.996)
@@ -497,6 +501,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
             reasons.append(f"в упор к капитальной стене ${fmt_price(nearest_res)} ({res_touches}x)")
 
     sup_is_near = False
+    closed_candle_holds_sup = False
     if nearest_sup and sup_touches >= 2 and a15 > 0:
         dist_to_sup = last - nearest_sup
         if 0 <= dist_to_sup <= 2.2 * a15:
@@ -504,7 +509,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
             closed_candle_holds_sup = (
                 (candles_15m[-2]["close"] >= nearest_sup * 0.999) and
                 (candles_15m[-2]["close"] >= candles_15m[-2]["open"] or
-                 (candles_15m[-2]["close"] - candles_15m[-2]["low"]) >= 0.5 * (candles_15m[-2]["high"] - candles_15m[-2]["low"]))
+                 (candles_15m[-2]["close"] - candles_15m[-2]["low"]) >= 0.45 * (candles_15m[-2]["high"] - candles_15m[-2]["low"]))
             )
             if not is_open_pos and (last > closes[-2] or "reversal" in matched_modes or (sup_touches >= 3 and closed_candle_holds_sup)):
                 sup_bonus = 2.6 if sup_touches >= 3 else 1.4
@@ -535,7 +540,10 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
 
         if gate_1h == "1H_SUPPORT_ONLY":
             matched_modes = [m for m in matched_modes if m == "reversal"]
-            if not matched_modes and sup_is_near and sup_touches >= 2 and any(p in pattern_keys for p in ("pinbar", "divergence")):
+            if not matched_modes and sup_is_near and sup_touches >= 2 and (
+                any(p in pattern_keys for p in ("pinbar", "divergence")) or
+                (sup_touches >= 3 and closed_candle_holds_sup and r <= 44)
+            ):
                 matched_modes = ["reversal"]
 
     has_structure = (
@@ -675,11 +683,13 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
     async def _check_mom_vol(sym):
         async with pre_sem:
             c1h, c15 = await asyncio.gather(
-                market_data.get_kline(sym, "60", 168),
+                market_data.get_kline(sym, "60", 250),
                 market_data.get_kline(sym, "15", 60),
             )
             chg_7d = 0.0
-            if len(c1h) >= 100 and c1h[0]["close"] > 0:
+            if len(c1h) >= 168 and c1h[-168]["close"] > 0:
+                chg_7d = (c1h[-1]["close"] - c1h[-168]["close"]) / c1h[-168]["close"] * 100
+            elif len(c1h) >= 100 and c1h[0]["close"] > 0:
                 chg_7d = (c1h[-1]["close"] - c1h[0]["close"]) / c1h[0]["close"] * 100
             atr_pct_val = 0.0
             if len(c15) >= 30 and c15[-1]["close"] > 0:
@@ -775,18 +785,17 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
             # Трендовая дисциплина sniper / rocket на 15m:
             # 1) Быстрая EMA21 обязана быть >= EMA50
-            # 2) Если у sniper нет паттерна Price Action (patterns == []), вход разрешен ТОЛЬКО на зеленой закрытой 15m свече и растущей EMA21
+            # 2) Блокируем вход без паттерна только если идет активный слив двумя красными свечами глубже EMA21
             if entry_mode in ("sniper", "rocket") and candles_15m and len(candles_15m) >= 50:
                 c15_closes = [c["close"] for c in candles_15m]
-                e21_series_15 = ema(c15_closes, 21)
-                e21_15 = e21_series_15[-1]
+                e21_15 = ema(c15_closes, 21)[-1]
                 e50_15 = ema(c15_closes, 50)[-1]
                 if e21_15 < e50_15 * 0.999:
                     return None
                 if entry_mode == "sniper" and not signal_values.get("patterns"):
                     closed_15 = candles_15m[-2]
-                    e21_rising_15 = len(e21_series_15) >= 4 and e21_15 >= e21_series_15[-4] * 0.9998
-                    if closed_15["close"] <= closed_15["open"] or last_price < closed_15["close"] * 0.999 or not e21_rising_15:
+                    curr_15 = candles_15m[-1]
+                    if last_price < e21_15 * 0.996 and closed_15["close"] < closed_15["open"] and curr_15["close"] < curr_15["open"]:
                         return None
 
             if signal_values.get("recent_rejection") and entry_mode in ("sniper", "rocket"):
