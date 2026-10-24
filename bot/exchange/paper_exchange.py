@@ -240,6 +240,24 @@ class PaperExchange:
         self.usdt += proceeds - fee_sell
         transferred = 0.0
 
+        # Сразу откладываем 30% от профита TP1 в резерв/накопления
+        if pnl > 0:
+            hodl_reserve_usdt = round(pnl * 0.30, 4)
+            tier = pos.get("tier")
+            if tier == "TOP20" and price > 0:
+                qty_kept = min(qty_part * 0.5, hodl_reserve_usdt / price)
+                if qty_kept > 0:
+                    actual_reserved_usdt = round(qty_kept * price, 4)
+                    self.usdt -= actual_reserved_usdt
+                    if not hasattr(self, "funding_coins"):
+                        self.funding_coins = {}
+                    self.funding_coins[sym] = self.funding_coins.get(sym, 0.0) + qty_kept
+                    reason += " 🏦"
+            else:
+                transferred = hodl_reserve_usdt
+                self.usdt -= transferred
+                self.funding += transferred
+
         sector = self._resolve_sector(sym, pos.get("sector"))
         tier = pos.get("tier")
         entry_mode = pos.get("entry_mode", "rocket" if pos.get("is_momentum") else "sniper")
@@ -269,17 +287,10 @@ class PaperExchange:
         })
         self.save()
         return {
-            "symbol": sym,
-            "price": price,
-            "pnl": pnl,
-            "pnl_pct": pnl_pct,
-            "reason": reason,
-            "transferred": transferred,
-            "sector": sector,
-            "tier": tier,
-            "grade": pos.get("grade", "B"),
-            "is_momentum": pos.get("is_momentum", False),
-            "entry_mode": entry_mode,
+            "symbol": sym, "price": price, "pnl": pnl,
+            "pnl_pct": pnl_pct, "reason": reason, "transferred": transferred,
+            "sector": sector, "tier": tier, "grade": pos.get("grade", "B"),
+            "is_momentum": pos.get("is_momentum", False), "entry_mode": entry_mode,
         }
 
     def _sell(self, sym, price, reason, regime_now=None):
@@ -351,8 +362,9 @@ class PaperExchange:
         self.usdt += proceeds - fee_sell
         transferred = 0.0
 
-        if total_pnl > 0 and not is_be:
-            hodl_reserve_usdt = round(total_pnl * 0.30, 4)
+        # Если остаток закрылся в плюс (и это не был чистый БУ), отчисляем 30% с остатка
+        if pnl_final > 0 and not is_neutral_be(pnl_final_pct):
+            hodl_reserve_usdt = round(pnl_final * 0.30, 4)
             if tier == "TOP20" and price > 0:
                 qty_kept = min(pos["qty"] * 0.5, hodl_reserve_usdt / price)
                 if qty_kept > 0:
