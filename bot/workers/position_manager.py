@@ -79,9 +79,6 @@ class PositionManagerWorker:
         policy = get_trade_policy(new_mode)
         current_time = int(time.time())
 
-        # =====================================================================
-        # 1. ПРОВЕРКА ОТКРЫТЫХ ПОЗИЦИЙ И ОБНОВЛЕНИЕ «ДЫШАЩЕГО КОРИДОРА»
-        # =====================================================================
         for sym, pos in list(paper.positions.items()):
             t = tickers.get(sym)
             if not t:
@@ -130,7 +127,6 @@ class PositionManagerWorker:
             pos_age = current_time - pos.get("entry_time", current_time)
 
             should_exit_early = False
-            # Досрочный выход только спустя >= 30 минут при закрытии 2 свечей подряд глубже EMA50 - 0.55*ATR
             if pos_age >= 1800 and not is_toxic:
                 if entry_mode != "reversal" and trend_broken:
                     should_exit_early = True
@@ -181,9 +177,6 @@ class PositionManagerWorker:
                     paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP🏃🏻‍➡️ поднят", mode="TP🏃🏻‍➡️", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                     self._notify(f"TP🏃🏻‍➡️ <b>Потолок коридора поднят</b> · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · {sl_tag} {fmt_price(pos['sl'])}")
 
-        # =====================================================================
-        # 2. ПРОВЕРКА НЕИСПОЛНЕННЫХ ОРДЕРОВ (Иммунитет 15 минут)
-        # =====================================================================
         for order in list(paper.orders):
             sym = order["symbol"]
             t = tickers.get(sym)
@@ -234,16 +227,15 @@ class PositionManagerWorker:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], f"Умер ({init_score:.1f}-{score_now:.1f})", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 300)
-                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> ☠️⚰️ слом тренда ({init_score:.1f} -> {score_now:.1f})")
+                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> ☠️⚰️ слом тренда")
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ ({init_score:.1f}-{score_now:.1f})")
                 continue
 
-            # Иммунитет свежего ордера (15 минут): не отменяем по ослаблению сигнала раньше чем через 900с
             if order_age >= 900 and not base_intact and score_now < (thr - 1.5):
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], f"Ослаб ({score_now:.1f})", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 300)
-                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> 🪫📉 ослаб сигнал ({score_now:.1f} < {thr - 1.5:.2f})")
+                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> 🪫📉 ослаб сигнал")
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🪫📉 ({score_now:.1f})")
                 continue
 
@@ -251,7 +243,7 @@ class PositionManagerWorker:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Улетела без нас", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 300)
-                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> 🚀👋🏻 улетела без нас (last=${fmt_price(t['last'])} vs ord=${fmt_price(order['price'])})")
+                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> 🚀👋🏻 улетела без нас")
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🚀👋🏻")
                 continue
 
@@ -259,7 +251,7 @@ class PositionManagerWorker:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Тайм-аут 2ч", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 420)
-                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> ☠️⚰️ тайм-аут 2ч ({init_score:.1f}-{score_now:.1f})")
+                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> ☠️⚰️ тайм-аут 2ч")
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ ({init_score:.1f}-{score_now:.1f})")
                 continue
 
@@ -317,6 +309,11 @@ class PositionManagerWorker:
             min_rr = policy["min_rr_sniper"] if entry_mode == "sniper" else policy["min_rr_alt"]
             recent_low_6 = min(c["low"] for c in candles[-6:]) if len(candles) >= 6 else None
 
+            # Исправление: передаем часовые EMA в calc_initial_sl_tp при сдвиге ордера
+            closes_1h = [c["close"] for c in candles_1h] if candles_1h and len(candles_1h) >= 50 else []
+            e21_1h_val = ema(closes_1h, 21)[-1] if closes_1h else order.get("e21_1h")
+            e50_1h_val = ema(closes_1h, 50)[-1] if closes_1h else order.get("e50_1h")
+
             sl, tp, is_valid, _ = calc_initial_sl_tp(
                 symbol=sym, entry=target_price, tier=tier, a=a,
                 sup=entry_sup, sup_touches=entry_sup_touches,
@@ -325,6 +322,8 @@ class PositionManagerWorker:
                 min_rr=min_rr,
                 recent_low_6=recent_low_6,
                 ema50=e50,
+                e21_1h=e21_1h_val,
+                e50_1h=e50_1h_val,
             )
 
             if is_valid and action_type:
