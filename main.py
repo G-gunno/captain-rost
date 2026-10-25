@@ -117,11 +117,15 @@ async def chart_handler(request):
                 '<div style="position: absolute; top: 15px; left: 50%; transform: translateX(-50%); z-index: 1000; '
                 'background: rgba(30, 30, 30, 0.85); padding: 8px 15px; border-radius: 8px; '
                 'border: 1px solid #444; font-family: Arial, sans-serif; '
-                'box-shadow: 0 4px 6px rgba(0,0,0,0.3); display: flex; align-items: center;">'
+                'box-shadow: 0 4px 6px rgba(0,0,0,0.3); display: flex; align-items: center; flex-wrap: wrap; gap: 4px;">'
                 '<a href="/audit" style="text-decoration: none; color: #00e5ff; background: rgba(0, 229, 255, 0.14); '
-                'border: 1px solid rgba(0, 229, 255, 0.4); padding: 5px 10px; margin-right: 12px; border-radius: 4px; '
+                'border: 1px solid rgba(0, 229, 255, 0.4); padding: 5px 10px; margin-right: 6px; border-radius: 4px; '
                 'font-size: 13px; font-weight: bold;">📊 Аудит 24ч</a>'
-                '<span style="color: #ccc; margin-right: 10px; font-size: 14px;">ТФ:</span>'
+                '<button id="chart-shot-btn" onclick="takeChartScreenshot()" '
+                'style="cursor: pointer; color: #00e676; background: rgba(0, 230, 118, 0.16); '
+                'border: 1px solid rgba(0, 230, 118, 0.45); padding: 5px 10px; margin-right: 10px; border-radius: 4px; '
+                'font-size: 13px; font-weight: bold;">📸 Скриншот</button>'
+                '<span style="color: #ccc; margin-right: 6px; font-size: 14px;">ТФ:</span>'
             )
 
             for tf in valid_intervals:
@@ -133,12 +137,49 @@ async def chart_handler(request):
                 buttons_html += (
                     f'<a href="?symbol={symbol}&interval={tf}" '
                     f'style="text-decoration: none; color: {text_color}; background: {bg_color}; '
-                    f'padding: 5px 10px; margin: 0 3px; border-radius: 4px; font-size: 13px; font-weight: bold; transition: 0.2s;" '
+                    f'padding: 5px 10px; margin: 0 2px; border-radius: 4px; font-size: 13px; font-weight: bold; transition: 0.2s;" '
                     f'onmouseover="{hover_style}" onmouseout="{out_style}">{tf}</a>'
                 )
 
             buttons_html += "</div>"
-            return raw_html.replace("<body>", f"<body style='margin:0; padding:0; background-color:#111;'>\n{buttons_html}")
+
+            shot_script = f"""
+            <script>
+              async function takeChartScreenshot() {{
+                const btn = document.getElementById('chart-shot-btn');
+                const orig = btn.innerHTML;
+                btn.innerHTML = '⏳ Снимок...';
+                btn.disabled = true;
+                try {{
+                  const gd = document.querySelector('.js-plotly-plot');
+                  const dataUrl = await Plotly.toImage(gd, {{
+                    format: 'png',
+                    width: 1600,
+                    height: 950,
+                    scale: 2
+                  }});
+                  const a = document.createElement('a');
+                  const nowStr = new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', '-');
+                  a.href = dataUrl;
+                  a.download = 'CaptainRost_{symbol}_{interval_str}_' + nowStr + '.png';
+                  document.body.appendChild(a);
+                  a.click();
+                  a.remove();
+                }} catch (e) {{
+                  alert('Ошибка скриншота: ' + e);
+                }} finally {{
+                  btn.innerHTML = orig;
+                  btn.disabled = false;
+                }}
+              }}
+            </script>
+            """
+
+            patched = raw_html.replace(
+                "<body>",
+                f"<body style='margin:0; padding:0; background-color:#111;'>\n{buttons_html}"
+            )
+            return patched.replace("</body>", f"{shot_script}\n</body>")
 
         except Exception as e:
             return str(e)
