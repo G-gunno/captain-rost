@@ -80,8 +80,7 @@ def _count_spaced_touches(price_target: float, points: list, tol: float = 0.005)
     if h1_touches_count > 0 and "15m" in last_idx_by_tf:
         touches_weight = max(2, touches_weight - 1)
 
-    # Статус «Капитальной стены» (вес >= 4) дается ТОЛЬКО при наличии минимум 2 часовых касаний
-    # или 1 часового + минимум 2 независимых 15m касаний
+    # Статус «Капитальной стены» (вес >= 4) дается ТОЛЬКО при наличии часового касания
     if touches_weight >= 4 and h1_touches_count == 0:
         touches_weight = 3
 
@@ -145,14 +144,16 @@ def find_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72, w
     last_price = candles_15m[-1]["close"]
     confirmed_res, confirmed_sup = get_all_sr_levels(candles_15m, candles_1h, window_15m, window_1h)
 
-    res_above = [c for c in confirmed_res if c[0] > last_price * 1.0025]
+    # Видим стену сопротивления даже если цена подошла к ней вплотную (от -0.15% и выше)
+    res_above = [c for c in confirmed_res if c[0] >= last_price * 0.9985]
     nearest_res = None
     res_touches = 0
     if res_above:
         res_above.sort(key=lambda x: x[0])
         nearest_res, res_touches = res_above[0]
 
-    sup_below = [c for c in confirmed_sup if c[0] < last_price * 0.9985]
+    # Видим плиту поддержки даже когда цена лежит прямо на ней (до +0.20% от текущей цены)
+    sup_below = [c for c in confirmed_sup if c[0] <= last_price * 1.0020]
     nearest_sup = None
     sup_touches = 0
     if sup_below:
