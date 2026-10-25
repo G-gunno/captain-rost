@@ -103,6 +103,8 @@ class OrderManagerWorker:
         equity = paper.equity(tickers)
         thrs = get_thresholds(regime)
         sec_lim, other_lim = portfolio_limits(equity)
+        if regime == "bear":
+            other_lim = 1
         news_items = await fetch_news_cache()
 
         risk_mode = getattr(learner, "current_risk_mode", "NORMAL")
@@ -176,7 +178,6 @@ class OrderManagerWorker:
             sup_touches = cand.get("sup_touches", 0)
             if sup and sup_touches >= 2 and not is_mom:
                 retest_floor = sup * 1.0012
-                # Безопасная проверка: не задираем entry выше текущей цены, если расчетный entry уже выше плиты
                 if entry < sup and cand["last"] > retest_floor:
                     entry = min(retest_floor, bid1 * 0.999)
 
@@ -188,7 +189,8 @@ class OrderManagerWorker:
             res_above_entry = []
             for r_item in all_res:
                 r_val, r_tch = r_item if isinstance(r_item, (list, tuple)) else (r_item, 2)
-                if r_val > entry * 1.0025:
+                # Убрана слепая зона 0.25%: учитываем любую стену выше точки входа
+                if r_val > entry * 1.0002:
                     res_above_entry.append((r_val, r_tch))
 
             if res_above_entry:
