@@ -52,19 +52,23 @@ def min_order_threshold(equity: float) -> float:
 
 
 def portfolio_limits(equity):
+    """
+    Возвращает (лимит_на_обычный_сектор, жесткий_лимит_на_сектор_Other).
+    Сектор Other всегда строго ограничен 2-3 позициями, чтобы избегать просадок на щиткоинах.
+    """
     if equity <= 150:
-        return 2, 2
+        return 2, 1
     if equity <= 250:
-        return 3, 2
+        return 3, 1
     if equity <= 500:
-        return 4, 3
+        return 4, 2
     if equity <= 1000:
-        return 6, 8
+        return 5, 2
     if equity <= 2500:
-        return 8, 10
+        return 6, 3
     if equity <= 5000:
-        return 10, 12
-    return 12, 15
+        return 8, 3
+    return 10, 4
 
 
 def buy_size(equity, score, thr, liquidity, free_usdt, entry_mode="sniper", grade="B"):
@@ -82,7 +86,6 @@ def buy_size(equity, score, thr, liquidity, free_usdt, entry_mode="sniper", grad
     if kelly is not None:
         size *= (0.65 + 0.35 * kelly)
 
-    # Правильная пирамида сайзинга: [💎] A+ всегда получает приоритетный объём (0.95x..1.15x), а [B] — 0.70x
     if grade == "A+":
         size *= max(0.95, learner.grade_a_trust_mult())
     else:
