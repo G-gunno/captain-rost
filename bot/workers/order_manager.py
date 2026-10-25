@@ -290,6 +290,8 @@ class OrderManagerWorker:
                 "_ema21": e21_15m,
                 "_ema50": e50_15m,
                 "_atr15": a,
+                "e21_1h": cand.get("e21_1h"),
+                "e50_1h": cand.get("e50_1h"),
             })
             paper.save()
 
