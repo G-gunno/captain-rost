@@ -80,13 +80,22 @@ def calc_breakeven_price(avg_price: float, fee_pct: float = 0.10) -> float:
 
 
 def evaluate_setup_grade(cand: dict) -> str:
+    """
+    Строгий отбор сетапов [💎] Grade A+:
+    Выдается только при наличии сильного паттерна, объема >= 1.25x или плиты >= 3x,
+    исключая микро-капы из неизвестного сектора Other.
+    """
     pos_in_48h = cand.get("pos_in_48h", 0.5)
     corr = abs(cand.get("corr", 1.0))
     entry_mode = cand.get("entry_mode", "sniper")
+    tier = cand.get("tier", "MICRO")
+    sector = cand.get("sector", "Other")
 
-    if entry_mode in ("sniper", "rocket") and pos_in_48h > 0.70:
+    if entry_mode in ("sniper", "rocket") and pos_in_48h > 0.68:
         return "B"
-    if corr > 0.55:
+    if corr > 0.50:
+        return "B"
+    if sector == "Other" and tier == "MICRO":
         return "B"
 
     patterns = cand.get("patterns", [])
@@ -94,23 +103,27 @@ def evaluate_setup_grade(cand: dict) -> str:
     if not strong_pats:
         return "B"
 
-    confluence = 2
-    keys = cand.get("reason_keys", [])
     sv = cand.get("signal_values", {})
+    vol_ratio = sv.get("volume", 1.0)
     sup_touches = cand.get("sup_touches", 0)
+    keys = cand.get("reason_keys", [])
 
+    if vol_ratio < 1.25 and sup_touches < 3:
+        return "B"
+
+    confluence = 2
     if sup_touches >= 4:
         confluence += 2
     elif sup_touches == 3:
         confluence += 1
 
-    if cand.get("gate_1h") == "1H_TREND_OK" and ("mtf_dip" in keys or pos_in_48h <= 0.65):
+    if cand.get("gate_1h") == "1H_TREND_OK" and ("mtf_dip" in keys and pos_in_48h <= 0.60):
         confluence += 1
 
-    if sv.get("volume", 1.0) >= 1.45:
+    if vol_ratio >= 1.55:
         confluence += 1
 
-    if corr < 0.25:
+    if tier in ("TOP20", "MID"):
         confluence += 1
 
     req_confluence = 5 if getattr(learner, "grade_a_streak", 0) <= -2 else 4
@@ -185,7 +198,6 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     if sl >= entry or (sl_dist / entry * 100) > max_sl_allowed:
         return None, None, False, "Недопустимая дистанция SL"
 
-    # Оптимизировано: снижаем порог TP до 1.25x RR для более быстрого взятия TP1
     tp_atr_mult = 1.45 if entry_mode == "reversal" else (1.65 if is_mom else 1.50)
     rr_target = 1.20 if entry_mode == "reversal" else 1.25
     tp_dist_raw = max(tp_atr_mult * a * tp_tuning, sl_dist * rr_target, entry * tp_floor_pct)
@@ -200,7 +212,7 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
                 tp = cap_1h
                 min_rr = min(min_rr, 1.02)
             else:
-                return None, None, False, f"Потолок 1H EMA21 зажимает RR"
+                return None, None, False, "Потолок 1H EMA21 зажимает RR"
 
     if res and res > entry and res_touches >= 4:
         res_dist_pct = (res - entry) / entry * 100
@@ -213,7 +225,7 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
                 tp = res_cap_tp
                 min_rr = min(min_rr, 1.02)
             else:
-                return None, None, False, f"Капитальная стена 1H не дает забрать RR"
+                return None, None, False, "Капитальная стена 1H не дает забрать RR"
 
     rr = (tp - entry) / sl_dist
     if tp <= entry or round(rr, 2) < min_rr:
@@ -352,7 +364,6 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
                     new_sl = e21_sl
                     new_state = "PROFIT_LOCK" if new_sl > breakeven * 1.002 else "BREAKEVEN"
 
-        # Защита от раннего выбивания: поднимаем порог срабатывания храповика до 75% пути к TP1
         ratchet_trigger = max(1.35, tp_target_pct * 0.75)
         if ema_ratchet_sl > new_sl and profit_pct >= ratchet_trigger:
             new_sl = ema_ratchet_sl
