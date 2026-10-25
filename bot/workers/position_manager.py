@@ -227,7 +227,6 @@ class PositionManagerWorker:
             thr = thrs.get(entry_mode, 6.0)
             init_score = order.get("initial_score", order.get("score", thr))
 
-            # 1) Если начался пост-памп обвал пока лимитка стояла в стакане — немедленно убираем ордер
             is_post_pump, pp_reason = is_post_pump_dump(candles)
             if is_post_pump:
                 paper.cancel_order(order["id"])
@@ -237,7 +236,6 @@ class PositionManagerWorker:
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ (пост-памп слив)")
                 continue
 
-            # 2) Защита от летящего вниз ножа (крупная красная свеча или пробой поддержки)
             curr_c = candles[-1]
             closed_c = candles[-2]
             heavy_dump_candle = (
@@ -322,14 +320,14 @@ class PositionManagerWorker:
                 continue
 
             all_res, all_sup = get_all_sr_levels(candles, candles_1h)
-            res_above_target = [(r[0], r[1]) for r in all_res if r[0] > target_price * 1.0025]
+            res_above_target = [(r[0], r[1]) for r in all_res if r[0] > target_price * 1.0002]
             if res_above_target:
                 res_above_target.sort(key=lambda x: x[0])
                 entry_res, entry_res_touches = res_above_target[0]
             else:
                 entry_res, entry_res_touches = None, 0
 
-            sup_below_target = [(s[0], s[1]) for s in all_sup if s[0] < target_price * 0.9985]
+            sup_below_target = [(s[0], s[1]) for s in all_sup if s[0] <= target_price * 1.0010]
             if sup_below_target:
                 sup_below_target.sort(key=lambda x: x[0], reverse=True)
                 entry_sup, entry_sup_touches = sup_below_target[0]
