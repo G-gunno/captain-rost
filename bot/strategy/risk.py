@@ -81,15 +81,16 @@ def calc_breakeven_price(avg_price: float, fee_pct: float = 0.10) -> float:
 
 def evaluate_setup_grade(cand: dict) -> str:
     """
-    Строгий отбор сетапов [💎] Grade A+:
-    Выдается только при наличии сильного паттерна, объема >= 1.25x или плиты >= 3x,
-    исключая микро-капы из неизвестного сектора Other.
+    Сбалансированный и строгий отбор сетапов [💎] Grade A+:
+    Требует сильный паттерн, объем >= 1.25x или плиту >= 3x, исключая микро-капы из Other,
+    но без создания вечного дедлока для 1H_SUPPORT_ONLY.
     """
     pos_in_48h = cand.get("pos_in_48h", 0.5)
     corr = abs(cand.get("corr", 1.0))
     entry_mode = cand.get("entry_mode", "sniper")
     tier = cand.get("tier", "MICRO")
     sector = cand.get("sector", "Other")
+    gate_1h = cand.get("gate_1h", "")
 
     if entry_mode in ("sniper", "rocket") and pos_in_48h > 0.68:
         return "B"
@@ -117,17 +118,18 @@ def evaluate_setup_grade(cand: dict) -> str:
     elif sup_touches == 3:
         confluence += 1
 
-    if cand.get("gate_1h") == "1H_TREND_OK" and ("mtf_dip" in keys and pos_in_48h <= 0.60):
+    if gate_1h == "1H_TREND_OK" and ("mtf_dip" in keys and pos_in_48h <= 0.60):
+        confluence += 1
+    elif gate_1h == "1H_SUPPORT_ONLY" and pos_in_48h <= 0.45 and sup_touches >= 3:
         confluence += 1
 
-    if vol_ratio >= 1.55:
+    if vol_ratio >= 1.45:
         confluence += 1
 
-    if tier in ("TOP20", "MID"):
+    if tier in ("TOP20", "MID") or corr < 0.25:
         confluence += 1
 
-    req_confluence = 5 if getattr(learner, "grade_a_streak", 0) <= -2 else 4
-    return "A+" if confluence >= req_confluence else "B"
+    return "A+" if confluence >= 4 else "B"
 
 
 def calc_total_open_risk_pct(positions: dict, orders: list, equity: float) -> float:
@@ -205,7 +207,10 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     if min_rr is None:
         min_rr = 1.08 if entry_mode == "sniper" else 1.02
 
-    if entry_mode == "reversal" and e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry * 1.010:
+    # Полный контроль потолка 1H EMA21 в даунтренде (без слепой зоны <= 1.0%)
+    if entry_mode == "reversal" and e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry:
+        if e21_1h <= entry * 1.010:
+            return None, None, False, "Потолок 1H EMA21 вплотную над входом (< 1.0%)"
         cap_1h = round(e21_1h * 0.998, 8)
         if cap_1h < tp:
             if (cap_1h - entry) / sl_dist >= 1.02:
