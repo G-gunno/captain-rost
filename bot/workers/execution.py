@@ -48,7 +48,7 @@ class ExecutionRiskWorker:
                 results = paper.sell_all(tickers)
 
                 for ex in results:
-                    bot_state.set_cooldown(ex["symbol"], 900)
+                    bot_state.set_cooldown(ex["symbol"], 1800)
                     self.bus.publish("NOTIFY", {"text": f"🚨 <b>Экстренный выход</b> · {ex['symbol']} · {ex['pnl_pct']:.2f}%", "urgent": True})
 
                 self.emergency_queue.task_done()
@@ -112,14 +112,16 @@ class ExecutionRiskWorker:
                 })
                 continue
 
-            # 2. Исполнение тейк-профита (🔥 TP1 и конвейер 🛡🔥 / TP🏃🏻‍➡️ без обрезки ракет на взлёте)
+            # 2. Исполнение тейк-профита (🔥 TP1 и конвейер 🛡🔥 / TP🏃🏻‍➡️)
             if last >= pos["tp"]:
                 candles_15m = await market_data.get_kline(sym, "15", 120)
                 candles_1h = await market_data.get_kline(sym, "60", 250)
 
                 if not pos.get("tp1_done"):
-                    # Фиксируем 40% (для тренда) и 50% (для реверсала), оставляя 60%/50% на 🛡🔥 и TP🏃🏻‍➡️
-                    tp1_ratio = 0.50 if pos.get("entry_mode") == "reversal" else 0.40
+                    # Фиксируем 65% (в реверсале или на медвежьем рынке) и 55% (в аптренде),
+                    # сразу забирая львиную долю профита в карман и в Funding Vault
+                    is_defensive = (pos.get("entry_mode") == "reversal") or (bot_state.current_regime == "bear")
+                    tp1_ratio = 0.65 if is_defensive else 0.55
                     part_qty = pos["qty"] * tp1_ratio
                     ex = paper.sell_partial(sym, part_qty, pos["tp"], "🔥 TP1")
                     pos["tp1_done"] = True
@@ -170,7 +172,6 @@ class ExecutionRiskWorker:
                             "urgent": False,
                         })
                     elif phase_reason in ("climax_freeze", "shelf_freeze"):
-                        # Вместо принудительной рыночной продажи на импульсе (кейс AXL) зажимаем ультра-стоп 🛡🔥 и двигаем потолок выше!
                         old_tp = pos["tp"]
                         candle_low = candles_15m[-1]["low"] if candles_15m else last * 0.993
                         tight_sl = round(max(pos["sl"], old_tp * 0.995, candle_low * 0.998, last * 0.993), 8)
@@ -222,7 +223,7 @@ class ExecutionRiskWorker:
                 pos["max_sl"] = new_sl
                 state_changed = True
 
-                paper.log_event(sym, "sl_moved", pos["sl"], tag_emoji, tp=pos.get("tp"), sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                paper.log_event(sym, "sl_moved", pos["sl"], tag_emoji, tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
 
                 last_notify_ts = float(pos.get("_last_sl_notify_ts", 0.0))
                 a15 = float(pos.get("_atr15", 0.0))
