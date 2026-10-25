@@ -5,7 +5,7 @@ from loguru import logger
 from bot.core.event_bus import EventBus
 from bot.exchange.market_data import market_data
 from bot.exchange.paper_exchange import paper
-from bot.strategy.scanner import live_score, get_thresholds, _returns
+from bot.strategy.scanner import live_score, get_thresholds, _returns, is_post_pump_dump
 from bot.strategy.indicators import atr, ema, find_sr_levels, get_all_sr_levels
 from bot.strategy.learner import learner
 from bot.strategy.shadow import shadow
@@ -21,7 +21,7 @@ from bot.core.state import bot_state
 
 
 class PositionManagerWorker:
-    """Управление позициями: Дышащий Коридор по свечам 15m/1H, Зона Заморозки лимиток и защита баланса."""
+    """Управление позициями: Дышащий Коридор по свечам 15m/1H, защита лимиток от ножей и Freeze Zone."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -29,7 +29,7 @@ class PositionManagerWorker:
         self.current_regime = "neutral"
 
     async def run(self):
-        logger.info("🛡 Position Manager запущен: Дышащий Коридор и Freeze Zone для ордеров...")
+        logger.info("🛡 Position Manager запущен: Дышащий Коридор и защита лимитных ордеров...")
         asyncio.create_task(self._regime_updater())
 
         while True:
@@ -79,6 +79,9 @@ class PositionManagerWorker:
         policy = get_trade_policy(new_mode)
         current_time = int(time.time())
 
+        # =====================================================================
+        # 1. ПРОВЕРКА ОТКРЫТЫХ ПОЗИЦИЙ И ОБНОВЛЕНИЕ «ДЫШАЩЕГО КОРИДОРА»
+        # =====================================================================
         for sym, pos in list(paper.positions.items()):
             t = tickers.get(sym)
             if not t:
@@ -177,6 +180,9 @@ class PositionManagerWorker:
                     paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP🏃🏻‍➡️ поднят", mode="TP🏃🏻‍➡️", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                     self._notify(f"TP🏃🏻‍➡️ <b>Потолок коридора поднят</b> · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · {sl_tag} {fmt_price(pos['sl'])}")
 
+        # =====================================================================
+        # 2. ПРОВЕРКА ОЖИДАЮЩИХ ОРДЕРОВ (Защита от падающих ножей + Freeze Zone)
+        # =====================================================================
         for order in list(paper.orders):
             sym = order["symbol"]
             t = tickers.get(sym)
@@ -209,7 +215,8 @@ class PositionManagerWorker:
                 continue
 
             closes = [c["close"] for c in candles]
-            e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
+            e21_series = ema(closes, 21)
+            e21, e50 = e21_series[-1], ema(closes, 50)[-1]
             a = atr(candles)
             if a <= 0:
                 continue
@@ -220,21 +227,44 @@ class PositionManagerWorker:
             thr = thrs.get(entry_mode, 6.0)
             init_score = order.get("initial_score", order.get("score", thr))
 
+            # 1) Если начался пост-памп обвал пока лимитка стояла в стакане — немедленно убираем ордер
+            is_post_pump, pp_reason = is_post_pump_dump(candles)
+            if is_post_pump:
+                paper.cancel_order(order["id"])
+                paper.log_event(sym, "cancel", t["last"], f"Пост-памп слив ({pp_reason})", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
+                bot_state.set_cooldown(sym, 1800)
+                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> ☠️⚰️ {pp_reason}")
+                self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ (пост-памп слив)")
+                continue
+
+            # 2) Защита от летящего вниз ножа (крупная красная свеча или пробой поддержки)
+            curr_c = candles[-1]
+            closed_c = candles[-2]
+            heavy_dump_candle = (
+                (curr_c["open"] - curr_c["close"]) > 0.65 * a or
+                (closed_c["open"] - closed_c["close"] > 0.65 * a and curr_c["close"] < closed_c["close"])
+            )
+            ord_sup = order.get("nearest_sup")
+            sup_broken = bool(ord_sup and closed_c["close"] < ord_sup * 0.995 and t["last"] < ord_sup * 0.995)
+
             base_intact = (entry_mode != "reversal" and t["last"] >= e50 * 0.996 and e21 >= e50 * 0.996)
-            trend_broken_order = (entry_mode != "reversal" and t["last"] < e50 * 0.990 and e21 < e50 * 0.997)
+            trend_broken_order = (
+                (entry_mode != "reversal" and ((t["last"] < e50 * 0.992 and e21 < e50 * 0.998) or (heavy_dump_candle and t["last"] < e21 * 0.997))) or
+                (entry_mode == "reversal" and (sup_broken or (curr_c["open"] - curr_c["close"]) > 0.85 * a))
+            )
 
             if trend_broken_order:
                 paper.cancel_order(order["id"])
-                paper.log_event(sym, "cancel", t["last"], f"Умер ({init_score:.1f}-{score_now:.1f})", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
-                bot_state.set_cooldown(sym, 300)
-                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> ☠️⚰️ слом тренда")
+                paper.log_event(sym, "cancel", t["last"], f"Слом структуры ({init_score:.1f}-{score_now:.1f})", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
+                bot_state.set_cooldown(sym, 900)
+                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> ☠️⚰️ слом структуры/нож ({init_score:.1f} -> {score_now:.1f})")
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ ({init_score:.1f}-{score_now:.1f})")
                 continue
 
             if order_age >= 900 and not base_intact and score_now < (thr - 1.5):
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], f"Ослаб ({score_now:.1f})", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
-                bot_state.set_cooldown(sym, 300)
+                bot_state.set_cooldown(sym, 600)
                 logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> 🪫📉 ослаб сигнал")
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🪫📉 ({score_now:.1f})")
                 continue
@@ -250,7 +280,7 @@ class PositionManagerWorker:
             if order_age > 7200:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Тайм-аут 2ч", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
-                bot_state.set_cooldown(sym, 420)
+                bot_state.set_cooldown(sym, 600)
                 logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> ☠️⚰️ тайм-аут 2ч")
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ ({init_score:.1f}-{score_now:.1f})")
                 continue
@@ -275,7 +305,7 @@ class PositionManagerWorker:
             dev_pct = abs(ideal_price - old_price) / old_price * 100
             in_freeze_zone = abs(t["last"] - old_price) <= (0.45 * a) or (abs(t["last"] - old_price) / old_price * 100) <= 0.38
 
-            if ideal_price < old_price and dev_pct >= 0.40 and not in_freeze_zone:
+            if ideal_price < old_price and dev_pct >= 0.40 and not in_freeze_zone and not heavy_dump_candle:
                 if not (live_sup and ideal_price < live_sup * 1.0015):
                     target_price = ideal_price
                     action_type = "correct"
@@ -309,7 +339,6 @@ class PositionManagerWorker:
             min_rr = policy["min_rr_sniper"] if entry_mode == "sniper" else policy["min_rr_alt"]
             recent_low_6 = min(c["low"] for c in candles[-6:]) if len(candles) >= 6 else None
 
-            # Исправление: передаем часовые EMA в calc_initial_sl_tp при сдвиге ордера
             closes_1h = [c["close"] for c in candles_1h] if candles_1h and len(candles_1h) >= 50 else []
             e21_1h_val = ema(closes_1h, 21)[-1] if closes_1h else order.get("e21_1h")
             e50_1h_val = ema(closes_1h, 50)[-1] if closes_1h else order.get("e50_1h")
