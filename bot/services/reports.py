@@ -29,11 +29,8 @@ def _fmt_ts(ts: int, tz) -> str:
 
 async def build_audit_html(tz, public_url: str = "") -> str:
     """
-    Генерирует интерактивный веб-дашборд инфографики за 24 часа (/audit):
-- KPI-карточки в шапке
-- 3 интерактивных графика Plotly (Кривая капитала 24ч, PnL по секторам, Донат типов выходов)
-- 3 интерактивные таблицы (Открытые позиции и ордера, Рейтинг монет, Хронология сделок)
-      с прямыми кликабельными ссылками на свечной график каждой монеты (/chart?symbol=...).
+    Генерирует интерактивный веб-дашборд инфографики за 24 часа (/audit)
+    с кнопкой полного скриншота всей страницы (включая таблицы и графики Plotly).
     """
     prices = await market_data.get_tickers()
     eq = paper.equity(prices)
@@ -58,7 +55,6 @@ async def build_audit_html(tz, public_url: str = "") -> str:
     clean_wr = (len(wins) / len(decisive) * 100) if decisive else 0.0
 
     # --- ДАННЫЕ ДЛЯ ГРАФИКОВ PLOTLY ---
-    # 1. Кривая накопленного PnL ($) за 24ч
     eq_times = ["Старт 24ч"]
     eq_vals = [0.0]
     eq_texts = ["Начало отсчёта"]
@@ -70,7 +66,6 @@ async def build_audit_html(tz, public_url: str = "") -> str:
         eq_vals.append(cum_pnl)
         eq_texts.append(f"{sym_b}: {t['pnl_pct']:+.2f}% ({usd(t['pnl'])}) · {t.get('exit_type', '')}")
 
-    # 2. PnL по секторам ($)
     sec_pnl = defaultdict(float)
     sec_cnt = defaultdict(int)
     for t in closed_24h:
@@ -82,7 +77,6 @@ async def build_audit_html(tz, public_url: str = "") -> str:
     sec_values = [round(v, 2) for _, v in sec_sorted] or [0.0]
     sec_colors = ["#00e676" if v >= 0 else "#ff1744" for v in sec_values]
 
-    # 3. Распределение выходов
     exit_cnt = defaultdict(int)
     for t in closed_24h:
         exit_cnt[t.get("exit_type", "🛡📉")] += 1
@@ -277,6 +271,7 @@ async def build_audit_html(tz, public_url: str = "") -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Капитан Рост — Интерактивный Аудит 24ч</title>
 <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <style>
   :root {{
     --bg: #0f1218;
@@ -302,10 +297,20 @@ async def build_audit_html(tz, public_url: str = "") -> str:
     flex-wrap: wrap; gap: 10px;
   }}
   .header-title {{ font-size: 18px; font-weight: 700; }}
+  .header-actions {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }}
   .btn {{
     text-decoration: none; color: #fff; background: var(--accent);
     padding: 8px 14px; border-radius: 6px; font-weight: 600; font-size: 13px;
+    border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
   }}
+  .btn:hover {{ opacity: 0.92; }}
+  .btn:disabled {{ opacity: 0.6; cursor: wait; }}
+  .btn-shot {{
+    background: rgba(0, 230, 118, 0.16);
+    color: #00e676;
+    border: 1px solid rgba(0, 230, 118, 0.45);
+  }}
+  .btn-shot:hover {{ background: rgba(0, 230, 118, 0.28); }}
   .kpi-grid {{
     display: grid; grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
     gap: 12px; margin-bottom: 18px;
@@ -367,7 +372,8 @@ async def build_audit_html(tz, public_url: str = "") -> str:
     <div class="header-title">📊 Капитан Рост — Интерактивный Аудит и Инфографика (24ч)</div>
     <div class="muted">Срез: {now.strftime('%Y-%m-%d %H:%M:%S %Z')} · Клик по любой монете открывает её интерактивный свечной график</div>
   </div>
-  <div>
+  <div class="header-actions" data-html2canvas-ignore="true">
+    <button id="screenshot-btn" class="btn btn-shot" onclick="takeFullScreenshot()">📸 Скриншот всей страницы</button>
     <a class="btn" href="/audit">🔄 Обновить срез</a>
   </div>
 </div>
@@ -493,6 +499,94 @@ async def build_audit_html(tz, public_url: str = "") -> str:
     textinfo: 'label+value',
     margin: {{ t: 38, b: 20, l: 20, r: 20 }}
   }}], Object.assign({{}}, darkLayout, {{ title: 'Структура типов выхода (24ч)', showlegend: true }}), {{responsive: true, displayModeBar: false}});
+
+  async function takeFullScreenshot() {{
+    const btn = document.getElementById('screenshot-btn');
+    const origText = btn.innerHTML;
+    btn.innerHTML = '⏳ Склейка полного снимка...';
+    btn.disabled = true;
+
+    const savedScrollX = window.scrollX;
+    const savedScrollY = window.scrollY;
+    const tempImgs = [];
+    const body = document.body;
+    const origBodyWidth = body.style.width;
+    const origBodyOverflow = body.style.overflow;
+    const tableWraps = document.querySelectorAll('.table-wrap');
+
+    try {{
+      window.scrollTo(0, 0);
+
+      tableWraps.forEach(w => {{
+        w.dataset.origOverflow = w.style.overflowX || '';
+        w.style.overflowX = 'visible';
+      }});
+
+      const fullWidth = Math.max(body.scrollWidth, document.documentElement.scrollWidth, 1280);
+      body.style.width = fullWidth + 'px';
+      body.style.overflow = 'visible';
+
+      await new Promise(r => setTimeout(r, 150));
+
+      const plots = document.querySelectorAll('.js-plotly-plot');
+      for (const gd of plots) {{
+        Plotly.Plots.resize(gd);
+        const w = gd.clientWidth || 400;
+        const h = gd.clientHeight || 290;
+        const dataUrl = await Plotly.toImage(gd, {{ format: 'png', width: w, height: h, scale: 2 }});
+        const img = document.createElement('img');
+        img.src = dataUrl;
+        img.style.width = w + 'px';
+        img.style.height = h + 'px';
+        img.style.display = 'block';
+        gd.style.display = 'none';
+        gd.parentNode.insertBefore(img, gd);
+        tempImgs.push({{ gd, img }});
+      }}
+
+      const fullHeight = Math.max(body.scrollHeight, document.documentElement.scrollHeight);
+
+      const canvas = await html2canvas(body, {{
+        backgroundColor: '#0f1218',
+        scale: 2,
+        useCORS: true,
+        allowTaint: true,
+        scrollX: 0,
+        scrollY: 0,
+        windowWidth: fullWidth,
+        windowHeight: fullHeight,
+        width: fullWidth,
+        height: fullHeight
+      }});
+
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const nowStr = new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', '-');
+      a.href = url;
+      a.download = `CaptainRost_Audit_${{nowStr}}.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }} catch (err) {{
+      alert('Ошибка создания скриншота: ' + err);
+    }} finally {{
+      tempImgs.forEach(item => {{
+        item.img.remove();
+        item.gd.style.display = '';
+        Plotly.Plots.resize(item.gd);
+      }});
+      tableWraps.forEach(w => {{
+        w.style.overflowX = w.dataset.origOverflow || 'auto';
+      }});
+      body.style.width = origBodyWidth;
+      body.style.overflow = origBodyOverflow;
+      window.scrollTo(savedScrollX, savedScrollY);
+      btn.innerHTML = origText;
+      btn.disabled = false;
+    }}
+  }}
 </script>
 </body>
 </html>"""
