@@ -167,19 +167,21 @@ class OrderManagerWorker:
             t_data = tickers.get(sym, {})
             bid1 = t_data.get("bid1", cand["last"])
             ideal_entry = cand["last"] * (1 + off)
-            entry = min(ideal_entry, bid1)
+            entry = min(ideal_entry, bid1 * 0.9975)
 
             wick_entry = cand.get("wick_entry_price")
             if entry_mode == "reversal" and wick_entry and 0 < wick_entry < entry:
                 entry = max(wick_entry, cand["last"] * 0.985)
-                off = (entry - cand["last"]) / cand["last"]
 
             sup = cand.get("nearest_sup")
             sup_touches = cand.get("sup_touches", 0)
             if sup and sup_touches >= 2 and not is_mom:
                 retest_floor = sup * 1.0012
-                if entry < sup and cand["last"] > retest_floor:
-                    entry = min(retest_floor, bid1 * 0.999)
+                # Подтягиваем лимитку к плите ТОЛЬКО если плита сама лежит минимум на -0.35% глубже текущей цены!
+                if entry < sup and retest_floor <= cand["last"] * 0.9965:
+                    entry = retest_floor
+
+            off = (entry - cand["last"]) / cand["last"] if cand["last"] > 0 else off
 
             a = cand["atr"]
             if a <= 0:
@@ -189,8 +191,7 @@ class OrderManagerWorker:
             res_above_entry = []
             for r_item in all_res:
                 r_val, r_tch = r_item if isinstance(r_item, (list, tuple)) else (r_item, 2)
-                # Убрана слепая зона 0.25%: учитываем любую стену выше точки входа
-                if r_val > entry * 1.0002:
+                if r_val > entry * 1.0005:
                     res_above_entry.append((r_val, r_tch))
 
             if res_above_entry:
@@ -260,7 +261,7 @@ class OrderManagerWorker:
                 entry_mode=entry_mode, grade=grade
             )
 
-            size = min(size_base, size_by_risk, free_usdt * 0.98, equity * 0.12)
+            size = min(size_base, size_by_risk, free_usdt * 0.98, equity * 0.10)
             size = round(size, 2)
 
             if size < min_usdt_order:
