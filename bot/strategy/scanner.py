@@ -32,7 +32,7 @@ STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
 BASE_THRESHOLDS = {
     "bull": {"rocket": 6.0, "sniper": 5.5, "reversal": 5.2},
     "neutral": {"rocket": 6.5, "sniper": 6.0, "reversal": 5.4},
-    "bear": {"rocket": 7.2, "sniper": 6.5, "reversal": 5.8},
+    "bear": {"rocket": 7.0, "sniper": 6.4, "reversal": 5.6},
 }
 
 TIER_CORR_LIMITS = {
@@ -172,44 +172,43 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
             if pullback_from_peak >= 0.28 and (last_1h < e21_1h * 0.996 or heavy_red_dump):
                 return "1H_BAN", e21_1h, e50_1h, f"1H остывание после пампа (+{pump_1h_pct:.1f}%, слив {pullback_from_peak*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    e21_falling_1h = (e21_1h < e21_3h_ago * 0.997) and (last_1h < e21_1h * 0.995)
-    e50_falling_48h = (e50_1h < e50_12h_ago * 0.996) and (e50_1h < e50_24h_ago * 0.992)
+    e21_falling_1h = (e21_1h < e21_3h_ago * 0.996) and (last_1h < e21_1h * 0.992)
+    e50_falling_48h = (e50_1h < e50_12h_ago * 0.995) and (e50_1h < e50_24h_ago * 0.990)
 
-    # Строгий потолок диапазона 0.65 (отсекает покупку хаёв 75-80%) и обязательный плюс за 48ч (chg_48h >= 0.5%)
+    # Разрешаем рабочую зону над EMA50 (включая здоровый откат между EMA21 и EMA50) до 74% высоты 48ч-диапазона
     is_uptrend_1h = (
-        last_1h >= e50_1h * 0.998 and
-        last_1h >= e21_1h * 0.996 and
-        e21_1h >= e50_1h * 0.998 and
+        last_1h >= e50_1h * 0.996 and
+        e21_1h >= e50_1h * 0.996 and
         not e21_falling_1h and
         not e50_falling_48h and
-        0.30 <= pos_in_48h <= 0.65 and
-        0.5 <= chg_48h <= 16.5 and
-        r_1h <= 70
+        0.25 <= pos_in_48h <= 0.74 and
+        -0.5 <= chg_48h <= 17.5 and
+        r_1h <= 72
     )
     if is_uptrend_1h:
         return "1H_TREND_OK", e21_1h, e50_1h, f"1H аптренд 48ч ({chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    if pos_in_48h > 0.65 or chg_48h > 16.5:
+    if pos_in_48h > 0.74 or chg_48h > 17.5:
         return "1H_BAN", e21_1h, e50_1h, f"1H крыша/перегрев 48ч ({chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    has_strong_slab = bool(nearest_sup and sup_touches >= 3 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 2.2 * a15)
-    has_moderate_sup = bool(nearest_sup and sup_touches >= 2 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 1.6 * a15)
+    has_strong_slab = bool(nearest_sup and sup_touches >= 3 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 2.4 * a15)
+    has_moderate_sup = bool(nearest_sup and sup_touches >= 2 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 1.8 * a15)
 
     bottom_reclaim = False
-    if pos_in_48h <= 0.38 and has_moderate_sup and candles_15m and len(candles_15m) >= 25:
+    if pos_in_48h <= 0.42 and has_moderate_sup and candles_15m and len(candles_15m) >= 25:
         c15_closes = [c["close"] for c in candles_15m]
         e21_15m = ema(c15_closes, 21)[-1]
-        if c15_closes[-1] >= e21_15m and candles_15m[-2]["close"] > candles_15m[-2]["open"]:
+        if c15_closes[-1] >= e21_15m * 0.998 and candles_15m[-2]["close"] > candles_15m[-2]["open"]:
             bottom_reclaim = True
 
     if last_1h < e50_1h and e50_falling_48h:
         dist_below_e50_1h = (e50_1h - last_1h) / a_1h if a_1h > 0 else 0.0
-        if (has_strong_slab or bottom_reclaim) and dist_below_e50_1h <= 3.0 and pos_in_48h <= 0.50 and drop_from_48h_high_pct < 18.0:
+        if (has_strong_slab or bottom_reclaim) and dist_below_e50_1h <= 3.2 and pos_in_48h <= 0.55 and drop_from_48h_high_pct < 18.0:
             tag_str = "разворот со дна 48ч" if bottom_reclaim else f"1H плита в даунтренде ({sup_touches}x)"
             return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"{tag_str} (48ч {chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
         return "1H_BAN", e21_1h, e50_1h, f"1H 48ч даунтренд без плиты ({chg_48h:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    if (has_strong_slab or has_moderate_sup or bottom_reclaim) and pos_in_48h <= 0.55:
+    if (has_strong_slab or has_moderate_sup or bottom_reclaim) and pos_in_48h <= 0.62:
         return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"1H опора на плиту ({sup_touches}x, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
     return "1H_BAN", e21_1h, e50_1h, f"1H нет тренда и нет плиты за 48ч ({chg_48h:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
@@ -218,9 +217,9 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
 def raw_max_score(regime):
     m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
     m += max(learner.weight("indep"), learner.weight("news_pos"), learner.weight("hype"))
-    # Возвращаем 5.8 (мин. 13.2), чтобы убрать инфляцию оценок 10.0 и завышенные объемы ставок
-    m += 5.8
-    return max(13.2, m)
+    # Золотая середина 4.8 (мин. 12.2): 5 сильных факторов набирают ~6.5-7.0 баллов, но 10.0 без паттерна не раздается
+    m += 4.8
+    return max(12.2, m)
 
 
 def _returns(closes):
@@ -488,7 +487,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         score += learner.weight("chg24h")
         reasons.append(f"24ч +{t['change_pct']:.1f}%")
         keys.append("chg24h")
-    elif (t["change_pct"] <= -5.0 or local_swing_drop >= 3.0) and ("reversal" in matched_modes or r < 40):
+    elif (t["change_pct"] <= -5.0 or local_swing_drop >= 3.0) and ("reversal" in matched_modes or r < 42):
         score += learner.weight("chg24h")
         reasons.append(f"дисконт от свинга -{local_swing_drop:.1f}%")
         keys.append("chg24h")
@@ -503,7 +502,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
 
     if nearest_res and res_touches >= 4 and a15 > 0 and not is_open_pos:
         dist_to_res = nearest_res - last
-        if dist_to_res < 0.5 * a15 or (dist_to_res / last * 100) < 0.35:
+        if dist_to_res < 0.4 * a15 or (dist_to_res / last * 100) < 0.30:
             score -= 3.5
             reasons.append(f"в упор к капитальной стене ${fmt_price(nearest_res)} ({res_touches}x)")
 
@@ -518,12 +517,12 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
                 (candles_15m[-2]["close"] >= candles_15m[-2]["open"] or
                  (candles_15m[-2]["close"] - candles_15m[-2]["low"]) >= 0.45 * (candles_15m[-2]["high"] - candles_15m[-2]["low"]))
             )
-            if not is_open_pos and (last > closes[-2] or "reversal" in matched_modes or (sup_touches >= 3 and closed_candle_holds_sup)):
-                sup_bonus = 2.6 if sup_touches >= 3 else 1.4
+            if not is_open_pos and (last > closes[-2] or "reversal" in matched_modes or (sup_touches >= 2 and closed_candle_holds_sup)):
+                sup_bonus = 2.6 if sup_touches >= 3 else 1.5
                 score += sup_bonus
                 reasons.append(f"плита поддержки ${fmt_price(nearest_sup)} ({sup_touches}x, +{sup_bonus:.1f})")
                 keys.append("support_bounce")
-                if sup_touches >= 3 and "reversal" not in matched_modes and any(p in pattern_keys for p in ("pinbar", "divergence")):
+                if sup_touches >= 3 and "reversal" not in matched_modes and (any(p in pattern_keys for p in ("pinbar", "divergence")) or (closed_candle_holds_sup and r <= 46)):
                     matched_modes.append("reversal")
 
     gate_1h, e21_1h, e50_1h, gate_reason, chg_48h, pos_in_48h = validate_1h_structure(
@@ -537,7 +536,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         closes_1h = [c["close"] for c in candles_1h]
         r_1h = rsi(closes_1h)
 
-        if gate_1h == "1H_TREND_OK" and (r_1h < 56 or abs(last - e21) <= 1.1 * a15 or abs(last - e50) <= 1.4 * a15) and e12 >= e26 * 0.998:
+        if gate_1h == "1H_TREND_OK" and (r_1h < 58 or abs(last - e21) <= 1.2 * a15 or abs(last - e50) <= 1.5 * a15) and e12 >= e26 * 0.998:
             score += 1.8
             reasons.append("MTF: выкуп отката в 48ч 1H аптренде (+1.8)")
             keys.append("mtf_dip")
@@ -549,7 +548,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
             matched_modes = [m for m in matched_modes if m == "reversal"]
             if not matched_modes and sup_is_near and sup_touches >= 2 and (
                 any(p in pattern_keys for p in ("pinbar", "divergence")) or
-                (sup_touches >= 3 and closed_candle_holds_sup and r <= 44)
+                (sup_touches >= 3 and closed_candle_holds_sup and r <= 46)
             ):
                 matched_modes = ["reversal"]
 
@@ -815,13 +814,13 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                     if closed_15["close"] < closed_15["open"] and curr_15["close"] < closed_15["low"]:
                         return None
 
-            # В медвежьем рынке (BEAR) блокируем пробойные ракеты (защита от ловушек типа STX)
-            # и требуем для sniper нахождения в нижней/средней части диапазона (<= 60%)
+            # Сбалансированный фильтр для BEAR: блокируем rocket без пробоя и хаи > 72%,
+            # но разрешаем sniper на откатах в рабочую зону между 1H EMA21 и EMA50
             if regime == "bear":
-                if entry_mode == "rocket":
+                if entry_mode == "rocket" and "breakout" not in signal_values.get("patterns", []):
                     return None
-                if entry_mode == "sniper":
-                    if last_price < signal_values.get("e21_1h", 0) or signal_values.get("pos_in_48h", 1.0) > 0.60:
+                if entry_mode in ("sniper", "rocket"):
+                    if last_price < signal_values.get("e50_1h", 0) * 0.997 or signal_values.get("pos_in_48h", 1.0) > 0.72:
                         return None
 
             if signal_values.get("recent_rejection") and entry_mode in ("sniper", "rocket"):
