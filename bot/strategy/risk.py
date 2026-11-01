@@ -36,23 +36,23 @@ TRADE_POLICIES = {
         "max_portfolio_risk_pct": 1.5,
         "risk_per_trade_core": 0.50,
         "risk_per_trade_alt": 0.25,
-        "min_rr_sniper": 1.20,
-        "min_rr_alt": 1.05,
+        "min_rr_sniper": 1.15,
+        "min_rr_alt": 1.02,
         "require_grade_a_for_alt": True,
     },
     "CAUTIOUS": {
         "max_portfolio_risk_pct": 2.0,
         "risk_per_trade_core": 0.75,
         "risk_per_trade_alt": 0.50,
-        "min_rr_sniper": 1.15,
-        "min_rr_alt": 1.05,
+        "min_rr_sniper": 1.12,
+        "min_rr_alt": 1.00,
         "require_grade_a_for_alt": True,
     },
     "NORMAL": {
         "max_portfolio_risk_pct": 3.0,
         "risk_per_trade_core": 1.00,
         "risk_per_trade_alt": 0.75,
-        "min_rr_sniper": 1.10,
+        "min_rr_sniper": 1.08,
         "min_rr_alt": 1.00,
         "require_grade_a_for_alt": False,
     },
@@ -80,11 +80,6 @@ def calc_breakeven_price(avg_price: float, fee_pct: float = 0.10) -> float:
 
 
 def evaluate_setup_grade(cand: dict) -> str:
-    """
-    Сбалансированный и строгий отбор сетапов [💎] Grade A+:
-    Требует сильный паттерн, объем >= 1.25x или плиту >= 3x, исключая микро-капы из Other,
-    но без создания вечного дедлока для 1H_SUPPORT_ONLY.
-    """
     pos_in_48h = cand.get("pos_in_48h", 0.5)
     corr = abs(cand.get("corr", 1.0))
     entry_mode = cand.get("entry_mode", "sniper")
@@ -92,7 +87,7 @@ def evaluate_setup_grade(cand: dict) -> str:
     sector = cand.get("sector", "Other")
     gate_1h = cand.get("gate_1h", "")
 
-    if entry_mode in ("sniper", "rocket") and pos_in_48h > 0.68:
+    if entry_mode in ("sniper", "rocket") and pos_in_48h > 0.62:
         return "B"
     if corr > 0.50:
         return "B"
@@ -118,7 +113,7 @@ def evaluate_setup_grade(cand: dict) -> str:
     elif sup_touches == 3:
         confluence += 1
 
-    if gate_1h == "1H_TREND_OK" and ("mtf_dip" in keys and pos_in_48h <= 0.60):
+    if gate_1h == "1H_TREND_OK" and ("mtf_dip" in keys and pos_in_48h <= 0.58):
         confluence += 1
     elif gate_1h == "1H_SUPPORT_ONLY" and pos_in_48h <= 0.45 and sup_touches >= 3:
         confluence += 1
@@ -167,6 +162,14 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     sl_tuning = shadow.sl_mult()
     tp_tuning = shadow.tp_mult()
 
+    base_mult = 0.85 if is_mom else (1.45 if entry_mode == "reversal" else 1.20)
+    raw_atr_sl_pct = (base_mult * a * sl_tuning / entry) * 100.0 if entry > 0 else 0.0
+
+    # Защита от аномальной волатильности (кейс CAP): если натуральный стоп по ATR сильно выше лимита,
+    # не обрезаем его искусственно до -2.0%, а отклоняем сделку
+    if raw_atr_sl_pct > max_sl_allowed * 1.15:
+        return None, None, False, f"Аномальная волатильность ATR (SL {raw_atr_sl_pct:.2f}% > {max_sl_allowed}%)"
+
     sl_dist = 0.0
     if sup and sup_touches >= 2 and sup < entry and (entry - sup) <= 1.8 * a:
         struct_sl = round(sup * 0.997, 8)
@@ -176,7 +179,6 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
             sl = round(entry - sl_dist, 8)
 
     if sl_dist <= 0:
-        base_mult = 0.85 if is_mom else (1.45 if entry_mode == "reversal" else 1.20)
         sl_dist_raw = max(base_mult * a * sl_tuning, entry * sl_floor_pct)
         sl_dist = min(sl_dist_raw, entry * (max_sl_allowed / 100.0))
         sl = round(entry - sl_dist, 8)
@@ -201,34 +203,34 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
         return None, None, False, "Недопустимая дистанция SL"
 
     tp_atr_mult = 1.45 if entry_mode == "reversal" else (1.65 if is_mom else 1.50)
-    rr_target = 1.20 if entry_mode == "reversal" else 1.25
+    rr_target = 1.18 if entry_mode == "reversal" else 1.22
     tp_dist_raw = max(tp_atr_mult * a * tp_tuning, sl_dist * rr_target, entry * tp_floor_pct)
     tp = round(entry + tp_dist_raw, 8)
     if min_rr is None:
-        min_rr = 1.08 if entry_mode == "sniper" else 1.02
+        min_rr = 1.05 if entry_mode == "sniper" else 1.00
 
-    # Полный контроль потолка 1H EMA21 в даунтренде (без слепой зоны <= 1.0%)
     if entry_mode == "reversal" and e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry:
-        if e21_1h <= entry * 1.010:
-            return None, None, False, "Потолок 1H EMA21 вплотную над входом (< 1.0%)"
+        if e21_1h <= entry * 1.009:
+            return None, None, False, "Потолок 1H EMA21 вплотную над входом (< 0.9%)"
         cap_1h = round(e21_1h * 0.998, 8)
         if cap_1h < tp:
-            if (cap_1h - entry) / sl_dist >= 1.02:
+            if (cap_1h - entry) / sl_dist >= 0.92:
                 tp = cap_1h
-                min_rr = min(min_rr, 1.02)
+                min_rr = min(min_rr, 0.92)
             else:
                 return None, None, False, "Потолок 1H EMA21 зажимает RR"
 
     if res and res > entry and res_touches >= 4:
         res_dist_pct = (res - entry) / entry * 100
-        if res_dist_pct < 0.45:
-            return None, None, False, f"Капитальная стена 1H в упор ({res_dist_pct:.2f}% < 0.45%)"
+        min_wall_dist = 0.22 if is_mom else 0.35
+        if res_dist_pct < min_wall_dist:
+            return None, None, False, f"Капитальная стена 1H в упор ({res_dist_pct:.2f}% < {min_wall_dist:.2f}%)"
 
         res_cap_tp = round(res * 0.997, 8)
         if res_cap_tp < tp:
-            if (res_cap_tp - entry) / sl_dist >= 1.02:
+            if (res_cap_tp - entry) / sl_dist >= 0.90:
                 tp = res_cap_tp
-                min_rr = min(min_rr, 1.02)
+                min_rr = min(min_rr, 0.90)
             else:
                 return None, None, False, "Капитальная стена 1H не дает забрать RR"
 
@@ -358,31 +360,25 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
         else:
             new_state = "BREAKEVEN"
     else:
-        if is_rocket:
-            if profit_pct >= max(1.0, tp_target_pct * 0.50):
-                if breakeven > new_sl:
-                    new_sl = breakeven
-                    new_state = "BREAKEVEN"
-            if a15 > 0 and e21 > 0 and last_p > e21:
-                e21_sl = e21 - 0.45 * a15
-                if e21_sl > new_sl:
-                    new_sl = e21_sl
-                    new_state = "PROFIT_LOCK" if new_sl > breakeven * 1.002 else "BREAKEVEN"
+        # ЖЕСТКОЕ ПРАВИЛО: До взятия TP1 стоп-лосс может двигаться ТОЛЬКО в безубыток (>= breakeven) и выше!
+        # Никакого поджимания стопа в убыточной зоне (исправление кейсов STX и RED)
+        if is_rocket and profit_pct >= max(1.1, tp_target_pct * 0.55):
+            candidate_r = max(breakeven, ema_ratchet_sl if ema_ratchet_sl >= breakeven else 0.0)
+            if candidate_r > new_sl:
+                new_sl = candidate_r
+                new_state = "PROFIT_LOCK" if new_sl > breakeven * 1.003 else "BREAKEVEN"
 
         ratchet_trigger = max(1.35, tp_target_pct * 0.75)
-        if ema_ratchet_sl > new_sl and profit_pct >= ratchet_trigger:
+        if ema_ratchet_sl >= breakeven and ema_ratchet_sl > new_sl and profit_pct >= ratchet_trigger:
             new_sl = ema_ratchet_sl
-            if new_sl >= breakeven * 1.003:
-                new_state = "PROFIT_LOCK"
-            elif new_sl >= breakeven:
-                new_state = "BREAKEVEN"
+            new_state = "PROFIT_LOCK" if new_sl >= breakeven * 1.003 else "BREAKEVEN"
 
         if profit_pct >= cfg["lock_trigger_pct"] or (is_climax and profit_pct >= 1.5):
             lock_sl = round(max_p * (1 - cfg["lock_dist"]), 8)
-            candidate = max(breakeven, lock_sl, ema_ratchet_sl)
-            if candidate > new_sl:
+            candidate = max(breakeven, lock_sl, ema_ratchet_sl if ema_ratchet_sl >= breakeven else 0.0)
+            if candidate >= breakeven and candidate > new_sl:
                 new_sl = candidate
-                new_state = "PROFIT_LOCK" if new_sl > breakeven * 1.002 else "BREAKEVEN"
+                new_state = "PROFIT_LOCK" if new_sl > breakeven * 1.003 else "BREAKEVEN"
 
     new_sl = round(new_sl, 8)
 
