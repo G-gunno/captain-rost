@@ -76,12 +76,12 @@ def _count_spaced_touches(price_target: float, points: list, tol: float = 0.005)
                 h1_touches_count += 1
             last_idx_by_tf[tf_tag] = idx
 
-    # Если есть часовое касание, вычитаем 1 дублирующий 15m-экстремум того же самого пика
     if h1_touches_count > 0 and "15m" in last_idx_by_tf:
         touches_weight = max(2, touches_weight - 1)
 
-    # Статус «Капитальной стены» (вес >= 4) дается ТОЛЬКО при наличии часового касания
-    if touches_weight >= 4 and h1_touches_count == 0:
+    # Статус «Капитальной стены 1H» (вес >= 4) дается ТОЛЬКО если уровень
+    # подтвержден минимум двумя независимыми часовыми экстремумами (h1_touches_count >= 2)
+    if touches_weight >= 4 and h1_touches_count < 2:
         touches_weight = 3
 
     return touches_weight
@@ -101,9 +101,9 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72
             h = recent_1h[i]["high"]
             l = recent_1h[i]["low"]
             if all(h >= recent_1h[i + j]["high"] for j in (-2, -1, 1, 2)):
-                high_points.append((h, "1h", i, 3, 2))
+                high_points.append((h, "1h", i, 4, 2))
             if all(l <= recent_1h[i + j]["low"] for j in (-2, -1, 1, 2)):
-                low_points.append((l, "1h", i, 3, 2))
+                low_points.append((l, "1h", i, 4, 2))
 
     recent_15m = candles_15m[-window_15m:] if len(candles_15m) >= window_15m else candles_15m
     n15 = len(recent_15m)
@@ -144,16 +144,14 @@ def find_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72, w
     last_price = candles_15m[-1]["close"]
     confirmed_res, confirmed_sup = get_all_sr_levels(candles_15m, candles_1h, window_15m, window_1h)
 
-    # Видим стену сопротивления даже если цена подошла к ней вплотную (от -0.15% и выше)
-    res_above = [c for c in confirmed_res if c[0] >= last_price * 0.9985]
+    res_above = [c for c in confirmed_res if c[0] > last_price * 1.0005]
     nearest_res = None
     res_touches = 0
     if res_above:
         res_above.sort(key=lambda x: x[0])
         nearest_res, res_touches = res_above[0]
 
-    # Видим плиту поддержки даже когда цена лежит прямо на ней (до +0.20% от текущей цены)
-    sup_below = [c for c in confirmed_sup if c[0] <= last_price * 1.0020]
+    sup_below = [c for c in confirmed_sup if c[0] < last_price * 0.9995]
     nearest_sup = None
     sup_touches = 0
     if sup_below:
