@@ -87,7 +87,7 @@ def evaluate_setup_grade(cand: dict) -> str:
     sector = cand.get("sector", "Other")
     gate_1h = cand.get("gate_1h", "")
 
-    if entry_mode in ("sniper", "rocket") and pos_in_48h > 0.62:
+    if entry_mode in ("sniper", "rocket") and pos_in_48h > 0.65:
         return "B"
     if corr > 0.50:
         return "B"
@@ -113,7 +113,7 @@ def evaluate_setup_grade(cand: dict) -> str:
     elif sup_touches == 3:
         confluence += 1
 
-    if gate_1h == "1H_TREND_OK" and ("mtf_dip" in keys and pos_in_48h <= 0.58):
+    if gate_1h == "1H_TREND_OK" and ("mtf_dip" in keys and pos_in_48h <= 0.60):
         confluence += 1
     elif gate_1h == "1H_SUPPORT_ONLY" and pos_in_48h <= 0.45 and sup_touches >= 3:
         confluence += 1
@@ -162,11 +162,9 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     sl_tuning = shadow.sl_mult()
     tp_tuning = shadow.tp_mult()
 
-    base_mult = 0.85 if is_mom else (1.45 if entry_mode == "reversal" else 1.20)
+    base_mult = 0.85 if is_mom else (1.25 if entry_mode == "reversal" else 1.20)
     raw_atr_sl_pct = (base_mult * a * sl_tuning / entry) * 100.0 if entry > 0 else 0.0
 
-    # Защита от аномальной волатильности (кейс CAP): если натуральный стоп по ATR сильно выше лимита,
-    # не обрезаем его искусственно до -2.0%, а отклоняем сделку
     if raw_atr_sl_pct > max_sl_allowed * 1.15:
         return None, None, False, f"Аномальная волатильность ATR (SL {raw_atr_sl_pct:.2f}% > {max_sl_allowed}%)"
 
@@ -207,18 +205,16 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     tp_dist_raw = max(tp_atr_mult * a * tp_tuning, sl_dist * rr_target, entry * tp_floor_pct)
     tp = round(entry + tp_dist_raw, 8)
     if min_rr is None:
-        min_rr = 1.05 if entry_mode == "sniper" else 1.00
+        min_rr = 1.05 if entry_mode == "sniper" else 0.98
 
-    if entry_mode == "reversal" and e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry:
-        if e21_1h <= entry * 1.009:
-            return None, None, False, "Потолок 1H EMA21 вплотную над входом (< 0.9%)"
-        cap_1h = round(e21_1h * 0.998, 8)
-        if cap_1h < tp:
-            if (cap_1h - entry) / sl_dist >= 0.92:
+    # Для reversal ориентируемся на 1H EMA50 как верхнюю границу возврата в даунтренде (не блокируем об близкую 1H EMA21)
+    if entry_mode == "reversal" and e21_1h and e50_1h and e21_1h < e50_1h:
+        rev_ceiling = max(e21_1h, e50_1h * 0.996)
+        if rev_ceiling > entry * 1.012:
+            cap_1h = round(rev_ceiling * 0.998, 8)
+            if cap_1h < tp and (cap_1h - entry) / sl_dist >= 0.95:
                 tp = cap_1h
-                min_rr = min(min_rr, 0.92)
-            else:
-                return None, None, False, "Потолок 1H EMA21 зажимает RR"
+                min_rr = min(min_rr, 0.95)
 
     if res and res > entry and res_touches >= 4:
         res_dist_pct = (res - entry) / entry * 100
@@ -262,8 +258,8 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
         e21_1h = ema(closes_1h, 21)[-1]
         e50_1h = ema(closes_1h, 50)[-1]
         if entry_mode == "reversal" and e21_1h < e50_1h and current_price < e50_1h:
-            if e21_1h > current_price * 1.005:
-                return round(e21_1h * 0.998, 8), False, "1h_ema21_cap"
+            if e50_1h > current_price * 1.008:
+                return round(e50_1h * 0.998, 8), False, "1h_ema50_cap"
 
     recent_box = (max(c["high"] for c in candles_15m[-6:]) - min(c["low"] for c in candles_15m[-6:])) / current_price if current_price > 0 else 0.0
     if recent_box <= 0.015 and e21 <= e50 * 1.001:
@@ -360,8 +356,6 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
         else:
             new_state = "BREAKEVEN"
     else:
-        # ЖЕСТКОЕ ПРАВИЛО: До взятия TP1 стоп-лосс может двигаться ТОЛЬКО в безубыток (>= breakeven) и выше!
-        # Никакого поджимания стопа в убыточной зоне (исправление кейсов STX и RED)
         if is_rocket and profit_pct >= max(1.1, tp_target_pct * 0.55):
             candidate_r = max(breakeven, ema_ratchet_sl if ema_ratchet_sl >= breakeven else 0.0)
             if candidate_r > new_sl:
