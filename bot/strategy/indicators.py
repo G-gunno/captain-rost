@@ -117,8 +117,15 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72
 
     unique_highs = {pt[0] for pt in high_points if pt[0] > 0}
     clusters_res = []
+    # Проверяем последние 32 свечи 15m (8 часов): если цена уже закрывалась выше уровня на +0.3%,
+    # уровень считается распиленным и теряет статус «Капитальной стены» (макс. вес 3)
+    recent_closes = [c["close"] for c in recent_15m[-32:]] if len(recent_15m) >= 32 else [c["close"] for c in recent_15m]
+    max_recent_close = max(recent_closes) if recent_closes else 0.0
+
     for h in unique_highs:
         touches = _count_spaced_touches(h, high_points, tol=0.005)
+        if touches >= 4 and max_recent_close > h * 1.003:
+            touches = 3
         if touches >= 2:
             clusters_res.append((h, touches))
     clusters_res.sort(key=lambda x: x[0])
