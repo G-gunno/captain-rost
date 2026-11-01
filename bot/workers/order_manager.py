@@ -167,7 +167,7 @@ class OrderManagerWorker:
             t_data = tickers.get(sym, {})
             bid1 = t_data.get("bid1", cand["last"])
             ideal_entry = cand["last"] * (1 + off)
-            entry = min(ideal_entry, bid1 * 0.9975)
+            entry = min(ideal_entry, bid1 * 0.9985)
 
             wick_entry = cand.get("wick_entry_price")
             if entry_mode == "reversal" and wick_entry and 0 < wick_entry < entry:
