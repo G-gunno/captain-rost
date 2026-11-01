@@ -32,7 +32,7 @@ STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
 BASE_THRESHOLDS = {
     "bull": {"rocket": 6.0, "sniper": 5.5, "reversal": 5.2},
     "neutral": {"rocket": 6.5, "sniper": 6.0, "reversal": 5.4},
-    "bear": {"rocket": 7.0, "sniper": 6.5, "reversal": 5.8},
+    "bear": {"rocket": 7.2, "sniper": 6.5, "reversal": 5.8},
 }
 
 TIER_CORR_LIMITS = {
@@ -92,10 +92,6 @@ def is_tradable(symbol):
 
 
 def is_post_pump_dump(candles_15m: list) -> tuple:
-    """
-    Блокирует вход на 15m после импульсного пампа (включая свежие вершины последних свечей),
-    не блокируя при этом нормальные консолидации над растущей EMA21.
-    """
     if not candles_15m or len(candles_15m) < 25:
         return False, ""
     recent = candles_15m[-20:]
@@ -155,12 +151,10 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     r_1h = rsi(closes_1h)
     a_1h = atr(candles_1h)
 
-    # 1. Защита от глубокого краха с 48ч-хая под падающими средними
     drop_from_48h_high_pct = ((high_48h - last_1h) / high_48h * 100) if high_48h > 0 else 0.0
     if drop_from_48h_high_pct >= 18.0 and last_1h < e21_1h and e21_1h < e50_1h:
         return "1H_BAN", e21_1h, e50_1h, f"1H крах с хая (-{drop_from_48h_high_pct:.1f}% под EMA21/50)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    # 2. Точечная проверка свежего пост-памп слива за последние 10 часов (пик не старше 8 часов назад)
     recent_12_1h = candles_1h[-12:] if len(candles_1h) >= 12 else candles_1h
     high_idx_12 = max(range(len(recent_12_1h)), key=lambda i: recent_12_1h[i]["high"])
     max_h_12 = recent_12_1h[high_idx_12]["high"]
@@ -178,23 +172,24 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
             if pullback_from_peak >= 0.28 and (last_1h < e21_1h * 0.996 or heavy_red_dump):
                 return "1H_BAN", e21_1h, e50_1h, f"1H остывание после пампа (+{pump_1h_pct:.1f}%, слив {pullback_from_peak*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    e21_falling_1h = (e21_1h < e21_3h_ago * 0.997) and (last_1h < e21_1h * 0.994)
+    e21_falling_1h = (e21_1h < e21_3h_ago * 0.997) and (last_1h < e21_1h * 0.995)
     e50_falling_48h = (e50_1h < e50_12h_ago * 0.996) and (e50_1h < e50_24h_ago * 0.992)
 
-    # Разрешаем здоровый откат в зону между 1H EMA21 и 1H EMA50, если тренд EMA21 >= EMA50 сохраняется
+    # Строгий потолок диапазона 0.65 (отсекает покупку хаёв 75-80%) и обязательный плюс за 48ч (chg_48h >= 0.5%)
     is_uptrend_1h = (
-        last_1h >= e50_1h * 0.997 and
-        e21_1h >= e50_1h * 0.997 and
+        last_1h >= e50_1h * 0.998 and
+        last_1h >= e21_1h * 0.996 and
+        e21_1h >= e50_1h * 0.998 and
         not e21_falling_1h and
         not e50_falling_48h and
-        0.25 <= pos_in_48h <= 0.80 and
-        chg_48h <= 20.0 and
-        r_1h <= 74
+        0.30 <= pos_in_48h <= 0.65 and
+        0.5 <= chg_48h <= 16.5 and
+        r_1h <= 70
     )
     if is_uptrend_1h:
         return "1H_TREND_OK", e21_1h, e50_1h, f"1H аптренд 48ч ({chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    if pos_in_48h > 0.80 or chg_48h > 20.0:
+    if pos_in_48h > 0.65 or chg_48h > 16.5:
         return "1H_BAN", e21_1h, e50_1h, f"1H крыша/перегрев 48ч ({chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
     has_strong_slab = bool(nearest_sup and sup_touches >= 3 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 2.2 * a15)
@@ -214,7 +209,7 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
             return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"{tag_str} (48ч {chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
         return "1H_BAN", e21_1h, e50_1h, f"1H 48ч даунтренд без плиты ({chg_48h:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    if (has_strong_slab or has_moderate_sup or bottom_reclaim) and pos_in_48h <= 0.60:
+    if (has_strong_slab or has_moderate_sup or bottom_reclaim) and pos_in_48h <= 0.55:
         return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"1H опора на плиту ({sup_touches}x, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
     return "1H_BAN", e21_1h, e50_1h, f"1H нет тренда и нет плиты за 48ч ({chg_48h:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
@@ -223,8 +218,9 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
 def raw_max_score(regime):
     m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
     m += max(learner.weight("indep"), learner.weight("news_pos"), learner.weight("hype"))
-    m += 4.2
-    return max(11.5, m)
+    # Возвращаем 5.8 (мин. 13.2), чтобы убрать инфляцию оценок 10.0 и завышенные объемы ставок
+    m += 5.8
+    return max(13.2, m)
 
 
 def _returns(closes):
@@ -534,14 +530,14 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         candles_1h, nearest_sup, sup_touches, a15, candles_15m=candles_15m
     )
 
-    if chg_48h > 18.0 or pos_in_48h > 0.55:
+    if chg_48h > 16.0 or pos_in_48h > 0.55:
         matched_modes = [m for m in matched_modes if m != "reversal"]
 
     if candles_1h and len(candles_1h) >= 50:
         closes_1h = [c["close"] for c in candles_1h]
         r_1h = rsi(closes_1h)
 
-        if gate_1h == "1H_TREND_OK" and (r_1h < 58 or abs(last - e21) <= 1.2 * a15 or abs(last - e50) <= 1.5 * a15) and e12 >= e26 * 0.998:
+        if gate_1h == "1H_TREND_OK" and (r_1h < 56 or abs(last - e21) <= 1.1 * a15 or abs(last - e50) <= 1.4 * a15) and e12 >= e26 * 0.998:
             score += 1.8
             reasons.append("MTF: выкуп отката в 48ч 1H аптренде (+1.8)")
             keys.append("mtf_dip")
@@ -796,7 +792,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             if sector == "Other" and tier == "MICRO" and tickers[sym]["quote_volume"] < 1_500_000:
                 return None
 
-            # Сбалансированный фильтр 15m: разрешает откат к EMA50 при условии разворота зеленой свечой
             if candles_15m and len(candles_15m) >= 50:
                 c15_closes = [c["close"] for c in candles_15m]
                 e21_series_15 = ema(c15_closes, 21)
@@ -807,14 +802,11 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 curr_15 = candles_15m[-1]
 
                 if entry_mode in ("sniper", "rocket"):
-                    # Базовая трендовая структура 15m: EMA21 >= EMA50 и EMA50 не заваливается вниз
                     if e21_15 < e50_15 * 0.9985 or e50_15 < e50_series_15[-4] * 0.999:
                         return None
-                    # Если цена в откате под EMA21 или сама EMA21 наклонилась — требуем подтвержденный зеленый откуп
                     if last_price < e21_15 * 0.999 or e21_15 < e21_series_15[-3] * 0.999:
                         if closed_15["close"] < closed_15["open"] and curr_15["close"] <= curr_15["open"]:
                             return None
-                    # Защита от входа в крупную сливную свечу
                     if curr_15["close"] < curr_15["open"] and (curr_15["open"] - curr_15["close"]) > 0.55 * a:
                         return None
                 elif entry_mode == "reversal":
@@ -823,9 +815,14 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                     if closed_15["close"] < closed_15["open"] and curr_15["close"] < closed_15["low"]:
                         return None
 
-            if regime == "bear" and entry_mode in ("sniper", "rocket"):
-                if last_price < signal_values.get("e21_1h", 0) or not signal_values.get("patterns"):
+            # В медвежьем рынке (BEAR) блокируем пробойные ракеты (защита от ловушек типа STX)
+            # и требуем для sniper нахождения в нижней/средней части диапазона (<= 60%)
+            if regime == "bear":
+                if entry_mode == "rocket":
                     return None
+                if entry_mode == "sniper":
+                    if last_price < signal_values.get("e21_1h", 0) or signal_values.get("pos_in_48h", 1.0) > 0.60:
+                        return None
 
             if signal_values.get("recent_rejection") and entry_mode in ("sniper", "rocket"):
                 return None
