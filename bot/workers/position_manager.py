@@ -21,7 +21,7 @@ from bot.core.state import bot_state
 
 
 class PositionManagerWorker:
-    """Управление позициями: Дышащий Коридор по свечам 15m/1H, защита лимиток от ножей и Freeze Zone."""
+    """Управление позициями: Дышащий Коридор по свечам 15m/1H, защита лимиток от ножей и таймаут 45 мин."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -108,7 +108,7 @@ class PositionManagerWorker:
 
             if is_toxic:
                 bot_state.set_cooldown(sym, 7200)
-                if pnl_pct >= 1.0 or pnl_pct <= 0:
+                if pnl_pct >= 0.8 or pnl_pct <= -0.3:
                     reason = "✂📰 Новости"
                     ex = paper._sell(sym, last, reason, regime_now=regime)
                     paper.log_event(sym, "sell", last, f"Новости {neg}/{mentions}", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
@@ -119,29 +119,29 @@ class PositionManagerWorker:
             e21_falling = len(e21_series) >= 4 and e21 < e21_series[-3] * 0.9995
             closed_2_below = (
                 len(candles) >= 3 and
-                candles[-2]["close"] < (e50 - 0.55 * a) and
-                candles[-3]["close"] < (e50 - 0.55 * a)
+                candles[-2]["close"] < (e50 - 0.65 * a) and
+                candles[-3]["close"] < (e50 - 0.65 * a)
             )
             trend_broken = (
                 closed_2_below and
-                last < (e50 - 0.55 * a) and
+                last < (e50 - 0.65 * a) and
                 (e21 < e50 * 0.997 or e21_falling)
             )
             pos_age = current_time - pos.get("entry_time", current_time)
 
+            # ВАЖНО: Никогда не режем убыточную сделку посреди канала до ее законного SL (исправление DOT и ZAMA)!
+            # Досрочный выход по слому тренда разрешен ТОЛЬКО для защиты уже имеющегося профита (pnl_pct >= 0.45%)
             should_exit_early = False
-            if pos_age >= 1800 and not is_toxic:
+            if pos_age >= 2400 and not is_toxic and pnl_pct >= 0.45:
                 if entry_mode != "reversal" and trend_broken:
                     should_exit_early = True
 
             if should_exit_early:
-                reason = "🪫 Слом тренда" if pnl_pct > 0 else "✂️📉 Слом тренда"
+                reason = "🪫 Слом тренда"
                 ex = paper._sell(sym, last, reason, regime_now=regime)
-                ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"
-                paper.log_event(sym, ev_type, last, reason, tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
-                bot_state.record_trade_exit(sym, ex["pnl_pct"], last, is_sl=(ex["pnl_pct"] < -0.15))
-                if ex["pnl"] > 0:
-                    shadow.mark_success(sym)
+                paper.log_event(sym, "sell_profit", last, reason, tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                bot_state.record_trade_exit(sym, ex["pnl_pct"], last, is_sl=False)
+                shadow.mark_success(sym)
                 self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)}{grade_badge(ex)} · {reason}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                 continue
 
@@ -181,7 +181,7 @@ class PositionManagerWorker:
                     self._notify(f"TP🏃🏻‍➡️ <b>Потолок коридора поднят</b> · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · {sl_tag} {fmt_price(pos['sl'])}")
 
         # =====================================================================
-        # 2. ПРОВЕРКА ОЖИДАЮЩИХ ОРДЕРОВ (Защита от падающих ножей + Freeze Zone)
+        # 2. ПРОВЕРКА ОЖИДАЮЩИХ ОРДЕРОВ (Таймаут 45 минут и отказ от hunt_up)
         # =====================================================================
         for order in list(paper.orders):
             sym = order["symbol"]
@@ -239,16 +239,16 @@ class PositionManagerWorker:
             curr_c = candles[-1]
             closed_c = candles[-2]
             heavy_dump_candle = (
-                (curr_c["open"] - curr_c["close"]) > 0.65 * a or
-                (closed_c["open"] - closed_c["close"] > 0.65 * a and curr_c["close"] < closed_c["close"])
+                (curr_c["open"] - curr_c["close"]) > 0.70 * a or
+                (closed_c["open"] - closed_c["close"] > 0.70 * a and curr_c["close"] < closed_c["close"])
             )
             ord_sup = order.get("nearest_sup")
-            sup_broken = bool(ord_sup and closed_c["close"] < ord_sup * 0.995 and t["last"] < ord_sup * 0.995)
+            sup_broken = bool(ord_sup and closed_c["close"] < ord_sup * 0.994 and t["last"] < ord_sup * 0.994)
 
             base_intact = (entry_mode != "reversal" and t["last"] >= e50 * 0.996 and e21 >= e50 * 0.996)
             trend_broken_order = (
-                (entry_mode != "reversal" and ((t["last"] < e50 * 0.992 and e21 < e50 * 0.998) or (heavy_dump_candle and t["last"] < e21 * 0.997))) or
-                (entry_mode == "reversal" and (sup_broken or (curr_c["open"] - curr_c["close"]) > 0.85 * a))
+                (entry_mode != "reversal" and ((t["last"] < e50 * 0.990 and e21 < e50 * 0.997) or (heavy_dump_candle and t["last"] < e50 * 0.996))) or
+                (entry_mode == "reversal" and (sup_broken or (curr_c["open"] - curr_c["close"]) > 0.90 * a))
             )
 
             if trend_broken_order:
@@ -259,7 +259,7 @@ class PositionManagerWorker:
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ ({init_score:.1f}-{score_now:.1f})")
                 continue
 
-            if order_age >= 900 and not base_intact and score_now < (thr - 1.5):
+            if order_age >= 1200 and not base_intact and score_now < (thr - 1.5):
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], f"Ослаб ({score_now:.1f})", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 600)
@@ -267,7 +267,7 @@ class PositionManagerWorker:
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🪫📉 ({score_now:.1f})")
                 continue
 
-            if t["last"] > order["price"] + 2.2 * a:
+            if t["last"] > order["price"] + 2.5 * a:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Улетела без нас", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 300)
@@ -275,11 +275,14 @@ class PositionManagerWorker:
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🚀👋🏻")
                 continue
 
-            if order_age > 7200:
+            # Сокращаем время жизни неисполненной лимитки до 45 минут (2700с),
+            # чтобы не набирать «протухшие» ордера спустя 1.5 часа на общем сливе рынка
+            max_order_age = 3600 if entry_mode == "reversal" else 2700
+            if order_age > max_order_age:
                 paper.cancel_order(order["id"])
-                paper.log_event(sym, "cancel", t["last"], "Тайм-аут 2ч", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
-                bot_state.set_cooldown(sym, 600)
-                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> ☠️⚰️ тайм-аут 2ч")
+                paper.log_event(sym, "cancel", t["last"], "Тайм-аут 45м", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
+                bot_state.set_cooldown(sym, 300)
+                logger.info(f"PositionManager: ⚠️ Ордер {sym} снят -> ☠️⚰️ тайм-аут ({init_score:.1f}-{score_now:.1f})")
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ ({init_score:.1f}-{score_now:.1f})")
                 continue
 
@@ -301,26 +304,20 @@ class PositionManagerWorker:
             action_type = None
             price_icon = ""
             dev_pct = abs(ideal_price - old_price) / old_price * 100
-            in_freeze_zone = abs(t["last"] - old_price) <= (0.45 * a) or (abs(t["last"] - old_price) / old_price * 100) <= 0.38
+            in_freeze_zone = abs(t["last"] - old_price) <= (0.45 * a) or (abs(t["last"] - old_price) / old_price * 100) <= 0.35
 
-            if ideal_price < old_price and dev_pct >= 0.40 and not in_freeze_zone and not heavy_dump_candle:
+            # Разрешаем только мягкую коррекцию лимитки ВНИЗ (никакого hunt_up за уходящей вверх свечой!)
+            if ideal_price < old_price and dev_pct >= 0.45 and not in_freeze_zone and not heavy_dump_candle:
                 if not (live_sup and ideal_price < live_sup * 1.0015):
                     target_price = ideal_price
                     action_type = "correct"
                     price_icon = "⬇️"
 
-            elif ideal_price > old_price and dev_pct >= 0.38 and not in_freeze_zone and regime != "bear" and new_mode != "STRICT":
-                can_shift_up = (is_accum and t["last"] <= (e50 * 1.012)) or (entry_mode == "sniper" and t["last"] <= (e21 * 1.008))
-                if can_shift_up:
-                    target_price = ideal_price
-                    action_type = "hunt_up"
-                    price_icon = "⬆️"
-
             if not action_type:
                 continue
 
             all_res, all_sup = get_all_sr_levels(candles, candles_1h)
-            res_above_target = [(r[0], r[1]) for r in all_res if r[0] > target_price * 1.0002]
+            res_above_target = [(r[0], r[1]) for r in all_res if r[0] > target_price * 1.0005]
             if res_above_target:
                 res_above_target.sort(key=lambda x: x[0])
                 entry_res, entry_res_touches = res_above_target[0]
@@ -367,7 +364,7 @@ class PositionManagerWorker:
                 order["requotes"] = order.get("requotes", 0) + 1
                 paper.save()
 
-                msg_desc = "база" if action_type == "hunt_up" else f"{dev_pct:.2f}%"
+                msg_desc = f"{dev_pct:.2f}%"
                 logger.info(f"PositionManager: 📐 Сдвиг ордера {sym} ({action_type}) -> new_entry=${fmt_price(target_price)}, SL=${fmt_price(sl)}")
                 paper.log_event(sym, "order_moved", order["price"], f"Сдвиг: {action_type}", tp=order["tp"], sl=order["sl"], sup=entry_sup, res=entry_res)
                 self._notify(f"📐 <b>Сдвиг {price_icon}</b> · {pair_html(sym, order)}\n📥 {fmt_price(order['price'])} ({off * 100:+.2f}%) · 🛡📉 {fmt_price(order['sl'])} · {msg_desc}")
