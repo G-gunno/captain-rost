@@ -21,7 +21,7 @@ PATTERN_NAMES = {
 
 TIERS = ["TOP20", "MID", "SMALL", "MICRO"]
 
-BE_LOW_PCT = -0.15
+BE_LOW_PCT = -0.25
 BE_HIGH_PCT = 0.25
 
 
@@ -30,7 +30,7 @@ def is_neutral_be(pnl_pct: float) -> bool:
 
 
 class Learner:
-    """Самообучение: сбалансированные веса с Mean Reversion + нейтральная зона БУ + управление Grade A+ [💎]."""
+    """Самообучение: сбалансированные веса с Mean Reversion + нейтральная зона БУ (-0.25%..+0.25%)."""
 
     def __init__(self):
         self.weights = {k: 1.0 for k in KEYS}
@@ -63,7 +63,6 @@ class Learner:
                 w_val = float(loaded_weights.get(k, 1.0))
                 self.weights[k] = round(min(1.45, max(0.55, w_val)), 3)
 
-            # Авто-выравнивание исторического перекоса весов (если трендовые ключи упали < 0.60, а редкие > 1.40)
             if min(self.weights.values()) < 0.60 or max(self.weights.values()) > 1.40:
                 for k in KEYS:
                     self.weights[k] = round(0.5 * self.weights[k] + 0.5 * 1.0, 3)
@@ -74,7 +73,6 @@ class Learner:
             self.sector_stats = data.get("sector_stats", {})
             self.tier_stats = data.get("tier_stats", {})
             self.exit_stats = data.get("exit_stats", {})
-            # Склеиваем дублирующиеся ключи 🛡🔒 и 🛡🔒 БУ из прошлых сессий
             if "🛡🔒" in self.exit_stats:
                 old_be = self.exit_stats.pop("🛡🔒")
                 for p in old_be:
@@ -203,8 +201,6 @@ class Learner:
         if soft and not real_win:
             delta *= 0.5
 
-        # Обновляем только участвовавшие ключи + мягкий возврат всех весов к 1.0 (Mean Reversion 2%),
-        # чтобы редкие ключи (hype/news_pos) не раздувались за счет падения трендовых (ema21/ema50)
         for k in KEYS:
             w_cur = self.weights.get(k, 1.0)
             if k in keys:
@@ -278,9 +274,9 @@ class Learner:
 
     def risk_mode(self, profit_factor, max_dd_pct, total_trades=0):
         adj = 0.0
-        enough = total_trades >= 3
+        enough = total_trades >= 4
         if enough and profit_factor is not None:
-            if profit_factor < 0.6:
+            if profit_factor < 0.55:
                 adj += 1.5
             elif profit_factor < 1.0:
                 adj += 0.5
@@ -311,10 +307,10 @@ class Learner:
             if last:
                 wr = sum(last) / len(last)
                 if wr < 0.35:
-                    wr_adj = 0.25
+                    wr_adj = 0.20
 
         raw_adj = dyn_adj + wr_adj
-        self.threshold_adj = round(max(-0.25, min(0.25, raw_adj * 0.2)), 2)
+        self.threshold_adj = round(max(-0.20, min(0.20, raw_adj * 0.15)), 2)
         self.save()
         return self.threshold_adj
 
