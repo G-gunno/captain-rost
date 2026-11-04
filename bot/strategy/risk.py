@@ -12,9 +12,9 @@ TIER_SL_FLOOR = {
 
 TIER_TP_FLOOR = {
     "TOP20": 0.012,  # 1.2%
-    "MID":   0.015,  # 1.5%
-    "SMALL": 0.018,  # 1.8%
-    "MICRO": 0.020,  # 2.0%
+    "MID":   0.014,  # 1.4%
+    "SMALL": 0.016,  # 1.6%
+    "MICRO": 0.018,  # 1.8%
 }
 
 TIER_MAX_SL = {
@@ -25,43 +25,43 @@ TIER_MAX_SL = {
 }
 
 TIER_TRAIL_CONFIG = {
-    "TOP20": {"runner_dist": 0.009, "lock_trigger_pct": 1.6, "lock_dist": 0.006},
-    "MID":   {"runner_dist": 0.011, "lock_trigger_pct": 2.0, "lock_dist": 0.008},
-    "SMALL": {"runner_dist": 0.014, "lock_trigger_pct": 2.3, "lock_dist": 0.009},
-    "MICRO": {"runner_dist": 0.018, "lock_trigger_pct": 2.6, "lock_dist": 0.012},
+    "TOP20": {"runner_dist": 0.009, "lock_trigger_pct": 1.35, "lock_dist": 0.005},
+    "MID":   {"runner_dist": 0.011, "lock_trigger_pct": 1.55, "lock_dist": 0.006},
+    "SMALL": {"runner_dist": 0.014, "lock_trigger_pct": 1.75, "lock_dist": 0.007},
+    "MICRO": {"runner_dist": 0.018, "lock_trigger_pct": 1.90, "lock_dist": 0.008},
 }
 
 TRADE_POLICIES = {
     "STRICT": {
-        "max_portfolio_risk_pct": 1.5,
-        "risk_per_trade_core": 0.50,
-        "risk_per_trade_alt": 0.25,
-        "min_rr_sniper": 1.15,
-        "min_rr_alt": 1.02,
+        "max_portfolio_risk_pct": 1.8,
+        "risk_per_trade_core": 0.60,
+        "risk_per_trade_alt": 0.45,
+        "min_rr_sniper": 1.05,
+        "min_rr_alt": 0.92,
         "require_grade_a_for_alt": True,
     },
     "CAUTIOUS": {
-        "max_portfolio_risk_pct": 2.0,
-        "risk_per_trade_core": 0.75,
-        "risk_per_trade_alt": 0.50,
-        "min_rr_sniper": 1.12,
-        "min_rr_alt": 1.00,
-        "require_grade_a_for_alt": True,
+        "max_portfolio_risk_pct": 2.4,
+        "risk_per_trade_core": 0.80,
+        "risk_per_trade_alt": 0.65,
+        "min_rr_sniper": 1.02,
+        "min_rr_alt": 0.90,
+        "require_grade_a_for_alt": False,
     },
     "NORMAL": {
         "max_portfolio_risk_pct": 3.0,
         "risk_per_trade_core": 1.00,
         "risk_per_trade_alt": 0.75,
-        "min_rr_sniper": 1.08,
-        "min_rr_alt": 1.00,
+        "min_rr_sniper": 1.02,
+        "min_rr_alt": 0.90,
         "require_grade_a_for_alt": False,
     },
     "AGGRESSIVE": {
         "max_portfolio_risk_pct": 5.0,
         "risk_per_trade_core": 1.25,
         "risk_per_trade_alt": 1.00,
-        "min_rr_sniper": 1.05,
-        "min_rr_alt": 0.95,
+        "min_rr_sniper": 0.98,
+        "min_rr_alt": 0.88,
         "require_grade_a_for_alt": False,
     },
 }
@@ -89,39 +89,41 @@ def evaluate_setup_grade(cand: dict) -> str:
 
     if entry_mode in ("sniper", "rocket") and pos_in_48h > 0.65:
         return "B"
-    if corr > 0.50:
+    if corr > 0.68 and entry_mode != "reversal":
         return "B"
     if sector == "Other" and tier == "MICRO":
         return "B"
 
     patterns = cand.get("patterns", [])
     strong_pats = [p for p in patterns if p in ("pinbar", "divergence", "vcp", "breakout")]
-    if not strong_pats:
-        return "B"
-
     sv = cand.get("signal_values", {})
     vol_ratio = sv.get("volume", 1.0)
+    r_val = sv.get("rsi", 50.0)
     sup_touches = cand.get("sup_touches", 0)
     keys = cand.get("reason_keys", [])
 
-    if vol_ratio < 1.25 and sup_touches < 3:
+    has_strong_slab_setup = (sup_touches >= 3 and (vol_ratio >= 1.20 or r_val <= 43.0))
+    if not strong_pats and not has_strong_slab_setup:
         return "B"
 
-    confluence = 2
+    if vol_ratio < 1.15 and sup_touches < 3:
+        return "B"
+
+    confluence = 2 if (strong_pats or sup_touches >= 3) else 1
+    if strong_pats and sup_touches >= 3:
+        confluence += 1
     if sup_touches >= 4:
-        confluence += 2
-    elif sup_touches == 3:
         confluence += 1
 
-    if gate_1h == "1H_TREND_OK" and ("mtf_dip" in keys and pos_in_48h <= 0.60):
+    if gate_1h == "1H_TREND_OK" and ("mtf_dip" in keys or pos_in_48h <= 0.58):
         confluence += 1
-    elif gate_1h == "1H_SUPPORT_ONLY" and pos_in_48h <= 0.45 and sup_touches >= 3:
-        confluence += 1
-
-    if vol_ratio >= 1.45:
+    elif gate_1h == "1H_SUPPORT_ONLY" and pos_in_48h <= 0.48 and sup_touches >= 3:
         confluence += 1
 
-    if tier in ("TOP20", "MID") or corr < 0.25:
+    if vol_ratio >= 1.35:
+        confluence += 1
+
+    if tier in ("TOP20", "MID") or corr < 0.35:
         confluence += 1
 
     return "A+" if confluence >= 4 else "B"
@@ -156,7 +158,7 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
                         ema50: float = None, e21_1h: float = None, e50_1h: float = None):
     tier = tier or "SMALL"
     sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.015)
-    tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.018)
+    tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.016)
     max_sl_allowed = TIER_MAX_SL.get(tier, 2.0)
 
     sl_tuning = shadow.sl_mult()
@@ -200,35 +202,39 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     if sl >= entry or (sl_dist / entry * 100) > max_sl_allowed:
         return None, None, False, "Недопустимая дистанция SL"
 
-    tp_atr_mult = 1.45 if entry_mode == "reversal" else (1.65 if is_mom else 1.50)
-    rr_target = 1.18 if entry_mode == "reversal" else 1.22
+    # Делаем первый тейк (TP1) реалистичным (1.35 ATR / до +2.15%), чтобы гарантированно забирать TP1 (исправление кейса INITUSDT)
+    tp_atr_mult = 1.35 if entry_mode == "reversal" else (1.55 if is_mom else 1.38)
+    rr_target = 1.12 if entry_mode == "reversal" else 1.16
     tp_dist_raw = max(tp_atr_mult * a * tp_tuning, sl_dist * rr_target, entry * tp_floor_pct)
+    if not is_mom:
+        tp_dist_raw = min(tp_dist_raw, entry * 0.022)
     tp = round(entry + tp_dist_raw, 8)
     if min_rr is None:
-        min_rr = 1.05 if entry_mode == "sniper" else 0.98
+        min_rr = 0.98 if entry_mode == "sniper" else 0.90
 
-    # Для reversal ориентируемся на 1H EMA50 как верхнюю границу возврата в даунтренде (не блокируем об близкую 1H EMA21)
     if entry_mode == "reversal" and e21_1h and e50_1h and e21_1h < e50_1h:
         rev_ceiling = max(e21_1h, e50_1h * 0.996)
         if rev_ceiling > entry * 1.012:
             cap_1h = round(rev_ceiling * 0.998, 8)
-            if cap_1h < tp and (cap_1h - entry) / sl_dist >= 0.95:
+            if cap_1h < tp and (cap_1h - entry) / sl_dist >= 0.85:
                 tp = cap_1h
-                min_rr = min(min_rr, 0.95)
+                min_rr = min(min_rr, 0.85)
 
     if res and res > entry and res_touches >= 4:
         res_dist_pct = (res - entry) / entry * 100
-        min_wall_dist = 0.22 if is_mom else 0.35
+        min_wall_dist = 0.20 if is_mom else 0.28
         if res_dist_pct < min_wall_dist:
             return None, None, False, f"Капитальная стена 1H в упор ({res_dist_pct:.2f}% < {min_wall_dist:.2f}%)"
 
-        res_cap_tp = round(res * 0.997, 8)
+        res_cap_tp = round(res * 0.998, 8)
         if res_cap_tp < tp:
-            if (res_cap_tp - entry) / sl_dist >= 0.90:
+            wall_rr = (res_cap_tp - entry) / sl_dist
+            wall_gain_pct = (res_cap_tp - entry) / entry * 100
+            if wall_rr >= 0.72 or wall_gain_pct >= 0.90:
                 tp = res_cap_tp
-                min_rr = min(min_rr, 0.90)
+                min_rr = min(min_rr, wall_rr)
             else:
-                return None, None, False, "Капитальная стена 1H не дает забрать RR"
+                return None, None, False, f"Капитальная стена 1H слишком близко для TP1 ({wall_gain_pct:.2f}%)"
 
     rr = (tp - entry) / sl_dist
     if tp <= entry or round(rr, 2) < min_rr:
@@ -302,7 +308,7 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
     profit_pct = (max_p - avg_p) / avg_p * 100
     tp_price = float(pos.get("tp", 0.0))
     init_tp = float(pos.get("initial_tp") or tp_price)
-    tp_target_pct = ((init_tp - avg_p) / avg_p * 100) if init_tp > avg_p else 3.0
+    tp_target_pct = ((init_tp - avg_p) / avg_p * 100) if init_tp > avg_p else 2.0
 
     if candles_15m and len(candles_15m) >= 50:
         closes = [c["close"] for c in candles_15m]
@@ -320,7 +326,7 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
 
     ema_ratchet_sl = 0.0
     if a15 > 0 and e21 > 0 and e50 > 0:
-        if is_climax and profit_pct >= 1.2:
+        if is_climax and profit_pct >= 1.1:
             ema_ratchet_sl = e21 - 0.35 * a15
         elif is_rocket:
             if last_p > e21:
@@ -356,21 +362,28 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
         else:
             new_state = "BREAKEVEN"
     else:
-        if is_rocket and profit_pct >= max(1.1, tp_target_pct * 0.55):
-            candidate_r = max(breakeven, ema_ratchet_sl if ema_ratchet_sl >= breakeven else 0.0)
-            if candidate_r > new_sl:
-                new_sl = candidate_r
-                new_state = "PROFIT_LOCK" if new_sl > breakeven * 1.003 else "BREAKEVEN"
+        # 1. Безусловный перенос в БУ (🛡🔒) для ВСЕХ режимов при прохождении 55% пути к TP1 (или +1.05%)
+        be_trigger = max(1.05, tp_target_pct * 0.55)
+        if profit_pct >= be_trigger and breakeven > new_sl and last_p > breakeven * 1.002:
+            new_sl = breakeven
+            new_state = "BREAKEVEN"
 
-        ratchet_trigger = max(1.35, tp_target_pct * 0.75)
-        if ema_ratchet_sl >= breakeven and ema_ratchet_sl > new_sl and profit_pct >= ratchet_trigger:
+        # 2. Запирание гарантированного плюса +0.40% (🛡💼 PROFIT_LOCK) при прохождении 72% пути к TP1 (кейс INITUSDT +2.2%)
+        lock_step_trigger = max(1.35, tp_target_pct * 0.72)
+        if profit_pct >= lock_step_trigger:
+            guaranteed_plus = round(max(breakeven * 1.0025, avg_p + (max_p - avg_p) * 0.30), 8)
+            if last_p > guaranteed_plus * 1.002 and guaranteed_plus > new_sl:
+                new_sl = guaranteed_plus
+                new_state = "PROFIT_LOCK"
+
+        if ema_ratchet_sl >= breakeven and ema_ratchet_sl > new_sl and profit_pct >= lock_step_trigger:
             new_sl = ema_ratchet_sl
             new_state = "PROFIT_LOCK" if new_sl >= breakeven * 1.003 else "BREAKEVEN"
 
-        if profit_pct >= cfg["lock_trigger_pct"] or (is_climax and profit_pct >= 1.5):
+        if profit_pct >= cfg["lock_trigger_pct"] or (is_climax and profit_pct >= 1.4):
             lock_sl = round(max_p * (1 - cfg["lock_dist"]), 8)
             candidate = max(breakeven, lock_sl, ema_ratchet_sl if ema_ratchet_sl >= breakeven else 0.0)
-            if candidate >= breakeven and candidate > new_sl:
+            if candidate >= breakeven and candidate > new_sl and last_p > candidate * 1.002:
                 new_sl = candidate
                 new_state = "PROFIT_LOCK" if new_sl > breakeven * 1.003 else "BREAKEVEN"
 
