@@ -32,7 +32,7 @@ STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
 BASE_THRESHOLDS = {
     "bull": {"rocket": 6.0, "sniper": 5.5, "reversal": 5.2},
     "neutral": {"rocket": 6.5, "sniper": 6.0, "reversal": 5.4},
-    "bear": {"rocket": 7.0, "sniper": 6.4, "reversal": 5.6},
+    "bear": {"rocket": 7.0, "sniper": 6.3, "reversal": 5.5},
 }
 
 TIER_CORR_LIMITS = {
@@ -108,18 +108,18 @@ def is_post_pump_dump(candles_15m: list) -> tuple:
         if low_before > 0:
             pump_magnitude = (high_val - low_before) / low_before * 100
             last_close = recent[-1]["close"]
-            if pump_magnitude >= 9.0 and high_val > low_before:
+            if pump_magnitude >= 6.0 and high_val > low_before:
                 dump_depth = (high_val - last_close) / (high_val - low_before)
                 drop_from_high_pct = (high_val - last_close) / high_val * 100
                 closes_all = [c["close"] for c in candles_15m]
                 e21_series = ema(closes_all, 21)
                 e21_now = e21_series[-1]
-                e21_falling = len(e21_series) >= 4 and e21_now < e21_series[-3] * 0.999
+                e21_falling = len(e21_series) >= 4 and e21_now < e21_series[-3] * 0.9992
 
-                if dump_depth >= 0.32 and drop_from_high_pct >= 2.8 and (last_close < e21_now or e21_falling):
+                if dump_depth >= 0.28 and drop_from_high_pct >= 2.0 and (last_close < e21_now or e21_falling):
                     last_8 = recent[-8:]
                     box_8 = (max(c["high"] for c in last_8) - min(c["low"] for c in last_8)) / last_close if last_close > 0 else 1.0
-                    if high_idx <= 8 and box_8 <= 0.032 and last_close >= e21_now and not e21_falling:
+                    if high_idx <= 8 and box_8 <= 0.028 and last_close >= e21_now and not e21_falling:
                         return False, ""
                     return True, f"пост-памп дамп 15m (+{pump_magnitude:.1f}%, откат {dump_depth*100:.0f}%)"
 
@@ -144,7 +144,11 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     low_48h = min(c["low"] for c in window_48h)
     pos_in_48h = ((last_1h - low_48h) / (high_48h - low_48h)) if high_48h > low_48h else 0.5
 
+    open_12h = candles_1h[-12]["open"] if len(candles_1h) >= 12 else open_48h
+    chg_12h = ((last_1h - open_12h) / open_12h * 100) if open_12h > 0 else 0.0
+
     e21_3h_ago = e21_series[-4] if len(e21_series) >= 4 else e21_series[0]
+    e50_6h_ago = e50_series[-7] if len(e50_series) >= 7 else e50_series[0]
     e50_12h_ago = e50_series[-13] if len(e50_series) >= 13 else e50_series[0]
     e50_24h_ago = e50_series[-25] if len(e50_series) >= 25 else e50_series[0]
 
@@ -155,40 +159,62 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     if drop_from_48h_high_pct >= 18.0 and last_1h < e21_1h and e21_1h < e50_1h:
         return "1H_BAN", e21_1h, e50_1h, f"1H крах с хая (-{drop_from_48h_high_pct:.1f}% под EMA21/50)", round(chg_48h, 1), round(pos_in_48h, 2)
 
+    # Защита от входа после свечи кульминации на 1H (кейсы AVAX $9.17, ZAMA $0.073, ZRO $1.95, XRP $1.34)
     recent_12_1h = candles_1h[-12:] if len(candles_1h) >= 12 else candles_1h
     high_idx_12 = max(range(len(recent_12_1h)), key=lambda i: recent_12_1h[i]["high"])
     max_h_12 = recent_12_1h[high_idx_12]["high"]
-    if high_idx_12 >= 3:
+    if high_idx_12 >= 2:
         min_before_peak = min(c["low"] for c in recent_12_1h[:high_idx_12 + 1])
         pump_1h_pct = ((max_h_12 - min_before_peak) / min_before_peak * 100) if min_before_peak > 0 else 0.0
-        if pump_1h_pct >= 10.0:
+        peak_c = recent_12_1h[high_idx_12]
+        peak_uwick = peak_c["high"] - max(peak_c["open"], peak_c["close"])
+        peak_rng = peak_c["high"] - peak_c["low"]
+        has_climax_wick = (peak_rng > 0 and (peak_uwick / peak_rng) >= 0.42 and pump_1h_pct >= 5.5)
+
+        if pump_1h_pct >= 6.5 or has_climax_wick:
             pullback_from_peak = (max_h_12 - last_1h) / (max_h_12 - min_before_peak) if max_h_12 > min_before_peak else 0.0
             curr_1h = candles_1h[-1]
             prev_1h = candles_1h[-2]
             heavy_red_dump = (
-                (curr_1h["open"] - curr_1h["close"]) > 0.45 * a_1h or
-                (prev_1h["open"] - prev_1h["close"] > 0.55 * a_1h and last_1h < prev_1h["close"])
+                (curr_1h["open"] - curr_1h["close"]) > 0.40 * a_1h or
+                (prev_1h["open"] - prev_1h["close"] > 0.45 * a_1h and last_1h <= prev_1h["close"]) or
+                has_climax_wick
             )
-            if pullback_from_peak >= 0.28 and (last_1h < e21_1h * 0.996 or heavy_red_dump):
-                return "1H_BAN", e21_1h, e50_1h, f"1H остывание после пампа (+{pump_1h_pct:.1f}%, слив {pullback_from_peak*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
+            if pullback_from_peak >= 0.24 and (last_1h < e21_1h * 0.998 or heavy_red_dump):
+                return "1H_BAN", e21_1h, e50_1h, f"1H остывание после кульминации (+{pump_1h_pct:.1f}%, откат {pullback_from_peak*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    e21_falling_1h = (e21_1h < e21_3h_ago * 0.996) and (last_1h < e21_1h * 0.992)
+    e21_falling_1h = (e21_1h < e21_3h_ago * 0.997) and (last_1h < e21_1h * 0.994)
     e50_falling_48h = (e50_1h < e50_12h_ago * 0.995) and (e50_1h < e50_24h_ago * 0.990)
 
-    # Разрешаем рабочую зону над EMA50 (включая здоровый откат между EMA21 и EMA50) до 74% высоты 48ч-диапазона
+    # 1. Классический 48ч аптренд (в рабочей зоне 25%..66% высоты канала и с положительным трендом)
     is_uptrend_1h = (
-        last_1h >= e50_1h * 0.996 and
+        last_1h >= e50_1h * 0.997 and
         e21_1h >= e50_1h * 0.996 and
         not e21_falling_1h and
         not e50_falling_48h and
-        0.25 <= pos_in_48h <= 0.74 and
-        -0.5 <= chg_48h <= 17.5 and
-        r_1h <= 72
+        0.25 <= pos_in_48h <= 0.66 and
+        0.5 <= chg_48h <= 17.5 and
+        r_1h <= 71
     )
-    if is_uptrend_1h:
-        return "1H_TREND_OK", e21_1h, e50_1h, f"1H аптренд 48ч ({chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    if pos_in_48h > 0.74 or chg_48h > 17.5:
+    # 2. Ранний разворот тренда 1H (1H Trend Ignition — чтобы ловить ралли AVAX, ZRO, QNT, DOT, ONDO со дна,
+    # когда цена уже пробила 1H EMA21 и EMA50 вверх, а 12ч импульс положительный, не дожидаясь разворота 48ч-истории!)
+    is_fresh_1h_reversal = (
+        last_1h >= e21_1h * 0.998 and
+        last_1h >= e50_1h * 0.997 and
+        e21_1h > e21_3h_ago * 1.0005 and
+        e50_1h >= e50_6h_ago * 0.999 and
+        0.18 <= pos_in_48h <= 0.62 and
+        1.2 <= chg_12h <= 12.0 and
+        r_1h <= 68
+    )
+
+    if is_uptrend_1h or is_fresh_1h_reversal:
+        tag_1h = "1H разворот тренда" if (is_fresh_1h_reversal and not is_uptrend_1h) else "1H аптренд 48ч"
+        ref_chg = chg_12h if (is_fresh_1h_reversal and not is_uptrend_1h) else chg_48h
+        return "1H_TREND_OK", e21_1h, e50_1h, f"{tag_1h} ({ref_chg:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
+
+    if pos_in_48h > 0.66 or chg_48h > 17.5:
         return "1H_BAN", e21_1h, e50_1h, f"1H крыша/перегрев 48ч ({chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
     has_strong_slab = bool(nearest_sup and sup_touches >= 3 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 2.4 * a15)
@@ -208,7 +234,7 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
             return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"{tag_str} (48ч {chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
         return "1H_BAN", e21_1h, e50_1h, f"1H 48ч даунтренд без плиты ({chg_48h:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    if (has_strong_slab or has_moderate_sup or bottom_reclaim) and pos_in_48h <= 0.62:
+    if (has_strong_slab or has_moderate_sup or bottom_reclaim) and pos_in_48h <= 0.60:
         return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"1H опора на плиту ({sup_touches}x, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
     return "1H_BAN", e21_1h, e50_1h, f"1H нет тренда и нет плиты за 48ч ({chg_48h:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
@@ -217,7 +243,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
 def raw_max_score(regime):
     m = sum(learner.weight(k) for k in ("ema50", "ema21", "impulse", "rsi", "volume", "chg24h"))
     m += max(learner.weight("indep"), learner.weight("news_pos"), learner.weight("hype"))
-    # Золотая середина 4.8 (мин. 12.2): 5 сильных факторов набирают ~6.5-7.0 баллов, но 10.0 без паттерна не раздается
     m += 4.8
     return max(12.2, m)
 
@@ -502,7 +527,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
 
     if nearest_res and res_touches >= 4 and a15 > 0 and not is_open_pos:
         dist_to_res = nearest_res - last
-        if dist_to_res < 0.4 * a15 or (dist_to_res / last * 100) < 0.30:
+        if dist_to_res < 0.4 * a15 or (dist_to_res / last * 100) < 0.28:
             score -= 3.5
             reasons.append(f"в упор к капитальной стене ${fmt_price(nearest_res)} ({res_touches}x)")
 
@@ -803,6 +828,10 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 if entry_mode in ("sniper", "rocket"):
                     if e21_15 < e50_15 * 0.9985 or e50_15 < e50_series_15[-4] * 0.999:
                         return None
+                    # Защита от покупки отвесного обвала с локального пика (кейсы FLOCK, AVAX #7, ZAMA #4)
+                    local_5_high = max(c["high"] for c in candles_15m[-5:])
+                    if (local_5_high - last_price) > 1.7 * a and last_price < e21_15:
+                        return None
                     if last_price < e21_15 * 0.999 or e21_15 < e21_series_15[-3] * 0.999:
                         if closed_15["close"] < closed_15["open"] and curr_15["close"] <= curr_15["open"]:
                             return None
@@ -814,13 +843,11 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                     if closed_15["close"] < closed_15["open"] and curr_15["close"] < closed_15["low"]:
                         return None
 
-            # Сбалансированный фильтр для BEAR: блокируем rocket без пробоя и хаи > 72%,
-            # но разрешаем sniper на откатах в рабочую зону между 1H EMA21 и EMA50
             if regime == "bear":
                 if entry_mode == "rocket" and "breakout" not in signal_values.get("patterns", []):
                     return None
                 if entry_mode in ("sniper", "rocket"):
-                    if last_price < signal_values.get("e50_1h", 0) * 0.997 or signal_values.get("pos_in_48h", 1.0) > 0.72:
+                    if last_price < signal_values.get("e50_1h", 0) * 0.997 or signal_values.get("pos_in_48h", 1.0) > 0.66:
                         return None
 
             if signal_values.get("recent_rejection") and entry_mode in ("sniper", "rocket"):
@@ -829,7 +856,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             corr = _corr_candles(candles_15m, btc_candles)
             tier_corr_limit = TIER_CORR_LIMITS.get(tier, 0.82)
 
-            if regime == "bear" and entry_mode in ("sniper", "rocket") and corr >= 0.60:
+            if regime == "bear" and entry_mode in ("sniper", "rocket") and corr >= 0.72:
                 return None
 
             is_independent_mover = abs(corr) < 0.25 and gate_1h == "1H_TREND_OK"
