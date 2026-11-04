@@ -18,7 +18,7 @@ from bot.core.state import bot_state
 
 
 class OrderManagerWorker:
-    """Управляет портфелем: контроль Portfolio VaR, 1H Gatekeeper, свободный USDT и Умная Ротация Ордеров."""
+    """Управляет портфелем: контроль Portfolio VaR, 1H Gatekeeper, лимит позиций и Умная Ротация Ордеров."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -60,7 +60,7 @@ class OrderManagerWorker:
                 continue
 
             last_p = tickers.get(o["symbol"], {}).get("last", 0.0)
-            if last_p > 0 and abs(last_p - o["price"]) / o["price"] * 100 <= 0.40:
+            if last_p > 0 and abs(last_p - o["price"]) / o["price"] * 100 <= 0.35:
                 continue
 
             score_diff = cand_score - o_score
@@ -111,12 +111,20 @@ class OrderManagerWorker:
         policy = get_trade_policy(risk_mode)
         min_usdt_order = min_order_threshold(equity)
 
+        max_total_positions = 3 if (regime == "bear" or risk_mode == "STRICT") else 4
+        if len(paper.positions) >= max_total_positions:
+            logger.debug(f"OrderManager: достигнут лимит открытых позиций ({len(paper.positions)}/{max_total_positions})")
+            return
+
         logger.info(
             f"💼 OrderManager [{risk_mode}]: кандидатов {len(candidates)}, "
             f"открытый риск {calc_total_open_risk_pct(paper.positions, paper.orders, equity):.2f}% / {policy['max_portfolio_risk_pct']}%"
         )
 
         for cand in candidates:
+            if len(paper.positions) >= max_total_positions:
+                break
+
             sym = cand["symbol"]
             base = sym[:-4]
 
@@ -167,18 +175,17 @@ class OrderManagerWorker:
             t_data = tickers.get(sym, {})
             bid1 = t_data.get("bid1", cand["last"])
             ideal_entry = cand["last"] * (1 + off)
-            entry = min(ideal_entry, bid1 * 0.9985)
+            entry = min(ideal_entry, bid1 * 0.9990)
 
             wick_entry = cand.get("wick_entry_price")
             if entry_mode == "reversal" and wick_entry and 0 < wick_entry < entry:
-                entry = max(wick_entry, cand["last"] * 0.985)
+                entry = max(wick_entry, cand["last"] * 0.988)
 
             sup = cand.get("nearest_sup")
             sup_touches = cand.get("sup_touches", 0)
             if sup and sup_touches >= 2 and not is_mom:
                 retest_floor = sup * 1.0012
-                # Подтягиваем лимитку к плите ТОЛЬКО если плита сама лежит минимум на -0.35% глубже текущей цены!
-                if entry < sup and retest_floor <= cand["last"] * 0.9965:
+                if entry < sup and retest_floor <= cand["last"] * 0.9975:
                     entry = retest_floor
 
             off = (entry - cand["last"]) / cand["last"] if cand["last"] > 0 else off
