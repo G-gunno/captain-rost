@@ -10,33 +10,32 @@ TIERS = [
     (10000, 260, 900),
 ]
 
-# Минимальный отступ лимитки отодвинут от рынка, чтобы не покупать хаи свечей
 TIER_OFFSET_BOUNDS = {
-    "TOP20": (-0.0045, -0.0018),
-    "MID":   (-0.0068, -0.0025),
-    "SMALL": (-0.0095, -0.0035),
-    "MICRO": (-0.0145, -0.0055),
+    "TOP20": (-0.0035, -0.0012),
+    "MID":   (-0.0052, -0.0018),
+    "SMALL": (-0.0075, -0.0024),
+    "MICRO": (-0.0115, -0.0038),
 }
 
 TIER_ACCUM_BOUNDS = {
-    "TOP20": (-0.0030, -0.0015),
-    "MID":   (-0.0048, -0.0020),
-    "SMALL": (-0.0068, -0.0028),
-    "MICRO": (-0.0100, -0.0042),
+    "TOP20": (-0.0024, -0.0010),
+    "MID":   (-0.0036, -0.0014),
+    "SMALL": (-0.0050, -0.0020),
+    "MICRO": (-0.0075, -0.0030),
 }
 
 TIER_ROCKET_BOUNDS = {
-    "TOP20": (-0.0035, -0.0018),
-    "MID":   (-0.0055, -0.0025),
-    "SMALL": (-0.0075, -0.0035),
-    "MICRO": (-0.0100, -0.0050),
+    "TOP20": (-0.0022, -0.0008),
+    "MID":   (-0.0035, -0.0012),
+    "SMALL": (-0.0048, -0.0018),
+    "MICRO": (-0.0070, -0.0028),
 }
 
 TIER_REVERSAL_BOUNDS = {
-    "TOP20": (-0.0065, -0.0025),
-    "MID":   (-0.0090, -0.0035),
-    "SMALL": (-0.0120, -0.0045),
-    "MICRO": (-0.0160, -0.0060),
+    "TOP20": (-0.0045, -0.0015),
+    "MID":   (-0.0065, -0.0020),
+    "SMALL": (-0.0088, -0.0028),
+    "MICRO": (-0.0120, -0.0040),
 }
 
 
@@ -104,34 +103,34 @@ def entry_offset(score, thr, regime, atr_pct, entry_mode="sniper", tier="SMALL",
 
     if entry_mode == "rocket":
         bounds = TIER_ROCKET_BOUNDS.get(tier, TIER_ROCKET_BOUNDS["SMALL"])
-        raw = -atr_pct / 100 * 0.28 * (1.0 - strength_alpha * 0.35)
+        raw = -atr_pct / 100 * 0.20 * (1.0 - strength_alpha * 0.45)
         return max(bounds[0], min(bounds[1], raw))
 
     if entry_mode == "reversal":
         bounds = TIER_REVERSAL_BOUNDS.get(tier, TIER_REVERSAL_BOUNDS["SMALL"])
-        raw = -atr_pct / 100 * 0.40 * (1.0 - strength_alpha * 0.25)
+        raw = -atr_pct / 100 * 0.28 * (1.0 - strength_alpha * 0.35)
         return max(bounds[0], min(bounds[1], raw))
 
     if is_accumulation:
         bounds = TIER_ACCUM_BOUNDS.get(tier, TIER_ACCUM_BOUNDS["SMALL"])
-        base_accum_target = -atr_pct / 100 * 0.32
-        target = base_accum_target * (1.0 - strength_alpha * 0.35)
+        base_accum_target = -atr_pct / 100 * 0.20
+        target = base_accum_target * (1.0 - strength_alpha * 0.45)
         if regime == "bear":
-            target *= 1.25
+            target *= 1.10
         return max(bounds[0], min(bounds[1], target))
 
     bounds = TIER_OFFSET_BOUNDS.get(tier, TIER_OFFSET_BOUNDS["SMALL"])
-    base_pullback = -atr_pct / 100 * 0.50
+    base_pullback = -atr_pct / 100 * 0.32
 
     if regime == "bear":
-        target = min(hunt * 1.35, base_pullback * 1.30)
+        target = min(hunt * 1.05, base_pullback * 1.05)
     elif regime == "bull":
-        target = min(shadow.near(), base_pullback * 0.80)
+        target = min(shadow.near(), base_pullback * 0.70)
     else:
-        pullback_mult = 0.75 if strength_alpha >= 0.7 else (0.90 if strength_alpha >= 0.3 else 1.15)
+        pullback_mult = 0.65 if strength_alpha >= 0.7 else (0.80 if strength_alpha >= 0.3 else 1.0)
         target = min(hunt * pullback_mult, base_pullback * pullback_mult)
 
     clamped_target = max(bounds[0], min(bounds[1], target))
-    dynamic_offset = clamped_target + (bounds[1] - clamped_target) * (strength_alpha * 0.45)
+    dynamic_offset = clamped_target + (bounds[1] - clamped_target) * (strength_alpha * 0.60)
 
     return max(bounds[0], min(bounds[1], dynamic_offset))
