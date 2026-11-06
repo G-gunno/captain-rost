@@ -31,37 +31,39 @@ TIER_TRAIL_CONFIG = {
     "MICRO": {"runner_dist": 0.018, "lock_trigger_pct": 1.90, "lock_dist": 0.008},
 }
 
+# Расширенный бюджет риска портфеля (8% - 16%), чтобы 100% капитала могло работать одновременно,
+# и снят запрет require_grade_a_for_alt во всех режимах
 TRADE_POLICIES = {
     "STRICT": {
-        "max_portfolio_risk_pct": 1.8,
-        "risk_per_trade_core": 0.60,
-        "risk_per_trade_alt": 0.45,
-        "min_rr_sniper": 1.05,
-        "min_rr_alt": 0.92,
-        "require_grade_a_for_alt": True,
-    },
-    "CAUTIOUS": {
-        "max_portfolio_risk_pct": 2.4,
-        "risk_per_trade_core": 0.80,
-        "risk_per_trade_alt": 0.65,
+        "max_portfolio_risk_pct": 8.0,
+        "risk_per_trade_core": 1.25,
+        "risk_per_trade_alt": 1.00,
         "min_rr_sniper": 1.02,
         "min_rr_alt": 0.90,
+        "require_grade_a_for_alt": False,
+    },
+    "CAUTIOUS": {
+        "max_portfolio_risk_pct": 10.0,
+        "risk_per_trade_core": 1.50,
+        "risk_per_trade_alt": 1.20,
+        "min_rr_sniper": 1.00,
+        "min_rr_alt": 0.88,
         "require_grade_a_for_alt": False,
     },
     "NORMAL": {
-        "max_portfolio_risk_pct": 3.0,
-        "risk_per_trade_core": 1.00,
-        "risk_per_trade_alt": 0.75,
-        "min_rr_sniper": 1.02,
-        "min_rr_alt": 0.90,
+        "max_portfolio_risk_pct": 12.0,
+        "risk_per_trade_core": 1.75,
+        "risk_per_trade_alt": 1.45,
+        "min_rr_sniper": 0.98,
+        "min_rr_alt": 0.88,
         "require_grade_a_for_alt": False,
     },
     "AGGRESSIVE": {
-        "max_portfolio_risk_pct": 5.0,
-        "risk_per_trade_core": 1.25,
-        "risk_per_trade_alt": 1.00,
-        "min_rr_sniper": 0.98,
-        "min_rr_alt": 0.88,
+        "max_portfolio_risk_pct": 16.0,
+        "risk_per_trade_core": 2.20,
+        "risk_per_trade_alt": 1.80,
+        "min_rr_sniper": 0.95,
+        "min_rr_alt": 0.85,
         "require_grade_a_for_alt": False,
     },
 }
@@ -89,7 +91,7 @@ def evaluate_setup_grade(cand: dict) -> str:
 
     if entry_mode in ("sniper", "rocket") and pos_in_48h > 0.65:
         return "B"
-    if corr > 0.68 and entry_mode != "reversal":
+    if corr > 0.72 and entry_mode != "reversal":
         return "B"
     if sector == "Other" and tier == "MICRO":
         return "B"
@@ -102,11 +104,8 @@ def evaluate_setup_grade(cand: dict) -> str:
     sup_touches = cand.get("sup_touches", 0)
     keys = cand.get("reason_keys", [])
 
-    has_strong_slab_setup = (sup_touches >= 3 and (vol_ratio >= 1.20 or r_val <= 43.0))
+    has_strong_slab_setup = (sup_touches >= 3 and (vol_ratio >= 1.15 or r_val <= 44.0))
     if not strong_pats and not has_strong_slab_setup:
-        return "B"
-
-    if vol_ratio < 1.15 and sup_touches < 3:
         return "B"
 
     confluence = 2 if (strong_pats or sup_touches >= 3) else 1
@@ -120,7 +119,7 @@ def evaluate_setup_grade(cand: dict) -> str:
     elif gate_1h == "1H_SUPPORT_ONLY" and pos_in_48h <= 0.48 and sup_touches >= 3:
         confluence += 1
 
-    if vol_ratio >= 1.35:
+    if vol_ratio >= 1.30:
         confluence += 1
 
     if tier in ("TOP20", "MID") or corr < 0.35:
@@ -202,7 +201,6 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     if sl >= entry or (sl_dist / entry * 100) > max_sl_allowed:
         return None, None, False, "Недопустимая дистанция SL"
 
-    # Делаем первый тейк (TP1) реалистичным (1.35 ATR / до +2.15%), чтобы гарантированно забирать TP1 (исправление кейса INITUSDT)
     tp_atr_mult = 1.35 if entry_mode == "reversal" else (1.55 if is_mom else 1.38)
     rr_target = 1.12 if entry_mode == "reversal" else 1.16
     tp_dist_raw = max(tp_atr_mult * a * tp_tuning, sl_dist * rr_target, entry * tp_floor_pct)
@@ -210,7 +208,7 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
         tp_dist_raw = min(tp_dist_raw, entry * 0.022)
     tp = round(entry + tp_dist_raw, 8)
     if min_rr is None:
-        min_rr = 0.98 if entry_mode == "sniper" else 0.90
+        min_rr = 0.98 if entry_mode == "sniper" else 0.88
 
     if entry_mode == "reversal" and e21_1h and e50_1h and e21_1h < e50_1h:
         rev_ceiling = max(e21_1h, e50_1h * 0.996)
@@ -362,13 +360,11 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
         else:
             new_state = "BREAKEVEN"
     else:
-        # 1. Безусловный перенос в БУ (🛡🔒) для ВСЕХ режимов при прохождении 55% пути к TP1 (или +1.05%)
         be_trigger = max(1.05, tp_target_pct * 0.55)
         if profit_pct >= be_trigger and breakeven > new_sl and last_p > breakeven * 1.002:
             new_sl = breakeven
             new_state = "BREAKEVEN"
 
-        # 2. Запирание гарантированного плюса +0.40% (🛡💼 PROFIT_LOCK) при прохождении 72% пути к TP1 (кейс INITUSDT +2.2%)
         lock_step_trigger = max(1.35, tp_target_pct * 0.72)
         if profit_pct >= lock_step_trigger:
             guaranteed_plus = round(max(breakeven * 1.0025, avg_p + (max_p - avg_p) * 0.30), 8)
