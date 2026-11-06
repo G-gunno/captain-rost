@@ -2,6 +2,7 @@ import json
 import time
 from pathlib import Path
 from loguru import logger
+from bot.utils.format import fmt_price
 
 PAUSED_FILE = Path("storage/paused_orders.json")
 
@@ -14,6 +15,7 @@ class BotState:
         self.cooldown_meta = {}
         self.consecutive_sl = {}
         self.last_sl_price = {}
+        self.last_sl_ts = {}
         self.last_win_price = {}
         self.last_win_ts = {}
         self.current_regime = "neutral"
@@ -40,6 +42,7 @@ class BotState:
         if not is_sl or pnl_pct >= -0.25:
             self.consecutive_sl[sym] = 0
             self.last_sl_price.pop(sym, None)
+            self.last_sl_ts.pop(sym, None)
             if pnl_pct > 0.25:
                 self.last_win_price[sym] = float(exit_price)
                 self.last_win_ts[sym] = now_ts
@@ -52,6 +55,7 @@ class BotState:
         streak = self.consecutive_sl.get(sym, 0) + 1
         self.consecutive_sl[sym] = streak
         self.last_sl_price[sym] = float(exit_price)
+        self.last_sl_ts[sym] = now_ts
 
         if streak == 1:
             self.set_cooldown(sym, 5400, structural_reset=True, reason="sl_1")
@@ -60,14 +64,23 @@ class BotState:
             self.set_cooldown(sym, 21600, structural_reset=False, reason=f"sl_{streak}")
             logger.info(f"Cooldown {sym}: {streak}-й стоп подряд -> БАН 6ч")
 
+    def _cleanup_expired_sl(self, sym: str):
+        sl_ts = self.last_sl_ts.get(sym, 0)
+        if sl_ts and (time.time() - sl_ts) > 7200 and sym not in self.fomo_cooldowns:
+            self.last_sl_price.pop(sym, None)
+            self.last_sl_ts.pop(sym, None)
+
     def check_structural_reset(self, sym: str, last_price: float, ema21_15m: float, ema50_15m: float = 0.0) -> bool:
         if sym not in self.fomo_cooldowns:
+            self._cleanup_expired_sl(sym)
             return True
 
         now = time.time()
         if now > self.fomo_cooldowns[sym]:
             self.fomo_cooldowns.pop(sym, None)
             self.cooldown_meta.pop(sym, None)
+            self.last_sl_price.pop(sym, None)
+            self.last_sl_ts.pop(sym, None)
             return True
 
         meta = self.cooldown_meta.get(sym, {})
@@ -75,52 +88,54 @@ class BotState:
             return False
 
         elapsed = now - meta.get("set_at", 0)
-        if elapsed < 3600:
+        if elapsed < 2700:
             return False
 
         last_sl = self.last_sl_price.get(sym, 0.0)
-        if last_sl > 0 and last_price < last_sl * 1.003:
+        if last_sl > 0 and last_price < last_sl * 1.002:
             return False
 
-        if ema21_15m > 0 and ema50_15m > 0 and last_price > max(ema21_15m, ema50_15m) * 1.002 and ema21_15m >= ema50_15m:
-            logger.info(f"🔓 Структурный сброс карантина {sym}: цена ${last_price:.4f} закрепилась над EMA21/50")
+        if ema21_15m > 0 and ema50_15m > 0 and last_price > max(ema21_15m, ema50_15m) * 1.001 and ema21_15m >= ema50_15m:
+            logger.info(f"🔓 Структурный сброс карантина {sym}: цена ${fmt_price(last_price)} закрепилась над EMA21/50")
             self.fomo_cooldowns.pop(sym, None)
             self.cooldown_meta.pop(sym, None)
+            self.last_sl_price.pop(sym, None)
+            self.last_sl_ts.pop(sym, None)
             return True
 
         return False
 
     def can_enter_sniper(self, sym: str, current_price: float, patterns: list = None) -> tuple:
-        """
-        Исправленная логика после профита (кейс TRUMPUSDT):
-        - Разрешает перезаход на здоровом откате со скидкой (>= 0.8% ниже точки прошлого выхода).
-        - Блокирует покупку дороже прошлого выхода (на хаях) в течение 2 часов, если нет свежего VCP/Breakout.
-        """
+        self._cleanup_expired_sl(sym)
         last_sl = self.last_sl_price.get(sym)
-        if last_sl and current_price < last_sl * 1.002:
-            return False, f"цена ниже предыдущего стоп-лосса (${last_sl:.4f})"
+        if last_sl and current_price < last_sl * 1.001:
+            return False, f"цена ниже предыдущего стоп-лосса (${fmt_price(last_sl)})"
 
         win_p = self.last_win_price.get(sym)
         win_ts = self.last_win_ts.get(sym, 0)
-        if win_p and (time.time() - win_ts) < 7200:
+        if win_p and (time.time() - win_ts) < 5400:
             pats = patterns or []
-            if current_price >= win_p * 0.992 and not any(p in pats for p in ("vcp", "breakout")):
-                return False, f"защита от покупки хая выше точки выхода (${win_p:.4f}) без VCP/Breakout"
+            if current_price >= win_p * 0.994 and not any(p in pats for p in ("vcp", "breakout")):
+                return False, f"защита от покупки хая выше точки выхода (${fmt_price(win_p)}) без VCP/Breakout"
         return True, "OK"
 
     def can_enter_reversal(self, sym: str, current_price: float, ema21_15m: float) -> tuple:
+        self._cleanup_expired_sl(sym)
         last_sl = self.last_sl_price.get(sym)
-        if last_sl and current_price < last_sl * 1.002:
-            if ema21_15m <= 0 or current_price < ema21_15m:
-                return False, f"цена ниже прошлого стопа (${last_sl:.4f}) и под EMA21"
+        if last_sl and current_price < last_sl * 1.001:
+            if ema21_15m <= 0 or current_price < ema21_15m * 0.998:
+                return False, f"цена ниже прошлого стопа (${fmt_price(last_sl)}) и под EMA21"
         return True, "OK"
 
     def is_on_cooldown(self, sym: str) -> bool:
         if sym not in self.fomo_cooldowns:
+            self._cleanup_expired_sl(sym)
             return False
         if time.time() > self.fomo_cooldowns[sym]:
             del self.fomo_cooldowns[sym]
             self.cooldown_meta.pop(sym, None)
+            self.last_sl_price.pop(sym, None)
+            self.last_sl_ts.pop(sym, None)
             return False
         return True
 
@@ -150,6 +165,7 @@ class BotState:
         self.cooldown_meta.clear()
         self.consecutive_sl.clear()
         self.last_sl_price.clear()
+        self.last_sl_ts.clear()
         self.last_win_price.clear()
         self.last_win_ts.clear()
         try:
