@@ -269,18 +269,18 @@ class Shadow:
                     mode_traded += a["traded"]
                     mode_sum24 += a.get("sum24", 0.0)
 
-            # Честный автотюн: накидываем жесткость только при глубоком минусе и слабом пампе
-            if mode_n >= 8:
+            # Не закручиваем гайки во флэте: повышаем порог только при реальном сливе (avg_24 < -1.0% и pump_rate < 0.12)
+            if mode_n >= 12:
                 pump_rate = mode_pumps / mode_n
                 avg_24 = mode_sum24 / mode_n
                 missed = max(0, mode_pumps - mode_traded)
 
-                if avg_24 < -0.6 and pump_rate < 0.15:
-                    nudge += 0.20
-                elif missed >= 2 and pump_rate >= 0.30 and avg_24 > 0.3:
+                if avg_24 < -1.0 and pump_rate < 0.12:
+                    nudge += 0.15
+                elif missed >= 2 and pump_rate >= 0.25 and avg_24 > 0.2:
                     nudge -= 0.20
 
-            self.tuning[f"nudge_{mode}"] = round(max(-0.5, min(0.5, nudge)), 2)
+            self.tuning[f"nudge_{mode}"] = round(max(-0.5, min(0.3, nudge)), 2)
 
         total_pumps = 0
         total_missed_pumps = 0
@@ -298,12 +298,12 @@ class Shadow:
             avg_pull = sum_pull_pump / total_pumps
             avg_mae = sum_mae_pump / total_pumps
 
-            if total_missed_pumps > 10:
-                self.tuning["hunt"] = round(max(-0.01, min(-0.001, avg_pull / 100 * 0.3)), 4)
+            if total_missed_pumps > 6:
+                self.tuning["hunt"] = round(max(-0.006, min(-0.001, avg_pull / 100 * 0.25)), 4)
             else:
-                self.tuning["hunt"] = round(max(-0.01, min(-0.002, avg_pull / 100 * 0.6)), 4)
+                self.tuning["hunt"] = round(max(-0.007, min(-0.002, avg_pull / 100 * 0.45)), 4)
 
-            self.tuning["sl_mult"] = round(max(0.8, min(1.5, 1.0 + abs(avg_mae) / 100 * 0.3)), 2)
+            self.tuning["sl_mult"] = round(max(0.85, min(1.3, 1.0 + abs(avg_mae) / 100 * 0.25)), 2)
 
         self._apply_weight_lift()
         self._calibrate_signal_windows()
