@@ -1,13 +1,14 @@
 from bot.strategy.learner import learner
 
+# Полная загрузка капитала: увеличены базовые и максимальные чеки на сделку
 TIERS = [
-    (150, 18, 30),
-    (250, 25, 45),
-    (500, 32, 80),
-    (1000, 40, 105),
-    (2500, 75, 220),
-    (5000, 140, 450),
-    (10000, 260, 900),
+    (150, 22, 40),
+    (250, 35, 65),
+    (500, 48, 100),
+    (1000, 65, 150),
+    (2500, 120, 350),
+    (5000, 220, 700),
+    (10000, 400, 1400),
 ]
 
 TIER_OFFSET_BOUNDS = {
@@ -43,28 +44,27 @@ def tier_limits(equity):
     for bound, mn, mx in TIERS:
         if equity <= bound:
             return mn, mx
-    return max(260.0, equity * 0.035), equity * 0.09
+    return max(400.0, equity * 0.05), equity * 0.15
 
 
 def min_order_threshold(equity: float) -> float:
     base_min, _ = tier_limits(equity)
-    return max(18.0, round(base_min * 0.85, 2))
+    return max(18.0, round(base_min * 0.75, 2))
 
 
 def portfolio_limits(equity):
+    """Свободные лимиты по секторам, чтобы капитал не простаивал в кэше."""
     if equity <= 150:
-        return 2, 1
+        return 4, 4
     if equity <= 250:
-        return 3, 1
+        return 5, 5
     if equity <= 500:
-        return 4, 2
+        return 7, 6
     if equity <= 1000:
-        return 5, 2
+        return 10, 8
     if equity <= 2500:
-        return 6, 3
-    if equity <= 5000:
-        return 8, 3
-    return 10, 4
+        return 12, 10
+    return 15, 12
 
 
 def buy_size(equity, score, thr, liquidity, free_usdt, entry_mode="sniper", grade="B"):
@@ -76,20 +76,21 @@ def buy_size(equity, score, thr, liquidity, free_usdt, entry_mode="sniper", grad
     max_allowed = base_max
 
     if liquidity < 500_000:
-        size = base_min
+        size = base_min * 0.85
 
     kelly = learner.kelly_multiplier(entry_mode)
     if kelly is not None:
-        size *= (0.65 + 0.35 * kelly)
+        size *= (0.75 + 0.35 * kelly)
 
+    # Полновесный сайзинг: [💎] A+ получает 1.10x..1.20x, а рабочий [B] — 0.90x (без урезания на треть)
     if grade == "A+":
-        size *= max(0.95, learner.grade_a_trust_mult())
+        size *= max(1.10, learner.grade_a_trust_mult())
     else:
-        size *= 0.70
+        size *= 0.90
 
     min_allowed = min_order_threshold(equity)
     size = max(min_allowed, min(size, max_allowed))
-    size = min(size, free_usdt * 0.95, equity * 0.10)
+    size = min(size, free_usdt * 0.98, equity * 0.16)
 
     return round(size, 2)
 
