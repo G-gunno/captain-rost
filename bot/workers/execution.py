@@ -20,7 +20,7 @@ class ExecutionRiskWorker:
         self.bus = bus
         self.price_queue = self.bus.subscribe("PRICE_UPDATED", maxsize=5)
         self.emergency_queue = self.bus.subscribe("EMERGENCY_DUMP", maxsize=1)
-        self._last_btc_price = 0.0
+        self._btc_history = []
 
     async def run(self) -> None:
         logger.info("⚡ Execution Worker запущен: Дышащий Коридор SL/TP и исполнение позиций...")
@@ -36,6 +36,8 @@ class ExecutionRiskWorker:
                 tickers = event.payload
                 await self._process_tick(tickers)
                 self.price_queue.task_done()
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 logger.error(f"Execution _price_loop error: {e}")
 
@@ -52,19 +54,24 @@ class ExecutionRiskWorker:
                     self.bus.publish("NOTIFY", {"text": f"🚨 <b>Экстренный выход</b> · {ex['symbol']} · {ex['pnl_pct']:.2f}%", "urgent": True})
 
                 self.emergency_queue.task_done()
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 logger.error(f"Execution _emergency_loop error: {e}")
 
     async def _process_tick(self, tickers: dict) -> None:
         btc = tickers.get("BTCUSDT")
+        now_ts = time.time()
         if btc:
             last_btc = btc["last"]
-            if self._last_btc_price > 0:
-                drop_pct = (last_btc - self._last_btc_price) / self._last_btc_price
+            self._btc_history.append((now_ts, last_btc))
+            self._btc_history = [x for x in self._btc_history if now_ts - x[0] <= 300]
+            if len(self._btc_history) >= 2:
+                oldest_p = self._btc_history[0][1]
+                drop_pct = (last_btc - oldest_p) / oldest_p
                 if drop_pct <= -0.03:
                     self.bus.publish("EMERGENCY_DUMP", tickers)
                     return
-            self._last_btc_price = last_btc
 
         fills = paper.check_fills(tickers)
         for f in fills:
@@ -84,7 +91,6 @@ class ExecutionRiskWorker:
             })
 
         state_changed = False
-        now_ts = time.time()
 
         for sym, pos in list(paper.positions.items()):
             t = tickers.get(sym)
@@ -92,7 +98,6 @@ class ExecutionRiskWorker:
                 continue
             last = t["last"]
 
-            # 1. Исполнение стоп-лосса с точным указанием типа стопа (🛡📉 / 🛡🔒 / 🛡💼 / 🛡📈 / 🛡🔥)
             if last <= pos["sl"]:
                 sl_exec_price = pos["sl"]
                 sl_tag = sl_emoji(pos.get("sl_state", "SHIELD"))
@@ -100,7 +105,7 @@ class ExecutionRiskWorker:
                 ev_type = "sell_profit" if ex["pnl"] > 0 else "sell_loss"
                 paper.log_event(sym, ev_type, sl_exec_price, f"SL {sl_tag}", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
 
-                is_real_sl_loss = ex["pnl_pct"] < -0.15
+                is_real_sl_loss = ex["pnl_pct"] < -0.25
                 bot_state.record_trade_exit(sym, ex["pnl_pct"], sl_exec_price, is_sl=is_real_sl_loss)
 
                 self.bus.publish("NOTIFY", {
@@ -112,14 +117,11 @@ class ExecutionRiskWorker:
                 })
                 continue
 
-            # 2. Исполнение тейк-профита (🔥 TP1 и конвейер 🛡🔥 / TP🏃🏻‍➡️)
             if last >= pos["tp"]:
                 candles_15m = await market_data.get_kline(sym, "15", 120)
                 candles_1h = await market_data.get_kline(sym, "60", 250)
 
                 if not pos.get("tp1_done"):
-                    # Фиксируем 65% (в реверсале или на медвежьем рынке) и 55% (в аптренде),
-                    # сразу забирая львиную долю профита в карман и в Funding Vault
                     is_defensive = (pos.get("entry_mode") == "reversal") or (bot_state.current_regime == "bear")
                     tp1_ratio = 0.65 if is_defensive else 0.55
                     part_qty = pos["qty"] * tp1_ratio
@@ -207,7 +209,6 @@ class ExecutionRiskWorker:
                         })
                 continue
 
-            # 3. Асимметричный храповик SL по Дышащему Коридору + Антиспам 3 минуты
             max_p = max(pos.get("max_price", last), last)
             pos["max_price"] = max_p
 
@@ -223,7 +224,7 @@ class ExecutionRiskWorker:
                 pos["max_sl"] = new_sl
                 state_changed = True
 
-                paper.log_event(sym, "sl_moved", pos["sl"], tag_emoji, tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                paper.log_event(sym, "sl_moved", pos["sl"], tag_emoji, tp=pos.get("tp"), sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
 
                 last_notify_ts = float(pos.get("_last_sl_notify_ts", 0.0))
                 a15 = float(pos.get("_atr15", 0.0))
