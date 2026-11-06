@@ -7,6 +7,7 @@ from collections import defaultdict
 from loguru import logger
 
 from bot.strategy.learner import learner, is_neutral_be
+from bot.strategy.sizing import MAX_POSITIONS_PER_TIER
 from bot.core.remote_state import download_state, upload_state
 
 REMOTE_PATH = "paper_state.json"
@@ -15,7 +16,7 @@ MAX_TOTAL_EVENTS = 5000
 
 
 class PaperExchange:
-    """Виртуальная биржа с сохранением полной аналитики сделок (1H Gatekeeper, reasons, тайминги) для 24ч аудита."""
+    """Виртуальная биржа с контролем лимита 3 открытых позиций на тир и полной аналитикой для 48ч аудита."""
 
     FEE_PCT = 0.10
 
@@ -145,18 +146,39 @@ class PaperExchange:
         self.orders = [o for o in self.orders if o["id"] != order_id]
         self.save()
 
+    def count_tier_positions(self, tier: str) -> int:
+        t_norm = tier or "SMALL"
+        return sum(1 for p in self.positions.values() if (p.get("tier") or "SMALL") == t_norm)
+
     def check_fills(self, prices):
         fills = []
         for order in list(self.orders):
-            last = prices.get(order["symbol"], {}).get("last")
+            if order not in self.orders:
+                continue
+            sym = order["symbol"]
+            last = prices.get(sym, {}).get("last")
             if last is None:
                 continue
+
             if order["side"] == "Buy" and last <= order["price"]:
+                tier = order.get("tier") or "SMALL"
+                # Проверяем лимит открытых позиций по тиру (не более 3 позиций одного тира)
+                if sym not in self.positions and self.count_tier_positions(tier) >= MAX_POSITIONS_PER_TIER:
+                    self.orders.remove(order)
+                    self.log_event(
+                        sym, "cancel", last,
+                        f"Лимит позиций тира {tier} ({MAX_POSITIONS_PER_TIER}/{MAX_POSITIONS_PER_TIER})",
+                        tp=order.get("tp"), sl=order.get("sl"),
+                        sup=order.get("nearest_sup"), res=order.get("nearest_res")
+                    )
+                    logger.info(f"PAPER CANCEL {sym}: тир {tier} уже заполнен ({MAX_POSITIONS_PER_TIER} откр. поз.)")
+                    continue
+
                 cost = order["qty"] * order["price"]
                 fee = cost * self.FEE_PCT / 100
                 if cost + fee <= self.usdt:
                     self.usdt -= cost + fee
-                    pos = self.positions.setdefault(order["symbol"], {"qty": 0.0, "avg": 0.0})
+                    pos = self.positions.setdefault(sym, {"qty": 0.0, "avg": 0.0})
                     total = pos["qty"] + order["qty"]
                     pos["avg"] = (pos["avg"] * pos["qty"] + cost) / total
                     pos["qty"] = total
@@ -177,8 +199,8 @@ class PaperExchange:
                     pos["reason_keys"] = order.get("reason_keys", [])
                     pos["patterns"] = order.get("patterns", [])
                     pos["grade"] = order.get("grade", "B")
-                    pos["sector"] = self._resolve_sector(order["symbol"], order.get("sector"))
-                    pos["tier"] = order.get("tier")
+                    pos["sector"] = self._resolve_sector(sym, order.get("sector"))
+                    pos["tier"] = tier
                     pos["regime_entry"] = order.get("regime")
                     pos["is_momentum"] = order.get("is_momentum", False)
                     pos["entry_mode"] = order.get("entry_mode", "sniper")
@@ -196,14 +218,29 @@ class PaperExchange:
                     pos["_atr15"] = order.get("_atr15", 0.0)
                     self.trades.append({
                         "side": "Buy",
-                        "symbol": order["symbol"],
+                        "symbol": sym,
                         "qty": order["qty"],
                         "price": order["price"],
                         "time": int(time.time()),
                     })
                     self.orders.remove(order)
                     fills.append(order)
-                    logger.info(f"PAPER FILL BUY {order['symbol']} {order['qty']} @ {order['price']}")
+                    logger.info(f"PAPER FILL BUY {sym} {order['qty']} @ {order['price']} (tier={tier})")
+
+                    # Если после покупки тир достиг лимита в 3 открытые позиции — снимаем лишние ожидающие ордера этого тира
+                    if self.count_tier_positions(tier) >= MAX_POSITIONS_PER_TIER:
+                        for other_o in list(self.orders):
+                            if (other_o.get("tier") or "SMALL") == tier:
+                                o_sym = other_o["symbol"]
+                                o_last = prices.get(o_sym, {}).get("last", other_o["price"])
+                                self.orders.remove(other_o)
+                                self.log_event(
+                                    o_sym, "cancel", o_last,
+                                    f"Наполнен лимит 3 поз. тира {tier}",
+                                    tp=other_o.get("tp"), sl=other_o.get("sl"),
+                                    sup=other_o.get("nearest_sup"), res=other_o.get("nearest_res")
+                                )
+                                logger.info(f"PAPER AUTO-CANCEL {o_sym}: тир {tier} наполнен до {MAX_POSITIONS_PER_TIER} позиций")
         self.save()
         return fills
 
@@ -240,7 +277,6 @@ class PaperExchange:
         self.usdt += proceeds - fee_sell
         transferred = 0.0
 
-        # Сразу откладываем 30% от профита TP1 в резерв/накопления
         if pnl > 0:
             hodl_reserve_usdt = round(pnl * 0.30, 4)
             tier = pos.get("tier")
@@ -319,8 +355,8 @@ class PaperExchange:
                 exit_type = "🛡🔒"
             elif sl_state == "ABOVE_TP1" or (pos.get("tp1_done") and tp1_price and price >= tp1_price * 0.9995):
                 exit_type = "🛡🔥"
-            elif sl_state == "TRAILING_RUNNER":
-                exit_type = "🛡📈"
+            elif sl_state == "TRAILING_RUNNER" or (pos.get("tp1_done") and total_pnl > 0):
+                exit_type = "🛡📈" if sl_state == "TRAILING_RUNNER" else "🛡💼"
             elif sl_state in ("PROFIT_LOCK", "BREAKEVEN") and total_pnl_pct > 0.25:
                 exit_type = "🛡💼"
             else:
@@ -362,7 +398,6 @@ class PaperExchange:
         self.usdt += proceeds - fee_sell
         transferred = 0.0
 
-        # Если остаток закрылся в плюс (и это не был чистый БУ), отчисляем 30% с остатка
         if pnl_final > 0 and not is_neutral_be(pnl_final_pct):
             hodl_reserve_usdt = round(pnl_final * 0.30, 4)
             if tier == "TOP20" and price > 0:
