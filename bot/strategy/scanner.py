@@ -159,7 +159,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     if drop_from_48h_high_pct >= 18.0 and last_1h < e21_1h and e21_1h < e50_1h:
         return "1H_BAN", e21_1h, e50_1h, f"1H крах с хая (-{drop_from_48h_high_pct:.1f}% под EMA21/50)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    # Защита от входа после свечи кульминации на 1H (кейсы AVAX $9.17, ZAMA $0.073, ZRO $1.95, XRP $1.34)
     recent_12_1h = candles_1h[-12:] if len(candles_1h) >= 12 else candles_1h
     high_idx_12 = max(range(len(recent_12_1h)), key=lambda i: recent_12_1h[i]["high"])
     max_h_12 = recent_12_1h[high_idx_12]["high"]
@@ -186,7 +185,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     e21_falling_1h = (e21_1h < e21_3h_ago * 0.997) and (last_1h < e21_1h * 0.994)
     e50_falling_48h = (e50_1h < e50_12h_ago * 0.995) and (e50_1h < e50_24h_ago * 0.990)
 
-    # 1. Классический 48ч аптренд (в рабочей зоне 25%..66% высоты канала и с положительным трендом)
     is_uptrend_1h = (
         last_1h >= e50_1h * 0.997 and
         e21_1h >= e50_1h * 0.996 and
@@ -197,8 +195,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         r_1h <= 71
     )
 
-    # 2. Ранний разворот тренда 1H (1H Trend Ignition — чтобы ловить ралли AVAX, ZRO, QNT, DOT, ONDO со дна,
-    # когда цена уже пробила 1H EMA21 и EMA50 вверх, а 12ч импульс положительный, не дожидаясь разворота 48ч-истории!)
     is_fresh_1h_reversal = (
         last_1h >= e21_1h * 0.998 and
         last_1h >= e50_1h * 0.997 and
@@ -828,7 +824,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 if entry_mode in ("sniper", "rocket"):
                     if e21_15 < e50_15 * 0.9985 or e50_15 < e50_series_15[-4] * 0.999:
                         return None
-                    # Защита от покупки отвесного обвала с локального пика (кейсы FLOCK, AVAX #7, ZAMA #4)
                     local_5_high = max(c["high"] for c in candles_15m[-5:])
                     if (local_5_high - last_price) > 1.7 * a and last_price < e21_15:
                         return None
