@@ -93,7 +93,7 @@ class PaperExchange:
             self.state_file.write_text(json.dumps(payload, ensure_ascii=False))
         except Exception as e:
             logger.error(f"Paper save error: {e}")
-        if time.time() - self._last_upload > 3600:
+        if time.time() - self._last_upload > 60:
             self._last_upload = time.time()
             upload_state(REMOTE_PATH, payload)
 
