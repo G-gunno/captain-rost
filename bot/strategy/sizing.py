@@ -2,16 +2,17 @@ from bot.strategy.learner import learner
 
 # Максимум 3 открытые позиции из одного тира (TOP20, MID, SMALL, MICRO)
 MAX_POSITIONS_PER_TIER = 3
+# Умный Овербукинг: до 5 активных лимитных ордеров на 1 тир до наполнения 3 позиций
+MAX_ORDERS_PER_TIER = 5
 
-# Увеличенные рабочие чеки для полной загрузки депозита
 TIERS = [
-    (150, 22, 40),
-    (250, 35, 65),
-    (500, 48, 95),
-    (1000, 60, 135),
-    (2500, 120, 330),
-    (5000, 220, 650),
-    (10000, 400, 1300),
+    (150, 20, 42),
+    (250, 32, 68),
+    (500, 45, 98),
+    (1000, 52, 140),
+    (2500, 110, 340),
+    (5000, 210, 680),
+    (10000, 380, 1350),
 ]
 
 TIER_OFFSET_BOUNDS = {
@@ -28,7 +29,6 @@ TIER_ACCUM_BOUNDS = {
     "MICRO": (-0.0068, -0.0026),
 }
 
-# Минимальный отступ для пробойных ракет (чтобы забирать ICNT и PEPE без недоходов)
 TIER_ROCKET_BOUNDS = {
     "TOP20": (-0.0018, -0.0006),
     "MID":   (-0.0026, -0.0009),
@@ -48,7 +48,7 @@ def tier_limits(equity):
     for bound, mn, mx in TIERS:
         if equity <= bound:
             return mn, mx
-    return max(400.0, equity * 0.05), equity * 0.14
+    return max(380.0, equity * 0.05), equity * 0.14
 
 
 def min_order_threshold(equity: float) -> float:
@@ -57,8 +57,8 @@ def min_order_threshold(equity: float) -> float:
 
 
 def portfolio_limits(equity):
-    """Возвращает (лимит позиций на 1 тир = 3, лимит на сектор = 6)."""
-    return MAX_POSITIONS_PER_TIER, 6
+    """Возвращает (лимит открытых позиций на 1 тир = 3, лимит овербукинга ордеров на 1 тир = 5)."""
+    return MAX_POSITIONS_PER_TIER, MAX_ORDERS_PER_TIER
 
 
 def buy_size(equity, score, thr, liquidity, free_usdt, entry_mode="sniper", grade="B"):
@@ -76,11 +76,12 @@ def buy_size(equity, score, thr, liquidity, free_usdt, entry_mode="sniper", grad
     if kelly is not None:
         size *= (0.75 + 0.30 * kelly)
 
-    # Сбалансированный вес грейдов: A+ получает ~1.05x, рабочий B получает 0.88x (без перекоса в 2 раза)
+    # Умное разделение ставок: [💎] A+ получает повышенный рабочий объём (1.10x..1.20x),
+    # а проходной сигнал [B] работает умеренным чеком (0.75x..0.82x), чтобы 1 победа A+ перекрывала 2 стопа B
     if grade == "A+":
-        size *= max(1.02, min(1.15, learner.grade_a_trust_mult()))
+        size *= max(1.10, min(1.22, learner.grade_a_trust_mult()))
     else:
-        size *= 0.88
+        size *= (0.82 if strength >= 0.55 else 0.74)
 
     min_allowed = min_order_threshold(equity)
     size = max(min_allowed, min(size, max_allowed))
