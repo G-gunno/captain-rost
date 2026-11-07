@@ -190,18 +190,18 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         e21_1h >= e50_1h * 0.996 and
         not e21_falling_1h and
         not e50_falling_48h and
-        0.25 <= pos_in_48h <= 0.66 and
-        0.5 <= chg_48h <= 17.5 and
+        0.22 <= pos_in_48h <= 0.66 and
+        0.0 <= chg_48h <= 17.5 and
         r_1h <= 71
     )
 
     is_fresh_1h_reversal = (
         last_1h >= e21_1h * 0.998 and
-        last_1h >= e50_1h * 0.997 and
-        e21_1h > e21_3h_ago * 1.0005 and
-        e50_1h >= e50_6h_ago * 0.999 and
-        0.18 <= pos_in_48h <= 0.62 and
-        1.2 <= chg_12h <= 12.0 and
+        last_1h >= e50_1h * 0.996 and
+        e21_1h > e21_3h_ago * 1.0002 and
+        e50_1h >= e50_6h_ago * 0.9985 and
+        0.15 <= pos_in_48h <= 0.62 and
+        0.5 <= chg_12h <= 12.0 and
         r_1h <= 68
     )
 
@@ -232,20 +232,20 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     if pos_in_48h > 0.66 or chg_48h > 17.5:
         return "1H_BAN", e21_1h, e50_1h, f"1H крыша/перегрев 48ч ({chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    has_strong_slab = bool(nearest_sup and sup_touches >= 3 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 2.4 * a15)
-    has_moderate_sup = bool(nearest_sup and sup_touches >= 2 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 1.8 * a15)
+    has_strong_slab = bool(nearest_sup and sup_touches >= 3 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 2.5 * a15)
+    has_moderate_sup = bool(nearest_sup and sup_touches >= 2 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 2.2 * a15)
 
     bottom_reclaim = False
-    if pos_in_48h <= 0.42 and has_moderate_sup and candles_15m and len(candles_15m) >= 25:
+    if pos_in_48h <= 0.48 and has_moderate_sup and candles_15m and len(candles_15m) >= 25:
         c15_closes = [c["close"] for c in candles_15m]
         e21_15m = ema(c15_closes, 21)[-1]
-        if c15_closes[-1] >= e21_15m * 0.998 and candles_15m[-2]["close"] > candles_15m[-2]["open"]:
+        if c15_closes[-1] >= e21_15m * 0.996 or candles_15m[-2]["close"] >= candles_15m[-2]["open"]:
             bottom_reclaim = True
 
     if last_1h < e50_1h and e50_falling_48h:
         dist_below_e50_1h = (e50_1h - last_1h) / a_1h if a_1h > 0 else 0.0
-        if (has_strong_slab or bottom_reclaim) and dist_below_e50_1h <= 3.2 and pos_in_48h <= 0.55 and drop_from_48h_high_pct < 18.0:
-            tag_str = "разворот со дна 48ч" if bottom_reclaim else f"1H плита в даунтренде ({sup_touches}x)"
+        if (has_strong_slab or has_moderate_sup or bottom_reclaim) and dist_below_e50_1h <= 3.6 and pos_in_48h <= 0.55 and drop_from_48h_high_pct < 18.0:
+            tag_str = f"1H плита в даунтренде ({sup_touches}x)" if sup_touches >= 2 else "разворот со дна 48ч"
             return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"{tag_str} (48ч {chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
         return "1H_BAN", e21_1h, e50_1h, f"1H 48ч даунтренд без плиты ({chg_48h:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
@@ -527,7 +527,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         score += learner.weight("chg24h")
         reasons.append(f"24ч +{t['change_pct']:.1f}%")
         keys.append("chg24h")
-    elif (t["change_pct"] <= -5.0 or local_swing_drop >= 3.0) and ("reversal" in matched_modes or r < 42):
+    elif (t["change_pct"] <= -5.0 or local_swing_drop >= 3.0) and ("reversal" in matched_modes or r < 44):
         score += learner.weight("chg24h")
         reasons.append(f"дисконт от свинга -{local_swing_drop:.1f}%")
         keys.append("chg24h")
@@ -550,19 +550,20 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
     closed_candle_holds_sup = False
     if nearest_sup and sup_touches >= 2 and a15 > 0:
         dist_to_sup = last - nearest_sup
-        if 0 <= dist_to_sup <= 2.2 * a15:
+        if 0 <= dist_to_sup <= 2.3 * a15:
             sup_is_near = True
             closed_candle_holds_sup = (
-                (candles_15m[-2]["close"] >= nearest_sup * 0.999) and
+                (candles_15m[-2]["close"] >= nearest_sup * 0.9985) and
                 (candles_15m[-2]["close"] >= candles_15m[-2]["open"] or
-                 (candles_15m[-2]["close"] - candles_15m[-2]["low"]) >= 0.45 * (candles_15m[-2]["high"] - candles_15m[-2]["low"]))
+                 (candles_15m[-2]["close"] - candles_15m[-2]["low"]) >= 0.40 * (candles_15m[-2]["high"] - candles_15m[-2]["low"]) or
+                 last_candle["close"] >= last_candle["open"])
             )
-            if not is_open_pos and (last > closes[-2] or "reversal" in matched_modes or (sup_touches >= 2 and closed_candle_holds_sup)):
-                sup_bonus = 2.6 if sup_touches >= 3 else 1.5
+            if not is_open_pos and (last >= closes[-2] * 0.999 or "reversal" in matched_modes or (sup_touches >= 2 and closed_candle_holds_sup)):
+                sup_bonus = 2.6 if sup_touches >= 3 else 1.6
                 score += sup_bonus
                 reasons.append(f"плита поддержки ${fmt_price(nearest_sup)} ({sup_touches}x, +{sup_bonus:.1f})")
                 keys.append("support_bounce")
-                if sup_touches >= 3 and "reversal" not in matched_modes and (any(p in pattern_keys for p in ("pinbar", "divergence")) or (closed_candle_holds_sup and r <= 46)):
+                if sup_touches >= 2 and "reversal" not in matched_modes and (any(p in pattern_keys for p in ("pinbar", "divergence")) or (closed_candle_holds_sup and r <= 50)):
                     matched_modes.append("reversal")
 
     gate_1h, e21_1h, e50_1h, gate_reason, chg_48h, pos_in_48h = validate_1h_structure(
@@ -588,7 +589,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
             matched_modes = [m for m in matched_modes if m == "reversal"]
             if not matched_modes and sup_is_near and sup_touches >= 2 and (
                 any(p in pattern_keys for p in ("pinbar", "divergence")) or
-                (sup_touches >= 3 and closed_candle_holds_sup and r <= 46)
+                (closed_candle_holds_sup and r <= 52)
             ):
                 matched_modes = ["reversal"]
 
@@ -834,6 +835,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             if sector == "Other" and tier == "MICRO" and tickers[sym]["quote_volume"] < 1_500_000:
                 return None
 
+            tactical_hold = False
             if candles_15m and len(candles_15m) >= 50:
                 c15_closes = [c["close"] for c in candles_15m]
                 e21_series_15 = ema(c15_closes, 21)
@@ -844,46 +846,39 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 curr_15 = candles_15m[-1]
 
                 if entry_mode in ("sniper", "rocket"):
-                    if e21_15 < e50_15 * 0.9985 or e50_15 < e50_series_15[-4] * 0.999:
-                        return None
+                    if e21_15 < e50_15 * 0.997 or e50_15 < e50_series_15[-4] * 0.998:
+                        tactical_hold = True
                     local_5_high = max(c["high"] for c in candles_15m[-5:])
-                    if (local_5_high - last_price) > 1.7 * a and last_price < e21_15:
-                        return None
-                    if last_price < e21_15 * 0.999 or e21_15 < e21_series_15[-3] * 0.999:
-                        if closed_15["close"] < closed_15["open"] and curr_15["close"] <= curr_15["open"]:
-                            return None
-                    if curr_15["close"] < curr_15["open"] and (curr_15["open"] - curr_15["close"]) > 0.55 * a:
-                        return None
+                    if (local_5_high - last_price) > 2.0 * a and last_price < e50_15:
+                        tactical_hold = True
+                    if curr_15["close"] < curr_15["open"] and (curr_15["open"] - curr_15["close"]) > 0.60 * a:
+                        tactical_hold = True
                 elif entry_mode == "reversal":
-                    # Фильтр «Правого плеча» (защита от ловли первой волны отвесного слива):
-                    # 1. Текущая свеча не должна быть сильной сливной
-                    if curr_15["close"] < curr_15["open"] and (curr_15["open"] - curr_15["close"]) > 0.35 * a:
-                        return None
-                    if closed_15["close"] < closed_15["open"] and curr_15["close"] < closed_15["low"]:
-                        return None
-                    # 2. Цена должна перестать обновлять дно (опорный минимум) и показать зелёную свечу / пин-бар выкупа
-                    prev_4_low = min(c["low"] for c in candles_15m[-6:-2])
-                    bottom_held = min(closed_15["low"], curr_15["low"]) >= prev_4_low * 0.9975 or "pinbar" in pats_now
-                    has_green_turn = (closed_15["close"] >= closed_15["open"]) or (curr_15["close"] > curr_15["open"] and curr_15["close"] >= closed_15["close"])
-                    if not (bottom_held and has_green_turn):
-                        return None
+                    # Защита от отвесного ножа: блокируем только сильную сливную свечу или пробой самой плиты вниз
+                    if curr_15["close"] < curr_15["open"] and (curr_15["open"] - curr_15["close"]) > 0.48 * a:
+                        tactical_hold = True
+                    if closed_15["close"] < closed_15["open"] and (closed_15["open"] - closed_15["close"]) > 0.55 * a and curr_15["close"] < closed_15["low"]:
+                        tactical_hold = True
+                    nsup = signal_values.get("nearest_sup")
+                    if nsup and last_price < nsup * 0.995:
+                        tactical_hold = True
 
             if regime == "bear":
                 if entry_mode == "rocket":
                     if "breakout" not in pats_now or last_price < signal_values.get("e50_1h", 0) * 0.997 or signal_values.get("pos_in_48h", 1.0) > 0.86:
-                        return None
+                        tactical_hold = True
                 elif entry_mode == "sniper":
-                    if last_price < signal_values.get("e50_1h", 0) * 0.997 or signal_values.get("pos_in_48h", 1.0) > 0.60:
-                        return None
+                    if last_price < signal_values.get("e50_1h", 0) * 0.996 or signal_values.get("pos_in_48h", 1.0) > 0.62:
+                        tactical_hold = True
 
             if signal_values.get("recent_rejection") and entry_mode in ("sniper", "rocket"):
-                return None
+                tactical_hold = True
 
             corr = _corr_candles(candles_15m, btc_candles)
             tier_corr_limit = TIER_CORR_LIMITS.get(tier, 0.82)
 
-            if regime == "bear" and entry_mode in ("sniper", "rocket") and corr >= 0.72:
-                return None
+            if regime == "bear" and entry_mode in ("sniper", "rocket") and corr >= 0.75:
+                tactical_hold = True
 
             is_independent_mover = abs(corr) < 0.25 and gate_1h == "1H_TREND_OK"
 
@@ -972,7 +967,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 "res_touches": signal_values.get("res_touches", 0),
                 "nearest_sup": signal_values.get("nearest_sup"),
                 "sup_touches": signal_values.get("sup_touches", 0),
-                "recent_high": signal_values.get("recent_high"),
+                "recent_high": signal_values.get("recent_low_2h"),
                 "recent_low_2h": signal_values.get("recent_low_2h"),
                 "recent_low_6": signal_values.get("recent_low_6"),
                 "e21": signal_values.get("e21"),
@@ -985,19 +980,22 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 "pos_in_48h": signal_values.get("pos_in_48h", 0.5),
                 "wick_entry_price": signal_values.get("wick_entry_price"),
                 "is_independent": is_independent_mover,
+                "tactical_hold": tactical_hold,
                 "size_mult": 1.0,
             }
 
     tasks = [_analyze_sym(sym) for sym in pool]
     results = await asyncio.gather(*tasks)
 
-    scored = [r for r in results if r is not None]
-    scored.sort(key=lambda c: c["score"], reverse=True)
+    all_structural = [r for r in results if r is not None]
+    all_structural.sort(key=lambda c: (0 if c.get("tactical_hold") else 1, c["score"]), reverse=True)
+
+    scored = [r for r in all_structural if not r.get("tactical_hold")]
 
     thrs = get_thresholds(regime)
 
     try:
-        shadow.observe(scored, regime, thrs)
+        shadow.observe(all_structural, regime, thrs)
         shadow.tick(tickers)
         shadow.autotune()
     except Exception as e:
@@ -1005,7 +1003,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
     public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
     parts_html, parts_plain = [], []
-    for c in scored[:5]:
+    for c in all_structural[:5]:
         chart_url = f"{public_url}/chart?symbol={c['symbol']}"
         mode = c.get("entry_mode", "sniper")
         thr = thrs.get(mode, 6.0)
