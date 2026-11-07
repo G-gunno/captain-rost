@@ -126,7 +126,7 @@ def is_post_pump_dump(candles_15m: list) -> tuple:
     return False, ""
 
 
-def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int, a15: float, candles_15m: list = None) -> tuple:
+def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int, a15: float, candles_15m: list = None, patterns: list = None) -> tuple:
     if not candles_1h or len(candles_1h) < 50:
         return "1H_BAN", 0.0, 0.0, "недостаточно 1H истории (<48ч)", 0.0, 0.5
 
@@ -205,9 +205,28 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         r_1h <= 68
     )
 
-    if is_uptrend_1h or is_fresh_1h_reversal:
-        tag_1h = "1H разворот тренда" if (is_fresh_1h_reversal and not is_uptrend_1h) else "1H аптренд 48ч"
-        ref_chg = chg_12h if (is_fresh_1h_reversal and not is_uptrend_1h) else chg_48h
+    has_breakout_pat = "breakout" in (patterns or [])
+    is_breakout_1h = (
+        has_breakout_pat and
+        last_1h >= e21_1h * 0.999 and
+        e21_1h >= e50_1h * 0.997 and
+        not e21_falling_1h and
+        not e50_falling_48h and
+        0.50 <= pos_in_48h <= 0.86 and
+        0.5 <= chg_48h <= 22.0 and
+        r_1h <= 74
+    )
+
+    if is_uptrend_1h or is_fresh_1h_reversal or is_breakout_1h:
+        if is_breakout_1h and not is_uptrend_1h:
+            tag_1h = "1H пробой базы"
+            ref_chg = chg_48h
+        elif is_fresh_1h_reversal and not is_uptrend_1h:
+            tag_1h = "1H разворот тренда"
+            ref_chg = chg_12h
+        else:
+            tag_1h = "1H аптренд 48ч"
+            ref_chg = chg_48h
         return "1H_TREND_OK", e21_1h, e50_1h, f"{tag_1h} ({ref_chg:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
     if pos_in_48h > 0.66 or chg_48h > 17.5:
@@ -547,7 +566,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
                     matched_modes.append("reversal")
 
     gate_1h, e21_1h, e50_1h, gate_reason, chg_48h, pos_in_48h = validate_1h_structure(
-        candles_1h, nearest_sup, sup_touches, a15, candles_15m=candles_15m
+        candles_1h, nearest_sup, sup_touches, a15, candles_15m=candles_15m, patterns=pattern_keys
     )
 
     if chg_48h > 16.0 or pos_in_48h > 0.55:
@@ -793,12 +812,15 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 return None
 
             modes = signal_values.get("matched_modes", [])
+            pats_now = signal_values.get("patterns", [])
             if gate_1h == "1H_SUPPORT_ONLY":
                 if "reversal" not in modes:
                     return None
                 entry_mode = "reversal"
             else:
-                if "reversal" in modes:
+                if "rocket" in modes and ("breakout" in pats_now or signal_values.get("pos_in_48h", 0.5) > 0.62):
+                    entry_mode = "rocket"
+                elif "reversal" in modes:
                     entry_mode = "reversal"
                 elif "rocket" in modes:
                     entry_mode = "rocket"
@@ -833,16 +855,25 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                     if curr_15["close"] < curr_15["open"] and (curr_15["open"] - curr_15["close"]) > 0.55 * a:
                         return None
                 elif entry_mode == "reversal":
-                    if curr_15["close"] < curr_15["open"] and (curr_15["open"] - curr_15["close"]) > 0.40 * a:
+                    # Фильтр «Правого плеча» (защита от ловли первой волны отвесного слива):
+                    # 1. Текущая свеча не должна быть сильной сливной
+                    if curr_15["close"] < curr_15["open"] and (curr_15["open"] - curr_15["close"]) > 0.35 * a:
                         return None
                     if closed_15["close"] < closed_15["open"] and curr_15["close"] < closed_15["low"]:
                         return None
+                    # 2. Цена должна перестать обновлять дно (опорный минимум) и показать зелёную свечу / пин-бар выкупа
+                    prev_4_low = min(c["low"] for c in candles_15m[-6:-2])
+                    bottom_held = min(closed_15["low"], curr_15["low"]) >= prev_4_low * 0.9975 or "pinbar" in pats_now
+                    has_green_turn = (closed_15["close"] >= closed_15["open"]) or (curr_15["close"] > curr_15["open"] and curr_15["close"] >= closed_15["close"])
+                    if not (bottom_held and has_green_turn):
+                        return None
 
             if regime == "bear":
-                if entry_mode == "rocket" and "breakout" not in signal_values.get("patterns", []):
-                    return None
-                if entry_mode in ("sniper", "rocket"):
-                    if last_price < signal_values.get("e50_1h", 0) * 0.997 or signal_values.get("pos_in_48h", 1.0) > 0.66:
+                if entry_mode == "rocket":
+                    if "breakout" not in pats_now or last_price < signal_values.get("e50_1h", 0) * 0.997 or signal_values.get("pos_in_48h", 1.0) > 0.86:
+                        return None
+                elif entry_mode == "sniper":
+                    if last_price < signal_values.get("e50_1h", 0) * 0.997 or signal_values.get("pos_in_48h", 1.0) > 0.60:
                         return None
 
             if signal_values.get("recent_rejection") and entry_mode in ("sniper", "rocket"):
