@@ -93,16 +93,16 @@ def _load_sectors():
             _sector_cache = json.loads(SECTOR_FILE.read_text())
     except Exception as e:
         logger.error(f"sectors load error: {e}")
-        
+
     if not _sector_cache:
         data = download_state(SECTOR_REMOTE)
         if isinstance(data, dict) and data:
             _sector_cache = data
-            
+
     cleaned = {k: v for k, v in _sector_cache.items() if v != "Other"}
     if len(cleaned) < len(_sector_cache):
         _sector_cache = cleaned
-        
+
     logger.info(f"sectors: кэш загружен ({len(_sector_cache)} валидных монет)")
 
 
@@ -137,7 +137,7 @@ async def get_sectors_for_pool(bases):
     result = {}
     need = []
     now = time.time()
-    
+
     for b in bases:
         if b in SECTORS:
             result[b] = SECTORS[b]
@@ -147,10 +147,10 @@ async def get_sectors_for_pool(bases):
             result[b] = "Other"
         else:
             need.append(b)
-            
+
     if not need:
         return result
-        
+
     await asyncio.sleep(1.0)
     try:
         key = os.getenv("CMC_API_KEY", "").strip()
@@ -160,7 +160,7 @@ async def get_sectors_for_pool(bases):
                             params={"symbol": ",".join(need[:100])},
                             headers=headers)
             data = r.json().get("data", {})
-            
+
         learned = 0
         for b in need:
             arr = data.get(b)
@@ -169,15 +169,15 @@ async def get_sectors_for_pool(bases):
                 sector = _tags_to_sector(arr[0].get("tags")) or "Other"
             elif isinstance(arr, dict):
                 sector = _tags_to_sector(arr.get("tags")) or "Other"
-                
+
             result[b] = sector
-            
+
             if sector != "Other":
                 _sector_cache[b] = sector
                 learned += 1
             else:
                 _missing_sectors_cooldown[b] = now
-                
+
         if learned:
             _save_sectors()
             logger.info(f"sectors: кэш обновлен, выучено {learned} новых записей (всего: {len(_sector_cache)})")
@@ -207,30 +207,36 @@ _load_ranks()
 
 
 async def get_ranks_for_pool(bases):
+    """Загружает топ-500 рангов CMC раз в 6 часов, чтобы корректно разделять TOP20, MID (21-100), SMALL (101-500) и MICRO (500+)."""
     now = time.time()
-    if _ranks["data"] and now - _ranks["ts"] < 21600:
+    if len(_ranks["data"]) >= 300 and now - _ranks["ts"] < 21600:
         return {b: _ranks["data"].get(b) for b in bases}
     fetched = {}
     try:
         key = os.getenv("CMC_API_KEY", "").strip()
         headers = {"X-CMC_PRO_API_KEY": key} if key else {}
-        async with httpx.AsyncClient(timeout=10) as c:
+        async with httpx.AsyncClient(timeout=15) as c:
             r = await c.get(
                 f"{CMC_BASE}/v1/cryptocurrency/listings/latest",
-                params={"symbol": ",".join(bases[:100]), "limit": 200},
+                params={"start": 1, "limit": 500, "convert": "USD"},
                 headers=headers,
             )
             data = r.json().get("data", [])
         for item in data:
-            fetched[item.get("symbol")] = item.get("cmc_rank")
-        _ranks["data"].update(fetched)
-        _ranks["ts"] = now
-        try:
-            RANKS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            RANKS_FILE.write_text(json.dumps({"data": _ranks["data"], "ts": _ranks["ts"]}))
-        except Exception as e:
-            logger.error(f"ranks save error: {e}")
-        logger.info(f"ranks: обновлено {len(fetched)} рангов CMC")
+            sym = item.get("symbol")
+            rnk = item.get("cmc_rank")
+            if sym and rnk is not None:
+                if sym not in fetched or rnk < fetched[sym]:
+                    fetched[sym] = rnk
+        if fetched:
+            _ranks["data"].update(fetched)
+            _ranks["ts"] = now
+            try:
+                RANKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+                RANKS_FILE.write_text(json.dumps({"data": _ranks["data"], "ts": _ranks["ts"]}))
+            except Exception as e:
+                logger.error(f"ranks save error: {e}")
+            logger.info(f"ranks: обновлено {len(fetched)} рангов CMC (топ-500)")
     except Exception as e:
         logger.error(f"ranks fetch error: {e}")
     return {b: fetched.get(b, _ranks["data"].get(b)) for b in bases}
@@ -259,6 +265,7 @@ NAMES_REMOTE = "names.json"
 _names_cache = {}
 _last_names_upload = 0.0
 
+
 def _load_names():
     global _names_cache
     try:
@@ -267,12 +274,13 @@ def _load_names():
             logger.info(f"names: кэш загружен ({len(_names_cache)} имен)")
     except Exception as e:
         logger.error(f"names load error: {e}")
-        
+
     if not _names_cache:
         data = download_state(NAMES_REMOTE)
         if isinstance(data, dict) and data:
             _names_cache = data
             logger.info(f"names: кэш восстановлен из GitHub ({len(_names_cache)} имен)")
+
 
 def _save_names():
     global _last_names_upload
@@ -281,10 +289,11 @@ def _save_names():
         NAMES_FILE.write_text(json.dumps(_names_cache, ensure_ascii=False))
     except Exception as e:
         logger.error(f"names save error: {e}")
-        
+
     if time.time() - _last_names_upload > 3600:
         _last_names_upload = time.time()
         upload_state(NAMES_REMOTE, _names_cache)
+
 
 _load_names()
 
@@ -293,10 +302,10 @@ async def fetch_missing_names(symbols):
     need = [s for s in symbols if s not in _names_cache]
     if not need:
         return
-    
+
     key = os.getenv("CMC_API_KEY", "").strip()
     headers = {"X-CMC_PRO_API_KEY": key} if key else {}
-    
+
     learned = 0
     async with httpx.AsyncClient(timeout=10) as c:
         for i in range(0, len(need), 100):
@@ -317,7 +326,7 @@ async def fetch_missing_names(symbols):
             except Exception as e:
                 logger.error(f"CMC fetch_missing_names error: {e}")
             await asyncio.sleep(1.0)
-            
+
     if learned:
         _save_names()
         logger.info(f"names: выучено {learned} новых имен монет (всего в базе: {len(_names_cache)})")
@@ -326,7 +335,7 @@ async def fetch_missing_names(symbols):
 async def get_coin_name(symbol: str) -> str:
     if symbol in _names_cache:
         return _names_cache[symbol]
-        
+
     data = await _get("/v1/cryptocurrency/info", {"symbol": symbol})
     name = ""
     if data and "data" in data:
@@ -335,7 +344,7 @@ async def get_coin_name(symbol: str) -> str:
             name = arr[0].get("name", "")
         elif isinstance(arr, dict):
             name = arr.get("name", "")
-            
+
     _names_cache[symbol] = name
     _save_names()
     return name
@@ -362,6 +371,7 @@ def memory_stats():
         "sectors": sector_counts,
         "tiers": tier_counts,
     }
+
 
 def get_stats():
     key = os.getenv("CMC_API_KEY", "").strip()
