@@ -21,7 +21,7 @@ from bot.core.state import bot_state
 
 
 class PositionManagerWorker:
-    """Управление позициями: Дышащий Коридор по свечам 15m/1H, защита лимиток от ножей и таймаут 45 мин."""
+    """Управление позициями: Дышащий Коридор по свечам 15m/1H, защита от Race Condition и таймаут лимиток 45 мин."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -82,13 +82,14 @@ class PositionManagerWorker:
         # =====================================================================
         # 1. ПРОВЕРКА ОТКРЫТЫХ ПОЗИЦИЙ И ОБНОВЛЕНИЕ «ДЫШАЩЕГО КОРИДОРА»
         # =====================================================================
-        for sym, pos in list(paper.positions.items()):
+        for sym in list(paper.positions.keys()):
             t = tickers.get(sym)
-            if not t:
+            if not t or sym not in paper.positions:
                 continue
 
             score_pos, candles = await live_score(sym, t, regime, btc_ret, news_items, deriv_t=deriv_tickers.get(sym), is_open_pos=True, btc_candles=btc_candles)
-            if score_pos is None or not candles:
+            pos = paper.positions.get(sym)
+            if not pos or score_pos is None or not candles:
                 continue
 
             closes = [c["close"] for c in candles]
@@ -103,12 +104,18 @@ class PositionManagerWorker:
 
             base = sym[:-4]
             name = await get_coin_name(base)
+            pos = paper.positions.get(sym)
+            if not pos:
+                continue
+
             neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
             is_toxic = neg >= 2 and neg >= (pos_news * 2) and neg >= (mentions * 0.33)
 
             if is_toxic:
                 bot_state.set_cooldown(sym, 7200)
                 if pnl_pct >= 0.8 or pnl_pct <= -0.3:
+                    if sym not in paper.positions:
+                        continue
                     reason = "✂📰 Новости"
                     ex = paper._sell(sym, last, reason, regime_now=regime)
                     paper.log_event(sym, "sell", last, f"Новости {neg}/{mentions}", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
@@ -129,14 +136,12 @@ class PositionManagerWorker:
             )
             pos_age = current_time - pos.get("entry_time", current_time)
 
-            # ВАЖНО: Никогда не режем убыточную сделку посреди канала до ее законного SL (исправление DOT и ZAMA)!
-            # Досрочный выход по слому тренда разрешен ТОЛЬКО для защиты уже имеющегося профита (pnl_pct >= 0.45%)
             should_exit_early = False
             if pos_age >= 2400 and not is_toxic and pnl_pct >= 0.45:
                 if entry_mode != "reversal" and trend_broken:
                     should_exit_early = True
 
-            if should_exit_early:
+            if should_exit_early and sym in paper.positions:
                 reason = "🪫 Слом тренда"
                 ex = paper._sell(sym, last, reason, regime_now=regime)
                 paper.log_event(sym, "sell_profit", last, reason, tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
@@ -145,16 +150,20 @@ class PositionManagerWorker:
                 self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)}{grade_badge(ex)} · {reason}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                 continue
 
+            pos = paper.positions.get(sym)
+            if not pos:
+                continue
+
             max_p = max(pos.get("max_price", last), last)
             pos["max_price"] = max_p
             sl_updated, new_sl, new_state, tag_emoji = update_position_sl(pos, max_p, last_price=last, candles_15m=candles)
-            if sl_updated:
+            if sl_updated and sym in paper.positions:
                 old_sl_str = pos.get("_last_notified_sl_str") or fmt_price(pos.get("sl", 0.0))
                 new_sl_str = fmt_price(new_sl)
                 old_state = pos.get("_last_notified_sl_state") or pos.get("sl_state", "SHIELD")
-                pos["sl"] = new_sl
+                pos["sl"] = max(pos.get("sl", 0.0), new_sl)
                 pos["sl_state"] = new_state
-                pos["max_sl"] = new_sl
+                pos["max_sl"] = pos["sl"]
                 paper.save()
                 paper.log_event(sym, "sl_moved", pos["sl"], tag_emoji, tp=pos.get("tp"), sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
 
@@ -168,6 +177,9 @@ class PositionManagerWorker:
 
             if pos.get("tp1_done") and last >= (pos["tp"] - 0.5 * a):
                 candles_1h = await market_data.get_kline(sym, "60", 250)
+                pos = paper.positions.get(sym)
+                if not pos:
+                    continue
                 next_target, can_expand, phase_reason = calc_runner_target(sym, last, candles, candles_1h, pos=pos)
                 if can_expand and next_target > pos["tp"] * 1.006:
                     old_tp = pos["tp"]
@@ -184,6 +196,8 @@ class PositionManagerWorker:
         # 2. ПРОВЕРКА ОЖИДАЮЩИХ ОРДЕРОВ (Таймаут 45 минут и отказ от hunt_up)
         # =====================================================================
         for order in list(paper.orders):
+            if order not in paper.orders:
+                continue
             sym = order["symbol"]
             t = tickers.get(sym)
             if not t:
@@ -191,6 +205,8 @@ class PositionManagerWorker:
 
             base = sym[:-4]
             name = await get_coin_name(base)
+            if order not in paper.orders:
+                continue
             neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
 
             if neg >= 2 and neg >= (pos_news * 2) and neg >= (mentions * 0.33):
@@ -211,7 +227,7 @@ class PositionManagerWorker:
                 saved_mode=entry_mode,
                 btc_candles=btc_candles,
             )
-            if score_now is None or not candles:
+            if order not in paper.orders or score_now is None or not candles:
                 continue
 
             closes = [c["close"] for c in candles]
@@ -275,8 +291,6 @@ class PositionManagerWorker:
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🚀👋🏻")
                 continue
 
-            # Сокращаем время жизни неисполненной лимитки до 45 минут (2700с),
-            # чтобы не набирать «протухшие» ордера спустя 1.5 часа на общем сливе рынка
             max_order_age = 3600 if entry_mode == "reversal" else 2700
             if order_age > max_order_age:
                 paper.cancel_order(order["id"])
@@ -296,6 +310,8 @@ class PositionManagerWorker:
             old_price = order["price"]
 
             candles_1h = await market_data.get_kline(sym, "60", 250)
+            if order not in paper.orders:
+                continue
             nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles, candles_1h)
             live_sup = nearest_sup if (nearest_sup and sup_touches >= 2) else order.get("nearest_sup")
             live_sup_touches = sup_touches if (nearest_sup and sup_touches >= 2) else order.get("sup_touches", 2 if order.get("nearest_sup") else 0)
@@ -306,7 +322,6 @@ class PositionManagerWorker:
             dev_pct = abs(ideal_price - old_price) / old_price * 100
             in_freeze_zone = abs(t["last"] - old_price) <= (0.45 * a) or (abs(t["last"] - old_price) / old_price * 100) <= 0.35
 
-            # Разрешаем только мягкую коррекцию лимитки ВНИЗ (никакого hunt_up за уходящей вверх свечой!)
             if ideal_price < old_price and dev_pct >= 0.45 and not in_freeze_zone and not heavy_dump_candle:
                 if not (live_sup and ideal_price < live_sup * 1.0015):
                     target_price = ideal_price
@@ -350,7 +365,7 @@ class PositionManagerWorker:
                 e50_1h=e50_1h_val,
             )
 
-            if is_valid and action_type:
+            if is_valid and action_type and order in paper.orders:
                 old_notional = order["qty"] * order["price"]
                 order["price"] = target_price
                 order["qty"] = old_notional / target_price if target_price > 0 else order["qty"]
