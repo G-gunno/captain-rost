@@ -21,54 +21,59 @@ PERIODS = {
 }
 
 
-def _fmt_ts(ts: int, tz) -> str:
+def _fmt_ts(ts: int, tz, with_date: bool = False) -> str:
     if not ts:
         return "—"
-    return datetime.fromtimestamp(int(ts), tz).strftime("%H:%M")
+    fmt = "%d.%m %H:%M" if with_date else "%H:%M"
+    return datetime.fromtimestamp(int(ts), tz).strftime(fmt)
 
 
-async def build_audit_html(tz, public_url: str = "") -> str:
+async def build_audit_html(tz, public_url: str = "", hours: int = 48) -> str:
     """
-    Генерирует интерактивный веб-дашборд инфографики за 24 часа (/audit)
-    с кнопкой полного скриншота всей страницы (включая таблицы и графики Plotly).
+    Генерирует интерактивный веб-дашборд инфографики за выбранный период (по умолчанию 48 часов)
+    с переключателем 24ч / 48ч / 7д и кнопкой полного скриншота всей страницы.
     """
+    hours = max(24, min(720, int(hours or 48)))
+    period_label = "7д" if hours == 168 else f"{hours}ч"
+
     prices = await market_data.get_tickers()
     eq = paper.equity(prices)
     now = datetime.now(tz)
-    cutoff = int(time.time()) - 86400
+    cutoff = int(time.time()) - hours * 3600
 
     locked_usdt = sum(o["qty"] * o["price"] for o in paper.orders)
     avail_usdt = max(0.0, paper.usdt - locked_usdt)
-    metrics_24h = paper.get_metrics(prices, hours=24)
+    metrics_period = paper.get_metrics(prices, hours=hours)
     a_stats = learner.get_grade_a_stats()
 
-    closed_24h = [
+    closed_period = [
         r for r in paper.realized
         if not r.get("partial") and r.get("time", 0) >= cutoff
     ]
-    closed_24h.sort(key=lambda x: x.get("time", 0))
+    closed_period.sort(key=lambda x: x.get("time", 0))
 
-    be_trades = [r for r in closed_24h if r.get("is_be") or is_neutral_be(r.get("pnl_pct", 0.0))]
-    decisive = [r for r in closed_24h if r not in be_trades]
+    be_trades = [r for r in closed_period if r.get("is_be") or is_neutral_be(r.get("pnl_pct", 0.0))]
+    decisive = [r for r in closed_period if r not in be_trades]
     wins = [r for r in decisive if r["pnl"] > 0]
     losses = [r for r in decisive if r["pnl"] <= 0]
     clean_wr = (len(wins) / len(decisive) * 100) if decisive else 0.0
 
     # --- ДАННЫЕ ДЛЯ ГРАФИКОВ PLOTLY ---
-    eq_times = ["Старт 24ч"]
+    eq_times = [f"Старт {period_label}"]
     eq_vals = [0.0]
     eq_texts = ["Начало отсчёта"]
     cum_pnl = 0.0
-    for t in closed_24h:
+    show_date_in_chart = hours > 24
+    for t in closed_period:
         cum_pnl = round(cum_pnl + float(t.get("pnl", 0.0)), 2)
         sym_b = t["symbol"][:-4] if t["symbol"].endswith("USDT") else t["symbol"]
-        eq_times.append(_fmt_ts(t.get("time"), tz) + f" ({sym_b})")
+        eq_times.append(_fmt_ts(t.get("time"), tz, with_date=show_date_in_chart) + f" ({sym_b})")
         eq_vals.append(cum_pnl)
         eq_texts.append(f"{sym_b}: {t['pnl_pct']:+.2f}% ({usd(t['pnl'])}) · {t.get('exit_type', '')}")
 
     sec_pnl = defaultdict(float)
     sec_cnt = defaultdict(int)
-    for t in closed_24h:
+    for t in closed_period:
         s = t.get("sector", "Other")
         sec_pnl[s] += float(t.get("pnl", 0.0))
         sec_cnt[s] += 1
@@ -78,7 +83,7 @@ async def build_audit_html(tz, public_url: str = "") -> str:
     sec_colors = ["#00e676" if v >= 0 else "#ff1744" for v in sec_values]
 
     exit_cnt = defaultdict(int)
-    for t in closed_24h:
+    for t in closed_period:
         exit_cnt[t.get("exit_type", "🛡📉")] += 1
     exit_labels = list(exit_cnt.keys()) or ["Нет сделок"]
     exit_values = list(exit_cnt.values()) or [1]
@@ -142,9 +147,9 @@ async def build_audit_html(tz, public_url: str = "") -> str:
     if not active_rows_html:
         active_rows_html.append("<tr><td colspan='9' class='empty-row'>Открытых позиций и активных ордеров сейчас нет</td></tr>")
 
-    # --- ТАБЛИЦА 2: СВОДНЫЙ РЕЕСТР ПО МОНЕТАМ ЗА 24Ч ---
+    # --- ТАБЛИЦА 2: СВОДНЫЙ РЕЕСТР ПО МОНЕТАМ ---
     by_coin = defaultdict(list)
-    for t in closed_24h:
+    for t in closed_period:
         by_coin[t["symbol"]].append(t)
     for sym in paper.positions:
         by_coin.setdefault(sym, [])
@@ -193,11 +198,11 @@ async def build_audit_html(tz, public_url: str = "") -> str:
         )
 
     if not coin_rows_html:
-        coin_rows_html.append("<tr><td colspan='6' class='empty-row'>Нет данных по монетам за 24 часа</td></tr>")
+        coin_rows_html.append(f"<tr><td colspan='6' class='empty-row'>Нет данных по монетам за {period_label}</td></tr>")
 
-    # --- ТАБЛИЦА 3: ХРОНОЛОГИЧЕСКИЙ ЖУРНАЛ ВСЕХ СДЕЛОК (24Ч) ---
+    # --- ТАБЛИЦА 3: ХРОНОЛОГИЧЕСКИЙ ЖУРНАЛ ВСЕХ СДЕЛОК ---
     trades_rows_html = []
-    for idx, t in enumerate(closed_24h, 1):
+    for idx, t in enumerate(closed_period, 1):
         sym = t["symbol"]
         sym_base = sym[:-4] if sym.endswith("USDT") else sym
         t_em = TIER_EMOJI.get(t.get("tier"), "🐭")
@@ -208,9 +213,9 @@ async def build_audit_html(tz, public_url: str = "") -> str:
         reg_str = (t.get("regime") or "neutral").upper()
         rmode = t.get("risk_mode", "NORMAL")
 
-        t_ord = _fmt_ts(t.get("order_created"), tz)
-        t_in = _fmt_ts(t.get("entry_time"), tz)
-        t_out = _fmt_ts(t.get("time"), tz)
+        t_ord = _fmt_ts(t.get("order_created"), tz, with_date=False)
+        t_in = _fmt_ts(t.get("entry_time"), tz, with_date=False)
+        t_out = _fmt_ts(t.get("time"), tz, with_date=show_date_in_chart)
 
         sc = t.get("score", 0.0)
         thr = t.get("thr", 0.0)
@@ -256,20 +261,24 @@ async def build_audit_html(tz, public_url: str = "") -> str:
         )
 
     if not trades_rows_html:
-        trades_rows_html.append("<tr><td colspan='10' class='empty-row'>За последние 24 часа закрытых сделок нет</td></tr>")
+        trades_rows_html.append(f"<tr><td colspan='10' class='empty-row'>За последние {period_label} закрытых сделок нет</td></tr>")
 
-    pf_val = metrics_24h["profit_factor"]
+    pf_val = metrics_period["profit_factor"]
     pf_str = "—" if pf_val is None else ("∞" if pf_val == float("inf") else f"{pf_val:.2f}")
-    tot_pnl_24 = metrics_24h["total_pnl"]
-    tot_pnl_cls = "pos-val" if tot_pnl_24 >= 0 else "neg-val"
+    tot_pnl = metrics_period["total_pnl"]
+    tot_pnl_cls = "pos-val" if tot_pnl >= 0 else "neg-val"
     curr_reg = bot_state.current_regime.upper()
+
+    btn24_cls = "btn" if hours == 24 else "btn btn-outline"
+    btn48_cls = "btn" if hours == 48 else "btn btn-outline"
+    btn7d_cls = "btn" if hours == 168 else "btn btn-outline"
 
     html_page = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Капитан Рост — Интерактивный Аудит 24ч</title>
+<title>Капитан Рост — Интерактивный Аудит ({period_label})</title>
 <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <style>
@@ -297,11 +306,14 @@ async def build_audit_html(tz, public_url: str = "") -> str:
     flex-wrap: wrap; gap: 10px;
   }}
   .header-title {{ font-size: 18px; font-weight: 700; }}
-  .header-actions {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }}
+  .header-actions {{ display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }}
   .btn {{
     text-decoration: none; color: #fff; background: var(--accent);
-    padding: 8px 14px; border-radius: 6px; font-weight: 600; font-size: 13px;
-    border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 13px; border-radius: 6px; font-weight: 600; font-size: 13px;
+    border: 1px solid transparent; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  }}
+  .btn-outline {{
+    background: #1d2432; color: #b8c4d4; border: 1px solid var(--border);
   }}
   .btn:hover {{ opacity: 0.92; }}
   .btn:disabled {{ opacity: 0.6; cursor: wait; }}
@@ -369,12 +381,15 @@ async def build_audit_html(tz, public_url: str = "") -> str:
 
 <div class="header-bar">
   <div>
-    <div class="header-title">📊 Капитан Рост — Интерактивный Аудит и Инфографика (24ч)</div>
+    <div class="header-title">📊 Капитан Рост — Интерактивный Аудит и Инфографика ({period_label})</div>
     <div class="muted">Срез: {now.strftime('%Y-%m-%d %H:%M:%S %Z')} · Клик по любой монете открывает её интерактивный свечной график</div>
   </div>
   <div class="header-actions" data-html2canvas-ignore="true">
+    <a class="{btn24_cls}" href="/audit?hours=24">24ч</a>
+    <a class="{btn48_cls}" href="/audit?hours=48">48ч</a>
+    <a class="{btn7d_cls}" href="/audit?hours=168">7д</a>
     <button id="screenshot-btn" class="btn btn-shot" onclick="takeFullScreenshot()">📸 Скриншот всей страницы</button>
-    <a class="btn" href="/audit">🔄 Обновить срез</a>
+    <a class="btn" href="/audit?hours={hours}">🔄 Обновить</a>
   </div>
 </div>
 
@@ -385,18 +400,18 @@ async def build_audit_html(tz, public_url: str = "") -> str:
     <div class="muted">Свободно: {usd(avail_usdt)} · Ордера: {usd(locked_usdt)}</div>
   </div>
   <div class="kpi-card">
-    <div class="kpi-label">💵 PnL за 24 часа</div>
-    <div class="kpi-val {tot_pnl_cls}">{usd(tot_pnl_24)}</div>
+    <div class="kpi-label">💵 PnL за {period_label}</div>
+    <div class="kpi-val {tot_pnl_cls}">{usd(tot_pnl)}</div>
     <div class="muted">🏦 Накопления: {usd(paper.funding)}</div>
   </div>
   <div class="kpi-card">
-    <div class="kpi-label">🎯 Чистый Winrate (24ч)</div>
-    <div class="kpi-val">{clean_wr:.1f}% <span class="muted">({len(closed_24h)} сдел.)</span></div>
-    <div class="muted">✅ {len(wins)} · ❌ {len(losses)} · 🛡🔒 {len(be_trades)} · 🔥TP1: {metrics_24h['partial_count']}</div>
+    <div class="kpi-label">🎯 Чистый Winrate ({period_label})</div>
+    <div class="kpi-val">{clean_wr:.1f}% <span class="muted">({len(closed_period)} сдел.)</span></div>
+    <div class="muted">✅ {len(wins)} · ❌ {len(losses)} · 🛡🔒 {len(be_trades)} · 🔥TP1: {metrics_period['partial_count']}</div>
   </div>
   <div class="kpi-card">
     <div class="kpi-label">📊 Profit Factor & Max DD</div>
-    <div class="kpi-val">PF: {pf_str} · DD: {metrics_24h['max_drawdown_pct']:.1f}%</div>
+    <div class="kpi-val">PF: {pf_str} · DD: {metrics_period['max_drawdown_pct']:.1f}%</div>
     <div class="muted">Цель PF ≥ 1.3 · Лимит DD 15%</div>
   </div>
   <div class="kpi-card">
@@ -433,13 +448,13 @@ async def build_audit_html(tz, public_url: str = "") -> str:
   </table>
 </div>
 
-<div class="section-title">2. Сводный реестр по всем монетам за 24 часа (от лучших к худшим)</div>
+<div class="section-title">2. Сводный реестр по всем монетам за {period_label} (от лучших к худшим)</div>
 <div class="table-wrap">
   <table>
     <thead>
       <tr>
         <th>Монета (График)</th><th>Сектор / Тир</th><th style="text-align:center;">Сделок</th>
-        <th>Все закрытые сделки за 24ч</th><th>Открытая позиция сейчас</th><th>Суммарный PnL (% / $)</th>
+        <th>Все закрытые сделки за {period_label}</th><th>Открытая позиция сейчас</th><th>Суммарный PnL (% / $)</th>
       </tr>
     </thead>
     <tbody>
@@ -448,7 +463,7 @@ async def build_audit_html(tz, public_url: str = "") -> str:
   </table>
 </div>
 
-<div class="section-title">3. Детальный хронологический журнал всех закрытых сделок за 24 часа ({len(closed_24h)})</div>
+<div class="section-title">3. Детальный хронологический журнал всех закрытых сделок за {period_label} ({len(closed_period)})</div>
 <div class="table-wrap">
   <table>
     <thead>
@@ -482,7 +497,7 @@ async def build_audit_html(tz, public_url: str = "") -> str:
     fill: 'tozeroy',
     fillcolor: 'rgba(0, 229, 255, 0.08)',
     hovertemplate: '%{{text}}<br>Кумулятивный PnL: <b>$%{{y:.2f}}</b><extra></extra>'
-  }}], Object.assign({{}}, darkLayout, {{ title: 'Кривая кумулятивного PnL ($) за 24ч' }}), {{responsive: true, displayModeBar: false}});
+  }}], Object.assign({{}}, darkLayout, {{ title: 'Кривая кумулятивного PnL ($) за {period_label}' }}), {{responsive: true, displayModeBar: false}});
 
   Plotly.newPlot('chart-sectors', [{{
     x: {json.dumps(sec_values)},
@@ -490,7 +505,7 @@ async def build_audit_html(tz, public_url: str = "") -> str:
     type: 'bar', orientation: 'h',
     marker: {{ color: {json.dumps(sec_colors)} }},
     hovertemplate: '%{{y}}: <b>$%{{x:.2f}}</b><extra></extra>'
-  }}], Object.assign({{}}, darkLayout, {{ title: 'PnL по секторам ($) за 24ч', margin: {{ t: 38, b: 35, l: 95, r: 20 }} }}), {{responsive: true, displayModeBar: false}});
+  }}], Object.assign({{}}, darkLayout, {{ title: 'PnL по секторам ($) за {period_label}', margin: {{ t: 38, b: 35, l: 95, r: 20 }} }}), {{responsive: true, displayModeBar: false}});
 
   Plotly.newPlot('chart-exits', [{{
     labels: {json.dumps(exit_labels, ensure_ascii=False)},
@@ -498,7 +513,7 @@ async def build_audit_html(tz, public_url: str = "") -> str:
     type: 'pie', hole: 0.45,
     textinfo: 'label+value',
     margin: {{ t: 38, b: 20, l: 20, r: 20 }}
-  }}], Object.assign({{}}, darkLayout, {{ title: 'Структура типов выхода (24ч)', showlegend: true }}), {{responsive: true, displayModeBar: false}});
+  }}], Object.assign({{}}, darkLayout, {{ title: 'Структура типов выхода ({period_label})', showlegend: true }}), {{responsive: true, displayModeBar: false}});
 
   async function takeFullScreenshot() {{
     const btn = document.getElementById('screenshot-btn');
@@ -621,7 +636,7 @@ async def build_report(period, tz):
     avail_usdt = max(0.0, paper.usdt - locked_usdt)
     free_pct = avail_usdt / eq * 100 if eq else 0
 
-    lines = [f"📅 <b>{title}</b> 🕘", ""]
+    lines = [f"📅 <b>{title}</b> ({now.strftime('%d.%m')}) 🕘", ""]
     lines.append(f"💰 Свободно: <b>{usd(avail_usdt)}</b> ({free_pct:.0f}%)")
     if locked_usdt > 0:
         lines.append(f"🔒 В ордерах: <b>{usd(locked_usdt)}</b>")
