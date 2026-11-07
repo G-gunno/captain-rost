@@ -16,7 +16,7 @@ MAX_TOTAL_EVENTS = 5000
 
 
 class PaperExchange:
-    """Виртуальная биржа с контролем лимита 3 открытых позиций на тир и полной аналитикой для 48ч аудита."""
+    """Виртуальная биржа с Умным Овербукингом, защитой от каскадного залива (Velocity Shield) и 48ч аналитикой."""
 
     FEE_PCT = 0.10
 
@@ -33,6 +33,9 @@ class PaperExchange:
         self.market_history = []
         self.chart_events = []
         self._last_upload = 0.0
+        self._btc_window = []
+        self._recent_fill_ts = []
+        self._last_velocity_log_ts = 0.0
         self._load()
 
     def _load(self):
@@ -150,9 +153,57 @@ class PaperExchange:
         t_norm = tier or "SMALL"
         return sum(1 for p in self.positions.values() if (p.get("tier") or "SMALL") == t_norm)
 
+    def count_tier_orders(self, tier: str) -> int:
+        t_norm = tier or "SMALL"
+        return sum(1 for o in self.orders if (o.get("tier") or "SMALL") == t_norm)
+
+    def effective_locked_usdt(self) -> float:
+        """
+        Умный Овербукинг кэша:
+        Поскольку в каждом тире может исполниться не более (MAX_POSITIONS_PER_TIER - открыто_в_тире) ордеров,
+        а остальные резервные ордера тира автоматически снимутся, считаем заблокированным только
+        реально исполнимый объём топ-ордеров каждого тира.
+        """
+        if not self.orders:
+            return 0.0
+        orders_by_tier = defaultdict(list)
+        for o in self.orders:
+            t = o.get("tier") or "SMALL"
+            cost = o["qty"] * o["price"] * (1.0 + self.FEE_PCT / 100.0)
+            orders_by_tier[t].append(cost)
+
+        total_locked = 0.0
+        for t, costs in orders_by_tier.items():
+            avail_slots = max(0, MAX_POSITIONS_PER_TIER - self.count_tier_positions(t))
+            if avail_slots > 0:
+                costs.sort(reverse=True)
+                total_locked += sum(costs[:avail_slots])
+        return round(total_locked, 2)
+
     def check_fills(self, prices):
+        now_ts = time.time()
+        btc_last = prices.get("BTCUSDT", {}).get("last", 0.0)
+        is_btc_dumping = False
+        if btc_last > 0:
+            self._btc_window.append((now_ts, btc_last))
+            self._btc_window = [x for x in self._btc_window if now_ts - x[0] <= 300]
+            if len(self._btc_window) >= 2:
+                max_btc_5m = max(x[1] for x in self._btc_window)
+                if max_btc_5m > 0 and (btc_last - max_btc_5m) / max_btc_5m <= -0.0035:
+                    is_btc_dumping = True
+
+        self._recent_fill_ts = [ts for ts in self._recent_fill_ts if now_ts - ts <= 180]
+
         fills = []
-        for order in list(self.orders):
+        # Сортируем ожидающие ордера по приоритету ([💎] A+ и высший балл первыми),
+        # чтобы при одновременном касании цен покупались самые сильные сетапы
+        sorted_orders = sorted(
+            list(self.orders),
+            key=lambda o: (1 if o.get("grade") == "A+" else 0, float(o.get("score", 0.0))),
+            reverse=True,
+        )
+
+        for order in sorted_orders:
             if order not in self.orders:
                 continue
             sym = order["symbol"]
@@ -162,7 +213,6 @@ class PaperExchange:
 
             if order["side"] == "Buy" and last <= order["price"]:
                 tier = order.get("tier") or "SMALL"
-                # Проверяем лимит открытых позиций по тиру (не более 3 позиций одного тира)
                 if sym not in self.positions and self.count_tier_positions(tier) >= MAX_POSITIONS_PER_TIER:
                     self.orders.remove(order)
                     self.log_event(
@@ -174,10 +224,19 @@ class PaperExchange:
                     logger.info(f"PAPER CANCEL {sym}: тир {tier} уже заполнен ({MAX_POSITIONS_PER_TIER} откр. поз.)")
                     continue
 
+                # Velocity Shield: если BTC в моменте валится (<= -0.35% за 5 мин),
+                # не даём налить более 2 новых позиций за 3 минуты (защита от каскадного залива)
+                if is_btc_dumping and len(self._recent_fill_ts) >= 2:
+                    if now_ts - self._last_velocity_log_ts >= 60:
+                        self._last_velocity_log_ts = now_ts
+                        logger.info(f"🛡 Velocity Shield: {sym} придержан (уже 2 покупки за 3 мин на проливе BTC)")
+                    continue
+
                 cost = order["qty"] * order["price"]
                 fee = cost * self.FEE_PCT / 100
                 if cost + fee <= self.usdt:
                     self.usdt -= cost + fee
+                    self._recent_fill_ts.append(now_ts)
                     pos = self.positions.setdefault(sym, {"qty": 0.0, "avg": 0.0})
                     total = pos["qty"] + order["qty"]
                     pos["avg"] = (pos["avg"] * pos["qty"] + cost) / total
@@ -481,6 +540,8 @@ class PaperExchange:
         self.positions.clear()
         self.orders.clear()
         self.chart_events.clear()
+        self._btc_window.clear()
+        self._recent_fill_ts.clear()
         if hasattr(self, "funding_coins"):
             self.funding_coins.clear()
         self.usdt = self.start_usdt
@@ -492,6 +553,9 @@ class PaperExchange:
         eq = self.usdt + self.funding
         for sym, pos in self.positions.items():
             eq += pos["qty"] * prices.get(sym, {}).get("last", 0)
+        for sym, qty in getattr(self, "funding_coins", {}).items():
+            if qty > 0:
+                eq += qty * prices.get(sym, {}).get("last", 0)
         return eq
 
     def get_metrics(self, prices=None, hours=None):
