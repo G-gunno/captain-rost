@@ -4,7 +4,9 @@ from loguru import logger
 
 from bot.core.event_bus import EventBus
 from bot.exchange.paper_exchange import paper
-from bot.strategy.sizing import buy_size, portfolio_limits, entry_offset, min_order_threshold
+from bot.strategy.sizing import (
+    buy_size, entry_offset, min_order_threshold, MAX_POSITIONS_PER_TIER
+)
 from bot.strategy.scanner import get_thresholds
 from bot.strategy.learner import learner
 from bot.strategy.risk import (
@@ -18,14 +20,14 @@ from bot.core.state import bot_state
 
 
 class OrderManagerWorker:
-    """Управляет портфелем: работа на весь доступный капитал с умной ротацией лимиток при нехватке USDT."""
+    """Управляет портфелем: работа на весь капитал, лимит 3 открытых позиций на тир и ротация только при нехватке USDT."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
         self.signal_queue = self.bus.subscribe("SIGNALS_READY", maxsize=2)
 
     async def run(self):
-        logger.info("💼 Order Manager запущен: полная загрузка капитала, 1H Gatekeeper и Ротация...")
+        logger.info("💼 Order Manager запущен: полная загрузка капитала, лимит 3 поз./тир и защита от клонов BTC...")
         while True:
             try:
                 event = await self.signal_queue.get()
@@ -39,7 +41,8 @@ class OrderManagerWorker:
     def _notify(self, text: str, urgent: bool = False):
         self.bus.publish("NOTIFY", {"text": text, "urgent": urgent})
 
-    def _try_rotate_order(self, cand: dict, cand_grade: str, tickers: dict, filter_sector: str = None, reason_tag: str = "ротация") -> bool:
+    def _try_rotate_order(self, cand: dict, cand_grade: str, tickers: dict, reason_tag: str = "освобождение USDT") -> bool:
+        """Снимает старый слабый ордер ТОЛЬКО когда не хватает свободного USDT под новый сильный сигнал."""
         if not paper.orders:
             return False
 
@@ -48,23 +51,20 @@ class OrderManagerWorker:
         eligible = []
 
         for o in paper.orders:
-            if filter_sector and (o.get("sector") or "Other") != filter_sector:
-                continue
-
             o_age = now_ts - o.get("created", now_ts)
             o_grade = o.get("grade", "B")
             o_score = o.get("score", 0.0)
 
-            min_age = 240 if (cand_grade == "A+" and o_grade != "A+") else 480
+            min_age = 300 if (cand_grade == "A+" and o_grade != "A+") else 600
             if o_age < min_age:
                 continue
 
             last_p = tickers.get(o["symbol"], {}).get("last", 0.0)
-            if last_p > 0 and abs(last_p - o["price"]) / o["price"] * 100 <= 0.30:
+            if last_p > 0 and abs(last_p - o["price"]) / o["price"] * 100 <= 0.35:
                 continue
 
             score_diff = cand_score - o_score
-            is_upgrade = (score_diff >= 0.8) or (cand_grade == "A+" and o_grade != "A+" and score_diff >= 0.2) or (o_age >= 1200 and score_diff >= 0.3)
+            is_upgrade = (score_diff >= 1.0) or (cand_grade == "A+" and o_grade != "A+" and score_diff >= 0.4)
             if is_upgrade:
                 priority_key = (1 if o_grade == "A+" else 0, o_score, -o_age)
                 eligible.append((priority_key, o))
@@ -80,7 +80,7 @@ class OrderManagerWorker:
         paper.cancel_order(victim["id"])
         paper.log_event(
             v_sym, "cancel", v_last,
-            f"Ротация -> {cand['symbol'][:-4]} ({victim.get('score', 0):.1f} -> {cand_score:.1f})",
+            f"Ротация ({reason_tag}) -> {cand['symbol'][:-4]} ({victim.get('score', 0):.1f} -> {cand_score:.1f})",
             tp=victim.get("tp"), sl=victim.get("sl"),
             sup=victim.get("nearest_sup"), res=victim.get("nearest_res")
         )
@@ -90,7 +90,7 @@ class OrderManagerWorker:
             f"(score {cand_score:.1f}{' [💎]' if cand_grade == 'A+' else ''})"
         )
         self._notify(
-            f"🔄 <b>Ротация</b> · снят {pair_html(v_sym, victim)}{grade_badge(victim)} ({victim.get('score', 0):.1f}) "
+            f"🔄 <b>Ротация ({reason_tag})</b> · снят {pair_html(v_sym, victim)}{grade_badge(victim)} ({victim.get('score', 0):.1f}) "
             f"➡️ под <b>{cand['symbol'][:-4]}</b>{' [💎]' if cand_grade == 'A+' else ''} ({cand_score:.1f})"
         )
         return True
@@ -102,7 +102,6 @@ class OrderManagerWorker:
 
         equity = paper.equity(tickers)
         thrs = get_thresholds(regime)
-        sec_lim, other_lim = portfolio_limits(equity)
         news_items = await fetch_news_cache()
 
         risk_mode = getattr(learner, "current_risk_mode", "NORMAL")
@@ -121,6 +120,25 @@ class OrderManagerWorker:
             if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
                 continue
 
+            sector = cand.get("sector", "Other")
+            tier = cand.get("tier") or "SMALL"
+            entry_mode = cand.get("entry_mode", "sniper")
+            is_mom = cand.get("is_momentum", False)
+
+            # 1. ПРОВЕРКА ЛИМИТА ТИРА ТОЛЬКО ПО ОТКРЫТЫМ ПОЗИЦИЯМ (не более 3 позиций одного тира)
+            tier_pos_count = sum(1 for p in paper.positions.values() if (p.get("tier") or "SMALL") == tier)
+            if tier_pos_count >= MAX_POSITIONS_PER_TIER:
+                logger.debug(f"OrderManager: {sym} пропущен -> в тире {tier} уже открыто {tier_pos_count}/{MAX_POSITIONS_PER_TIER} позиций")
+                continue
+
+            # 2. Защита от синхронного набора клонов BTC (corr >= 0.78) на падающем рынке
+            cand_corr = float(cand.get("corr") or 0.0)
+            if regime == "bear" and cand_corr >= 0.78:
+                high_corr_pos = sum(1 for p in paper.positions.values() if float(p.get("corr") or 0.0) >= 0.78)
+                if high_corr_pos >= 2:
+                    logger.info(f"OrderManager: {sym} пропущен -> уже открыто {high_corr_pos} позиции с высокой корреляцией к BTC (corr {cand_corr:.2f})")
+                    continue
+
             patterns = cand.get("patterns", [])
             is_accum = "vcp" in patterns
             e21_15m = cand.get("e21", 0.0)
@@ -129,11 +147,6 @@ class OrderManagerWorker:
             bot_state.check_structural_reset(sym, cand["last"], e21_15m, e50_15m)
             if bot_state.is_on_cooldown(sym):
                 continue
-
-            sector = cand.get("sector", "Other")
-            tier = cand.get("tier") or "SMALL"
-            entry_mode = cand.get("entry_mode", "sniper")
-            is_mom = cand.get("is_momentum", False)
 
             if entry_mode == "reversal":
                 can_rev, rev_reason = bot_state.can_enter_reversal(sym, cand["last"], e21_15m)
@@ -147,6 +160,10 @@ class OrderManagerWorker:
                     continue
 
             grade = evaluate_setup_grade(cand)
+            if policy["require_grade_a_for_alt"] and entry_mode in ("reversal", "rocket"):
+                if grade != "A+":
+                    logger.info(f"OrderManager: {sym} пропущен -> режим {risk_mode} требует [💎] A+ для {entry_mode}")
+                    continue
 
             name = await get_coin_name(base)
             neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
@@ -212,16 +229,6 @@ class OrderManagerWorker:
                 logger.info(f"OrderManager: {sym} отклонён -> {rej_reason}")
                 continue
 
-            lim = other_lim if sector == "Other" else sec_lim
-            sector_count = sum(1 for p in paper.positions.values() if (p.get("sector") or "Other") == sector)
-            sector_orders = sum(1 for o in paper.orders if (o.get("sector") or "Other") == sector)
-            if (sector_count + sector_orders) >= lim:
-                if sector_orders > 0 and self._try_rotate_order(cand, grade, tickers, filter_sector=sector, reason_tag=f"лимит сектора {sector}"):
-                    pass
-                else:
-                    logger.debug(f"OrderManager: {sym} пропущен (лимит сектора {sector}: {lim})")
-                    continue
-
             sl_dist_pct = (entry - sl) / entry * 100
             if sl_dist_pct <= 0:
                 continue
@@ -244,8 +251,10 @@ class OrderManagerWorker:
 
             locked_usdt = sum(o["qty"] * o["price"] * (1.0 + paper.FEE_PCT / 100.0) for o in paper.orders)
             free_usdt = max(0.0, paper.usdt - locked_usdt)
+
+            # Ротация ордера срабатывает ТОЛЬКО если свободного кэша осталось меньше минимального ордера!
             if free_usdt < min_usdt_order:
-                if self._try_rotate_order(cand, grade, tickers, reason_tag="освобождение USDT"):
+                if self._try_rotate_order(cand, grade, tickers, reason_tag="нехватка свободного USDT"):
                     locked_usdt = sum(o["qty"] * o["price"] * (1.0 + paper.FEE_PCT / 100.0) for o in paper.orders)
                     free_usdt = max(0.0, paper.usdt - locked_usdt)
 
@@ -254,11 +263,11 @@ class OrderManagerWorker:
                 entry_mode=entry_mode, grade=grade
             )
 
-            size = min(size_base, size_by_risk, free_usdt * 0.98, equity * 0.16)
+            size = min(size_base, size_by_risk, free_usdt * 0.98, equity * 0.14)
             size = round(size, 2)
 
             if size < min_usdt_order:
-                logger.debug(f"OrderManager: {sym} пропущен (размер < мин. порога)")
+                logger.debug(f"OrderManager: {sym} пропущен (свободно ${free_usdt:.2f} < мин. порога ${min_usdt_order:.2f})")
                 continue
 
             qty = size / entry
