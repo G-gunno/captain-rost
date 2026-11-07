@@ -74,7 +74,11 @@ async def audit_handler(request):
     try:
         tz = ZoneInfo(os.getenv("TIMEZONE", "Europe/Moscow"))
         public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
-        html_page = await build_audit_html(tz, public_url=public_url)
+        try:
+            hours = int(request.query.get("hours", 48))
+        except (TypeError, ValueError):
+            hours = 48
+        html_page = await build_audit_html(tz, public_url=public_url, hours=hours)
         compressed_html = gzip.compress(html_page.encode("utf-8"))
         return web.Response(
             body=compressed_html,
@@ -118,9 +122,9 @@ async def chart_handler(request):
                 'background: rgba(30, 30, 30, 0.85); padding: 8px 15px; border-radius: 8px; '
                 'border: 1px solid #444; font-family: Arial, sans-serif; '
                 'box-shadow: 0 4px 6px rgba(0,0,0,0.3); display: flex; align-items: center; flex-wrap: wrap; gap: 4px;">'
-                '<a href="/audit" style="text-decoration: none; color: #00e5ff; background: rgba(0, 229, 255, 0.14); '
+                '<a href="/audit?hours=48" style="text-decoration: none; color: #00e5ff; background: rgba(0, 229, 255, 0.14); '
                 'border: 1px solid rgba(0, 229, 255, 0.4); padding: 5px 10px; margin-right: 6px; border-radius: 4px; '
-                'font-size: 13px; font-weight: bold;">📊 Аудит 24ч</a>'
+                'font-size: 13px; font-weight: bold;">📊 Аудит 48ч</a>'
                 '<button id="chart-shot-btn" onclick="takeChartScreenshot()" '
                 'style="cursor: pointer; color: #00e676; background: rgba(0, 230, 118, 0.16); '
                 'border: 1px solid rgba(0, 230, 118, 0.45); padding: 5px 10px; margin-right: 10px; border-radius: 4px; '
@@ -356,7 +360,7 @@ async def cmd_info(update, context):
 
 @restricted
 async def cmd_help(update, context):
-    await reply(update, "📖 <b>Мои команды</b>\n/status — метрики\n/chart — графики и веб-аудит\n/info — инфо\n/learn — обучение\n/news — аналитика\n/pause, /resume, /exitall\n/log — лог")
+    await reply(update, "📖 <b>Мои команды</b>\n/status — метрики\n/chart — графики и веб-аудит (48ч)\n/info — инфо\n/learn — обучение\n/news — аналитика\n/pause, /resume, /exitall\n/log — лог")
 
 
 @restricted
@@ -517,7 +521,7 @@ async def cmd_chart(update, context):
     public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
 
     if not arg:
-        cutoff = int(time.time()) - 86400
+        cutoff = int(time.time()) - 48 * 3600
         active_syms = {sym: p for sym, p in paper.positions.items()}
         for o in paper.orders:
             if o["symbol"] not in active_syms:
@@ -526,12 +530,12 @@ async def cmd_chart(update, context):
         closed_trades = [t for t in paper.realized if not t.get("partial") and t.get("time", 0) >= cutoff]
 
         lines = [
-            "📈 <b>Графики торгов и Аудит (24ч)</b>",
-            f"🌐 <a href='{public_url}/audit'><b>Открыть интерактивный дашборд инфографики (24ч)</b></a>\n"
+            "📈 <b>Графики торгов и Аудит (48ч)</b>",
+            f"🌐 <a href='{public_url}/audit?hours=48'><b>Открыть интерактивный дашборд инфографики (48ч)</b></a>\n"
         ]
 
         if not active_syms and not closed_trades:
-            lines.append("<i>За последние 24 часа активности не было.</i>")
+            lines.append("<i>За последние 48 часов активности не было.</i>")
             return await reply(update, "\n".join(lines))
 
         if active_syms:
@@ -593,7 +597,7 @@ async def cmd_chart(update, context):
         update,
         f"📈 <b>График торгов {sym}</b>\n\n"
         f"🌐 <a href='{public_url}/chart?symbol={sym}'>Открыть интерактивный график</a>\n"
-        f"📊 <a href='{public_url}/audit'>Открыть общий дашборд аудита (24ч)</a>"
+        f"📊 <a href='{public_url}/audit?hours=48'>Открыть общий дашборд аудита (48ч)</a>"
     )
 
 
@@ -756,7 +760,7 @@ async def run_all(application):
         BotCommand("resume", "▶️ Возобновить"),
         BotCommand("status", "📊 Статус"),
         BotCommand("funding", "🏦 Накопительный фонд"),
-        BotCommand("chart", "📈 Графики и Аудит 24ч"),
+        BotCommand("chart", "📈 Графики и Аудит 48ч"),
         BotCommand("learn", "🧠 Обучение"),
         BotCommand("news", "📰 Новости"),
         BotCommand("exitall", "🛑 Продать всё"),
