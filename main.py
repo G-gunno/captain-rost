@@ -211,11 +211,24 @@ async def chart_handler(request):
 
 async def send_chat(text):
     chat = os.getenv("TELEGRAM_CHAT_ID")
-    if chat and _app:
+    if not (chat and _app):
+        return
+    for attempt in range(3):
         try:
             await _app.bot.send_message(chat_id=chat, text=text, parse_mode="HTML", disable_web_page_preview=True)
+            return
         except BadRequest:
-            await _app.bot.send_message(chat_id=chat, text=text, disable_web_page_preview=True)
+            try:
+                await _app.bot.send_message(chat_id=chat, text=text, disable_web_page_preview=True)
+                return
+            except Exception as e:
+                logger.error(f"send_chat plain fallback error: {e}")
+                return
+        except Exception as e:
+            if attempt < 2:
+                await asyncio.sleep(1.5 * (attempt + 1))
+            else:
+                logger.error(f"send_chat failed after 3 attempts: {e}")
 
 
 async def report_loop():
