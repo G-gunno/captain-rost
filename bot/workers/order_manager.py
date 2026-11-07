@@ -1,11 +1,13 @@
 import time
 import asyncio
+from collections import defaultdict
 from loguru import logger
 
 from bot.core.event_bus import EventBus
 from bot.exchange.paper_exchange import paper
 from bot.strategy.sizing import (
-    buy_size, entry_offset, min_order_threshold, MAX_POSITIONS_PER_TIER
+    buy_size, entry_offset, min_order_threshold,
+    MAX_POSITIONS_PER_TIER, MAX_ORDERS_PER_TIER
 )
 from bot.strategy.scanner import get_thresholds
 from bot.strategy.learner import learner
@@ -20,14 +22,14 @@ from bot.core.state import bot_state
 
 
 class OrderManagerWorker:
-    """Управляет портфелем: работа на весь капитал, лимит 3 открытых позиций на тир и ротация только при нехватке USDT."""
+    """Управляет портфелем: Умный Овербукинг (3 поз. / до 5 орд. на тир), честный резерв USDT и защита от клонов BTC."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
         self.signal_queue = self.bus.subscribe("SIGNALS_READY", maxsize=2)
 
     async def run(self):
-        logger.info("💼 Order Manager запущен: полная загрузка капитала, лимит 3 поз./тир и защита от клонов BTC...")
+        logger.info("💼 Order Manager запущен: Умный Овербукинг, 3 поз./тир и анти-клон фильтр BTC...")
         while True:
             try:
                 event = await self.signal_queue.get()
@@ -41,8 +43,28 @@ class OrderManagerWorker:
     def _notify(self, text: str, urgent: bool = False):
         self.bus.publish("NOTIFY", {"text": text, "urgent": urgent})
 
-    def _try_rotate_order(self, cand: dict, cand_grade: str, tickers: dict, reason_tag: str = "освобождение USDT") -> bool:
-        """Снимает старый слабый ордер ТОЛЬКО когда не хватает свободного USDT под новый сильный сигнал."""
+    def _effective_orders_for_risk(self) -> list:
+        """Возвращает только те ожидающие ордера в каждом тире, которые реально могут исполниться до лимита 3 позиций."""
+        if not paper.orders:
+            return []
+        by_tier = defaultdict(list)
+        for o in paper.orders:
+            by_tier[o.get("tier") or "SMALL"].append(o)
+
+        effective = []
+        for t, ords in by_tier.items():
+            avail_slots = max(0, MAX_POSITIONS_PER_TIER - paper.count_tier_positions(t))
+            if avail_slots > 0:
+                ords_sorted = sorted(
+                    ords,
+                    key=lambda x: (1 if x.get("grade") == "A+" else 0, float(x.get("score", 0.0))),
+                    reverse=True,
+                )
+                effective.extend(ords_sorted[:avail_slots])
+        return effective
+
+    def _try_rotate_order(self, cand: dict, cand_grade: str, tickers: dict, reason_tag: str = "освобождение USDT", target_tier: str = None) -> bool:
+        """Снимает старый слабый ордер при нехватке USDT/риска или при переполнении буфера ордеров конкретного тира."""
         if not paper.orders:
             return False
 
@@ -51,11 +73,14 @@ class OrderManagerWorker:
         eligible = []
 
         for o in paper.orders:
+            if target_tier and (o.get("tier") or "SMALL") != target_tier:
+                continue
+
             o_age = now_ts - o.get("created", now_ts)
             o_grade = o.get("grade", "B")
             o_score = o.get("score", 0.0)
 
-            min_age = 300 if (cand_grade == "A+" and o_grade != "A+") else 600
+            min_age = 180 if target_tier else (300 if (cand_grade == "A+" and o_grade != "A+") else 600)
             if o_age < min_age:
                 continue
 
@@ -64,7 +89,7 @@ class OrderManagerWorker:
                 continue
 
             score_diff = cand_score - o_score
-            is_upgrade = (score_diff >= 1.0) or (cand_grade == "A+" and o_grade != "A+" and score_diff >= 0.4)
+            is_upgrade = (score_diff >= 0.8) or (cand_grade == "A+" and o_grade != "A+" and score_diff >= 0.3)
             if is_upgrade:
                 priority_key = (1 if o_grade == "A+" else 0, o_score, -o_age)
                 eligible.append((priority_key, o))
@@ -108,9 +133,10 @@ class OrderManagerWorker:
         policy = get_trade_policy(risk_mode)
         min_usdt_order = min_order_threshold(equity)
 
+        eff_risk_now = calc_total_open_risk_pct(paper.positions, self._effective_orders_for_risk(), equity)
         logger.info(
             f"💼 OrderManager [{risk_mode}]: кандидатов {len(candidates)}, "
-            f"открытый риск {calc_total_open_risk_pct(paper.positions, paper.orders, equity):.2f}% / {policy['max_portfolio_risk_pct']}%"
+            f"эффективный открытый риск {eff_risk_now:.2f}% / {policy['max_portfolio_risk_pct']}%"
         )
 
         for cand in candidates:
@@ -125,18 +151,20 @@ class OrderManagerWorker:
             entry_mode = cand.get("entry_mode", "sniper")
             is_mom = cand.get("is_momentum", False)
 
-            # 1. ПРОВЕРКА ЛИМИТА ТИРА ТОЛЬКО ПО ОТКРЫТЫМ ПОЗИЦИЯМ (не более 3 позиций одного тира)
-            tier_pos_count = sum(1 for p in paper.positions.values() if (p.get("tier") or "SMALL") == tier)
+            # 1. ПРОВЕРКА ЛИМИТА ТИРА ПО ОТКРЫТЫМ ПОЗИЦИЯМ (макс. 3 позиции одного тира)
+            tier_pos_count = paper.count_tier_positions(tier)
             if tier_pos_count >= MAX_POSITIONS_PER_TIER:
                 logger.debug(f"OrderManager: {sym} пропущен -> в тире {tier} уже открыто {tier_pos_count}/{MAX_POSITIONS_PER_TIER} позиций")
                 continue
 
-            # 2. Защита от синхронного набора клонов BTC (corr >= 0.78) на падающем рынке
+            # 2. Защита от синхронного набора клонов BTC (corr >= 0.75) в BEAR и NEUTRAL
             cand_corr = float(cand.get("corr") or 0.0)
-            if regime == "bear" and cand_corr >= 0.78:
-                high_corr_pos = sum(1 for p in paper.positions.values() if float(p.get("corr") or 0.0) >= 0.78)
-                if high_corr_pos >= 2:
-                    logger.info(f"OrderManager: {sym} пропущен -> уже открыто {high_corr_pos} позиции с высокой корреляцией к BTC (corr {cand_corr:.2f})")
+            if regime in ("bear", "neutral") and cand_corr >= 0.75:
+                max_corr_pos = 2 if regime == "bear" else 3
+                high_corr_pos = sum(1 for p in paper.positions.values() if float(p.get("corr") or 0.0) >= 0.75)
+                high_corr_ord = sum(1 for o in paper.orders if float(o.get("corr") or 0.0) >= 0.75)
+                if high_corr_pos >= max_corr_pos or (high_corr_pos + high_corr_ord) >= (max_corr_pos + 1):
+                    logger.info(f"OrderManager: {sym} пропущен -> лимит BTC-клонов ({high_corr_pos} поз., {high_corr_ord} орд., corr {cand_corr:.2f})")
                     continue
 
             patterns = cand.get("patterns", [])
@@ -163,6 +191,15 @@ class OrderManagerWorker:
             if policy["require_grade_a_for_alt"] and entry_mode in ("reversal", "rocket"):
                 if grade != "A+":
                     logger.info(f"OrderManager: {sym} пропущен -> режим {risk_mode} требует [💎] A+ для {entry_mode}")
+                    continue
+
+            # 3. Умный Овербукинг ордеров внутри тира (до +2 запасных ордера сверх свободных слотов, макс. 5)
+            avail_tier_slots = MAX_POSITIONS_PER_TIER - tier_pos_count
+            max_tier_orders = min(MAX_ORDERS_PER_TIER, avail_tier_slots + 2)
+            tier_ord_count = paper.count_tier_orders(tier)
+            if tier_ord_count >= max_tier_orders:
+                if not self._try_rotate_order(cand, grade, tickers, reason_tag=f"буфер тира {tier}", target_tier=tier):
+                    logger.debug(f"OrderManager: {sym} пропущен -> в тире {tier} уже {tier_ord_count}/{max_tier_orders} ордеров")
                     continue
 
             name = await get_coin_name(base)
@@ -234,12 +271,12 @@ class OrderManagerWorker:
                 continue
 
             trade_risk_budget_pct = policy["risk_per_trade_core"] if entry_mode == "sniper" else policy["risk_per_trade_alt"]
-            current_risk_pct = calc_total_open_risk_pct(paper.positions, paper.orders, equity)
+            current_risk_pct = calc_total_open_risk_pct(paper.positions, self._effective_orders_for_risk(), equity)
             avail_risk_budget_pct = policy["max_portfolio_risk_pct"] - current_risk_pct
 
             if avail_risk_budget_pct <= 0.15:
                 if self._try_rotate_order(cand, grade, tickers, reason_tag="лимит Portfolio VaR"):
-                    current_risk_pct = calc_total_open_risk_pct(paper.positions, paper.orders, equity)
+                    current_risk_pct = calc_total_open_risk_pct(paper.positions, self._effective_orders_for_risk(), equity)
                     avail_risk_budget_pct = policy["max_portfolio_risk_pct"] - current_risk_pct
 
             if avail_risk_budget_pct <= 0.15:
@@ -249,13 +286,13 @@ class OrderManagerWorker:
             effective_risk_pct = min(trade_risk_budget_pct, avail_risk_budget_pct)
             size_by_risk = (equity * (effective_risk_pct / 100.0)) / (sl_dist_pct / 100.0)
 
-            locked_usdt = sum(o["qty"] * o["price"] * (1.0 + paper.FEE_PCT / 100.0) for o in paper.orders)
+            # Считаем свободный USDT через Умный Овербукинг (резервируются только реально исполнимые слоты каждого тира)
+            locked_usdt = paper.effective_locked_usdt()
             free_usdt = max(0.0, paper.usdt - locked_usdt)
 
-            # Ротация ордера срабатывает ТОЛЬКО если свободного кэша осталось меньше минимального ордера!
             if free_usdt < min_usdt_order:
                 if self._try_rotate_order(cand, grade, tickers, reason_tag="нехватка свободного USDT"):
-                    locked_usdt = sum(o["qty"] * o["price"] * (1.0 + paper.FEE_PCT / 100.0) for o in paper.orders)
+                    locked_usdt = paper.effective_locked_usdt()
                     free_usdt = max(0.0, paper.usdt - locked_usdt)
 
             size_base = buy_size(
