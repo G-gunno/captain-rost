@@ -41,7 +41,7 @@ class Shadow:
         self.tuning = {
             "auto": True,
             "nudge_rocket": 0.0, "nudge_sniper": 0.0, "nudge_reversal": 0.0,
-            "hunt": -0.004, "near": -0.0015, "capture": +0.002,
+            "hunt": -0.0035, "near": -0.0015, "capture": +0.002,
             "sl_mult": 1.0, "tp_mult": 1.0,
             "signal_windows": {"rsi_hi": 90, "chg_hi": 30, "vol_lo": 1.3},
         }
@@ -63,7 +63,10 @@ class Shadow:
             self.agg = data.get("agg", {})
             self.cooldown = data.get("cooldown", {})
             self.tuning.update(data.get("tuning", {}))
-            logger.info(f"shadow: загружен ({len(self.episodes)} эпизодов)")
+            # Авто-лечение слишком глубокого отступа hunt (фикс -0.007 -> -0.0035)
+            if float(self.tuning.get("hunt", -0.0035)) < -0.0042:
+                self.tuning["hunt"] = -0.0035
+            logger.info(f"shadow: загружен ({len(self.episodes)} эпизодов, hunt={self.tuning['hunt']})")
 
     def save(self):
         payload = {"episodes": self.episodes, "agg": self.agg,
@@ -269,7 +272,6 @@ class Shadow:
                     mode_traded += a["traded"]
                     mode_sum24 += a.get("sum24", 0.0)
 
-            # Не закручиваем гайки во флэте: повышаем порог только при реальном сливе (avg_24 < -1.0% и pump_rate < 0.12)
             if mode_n >= 12:
                 pump_rate = mode_pumps / mode_n
                 avg_24 = mode_sum24 / mode_n
@@ -298,12 +300,13 @@ class Shadow:
             avg_pull = sum_pull_pump / total_pumps
             avg_mae = sum_mae_pump / total_pumps
 
-            if total_missed_pumps > 6:
-                self.tuning["hunt"] = round(max(-0.006, min(-0.001, avg_pull / 100 * 0.25)), 4)
+            # Не даём автотюну занижать hunt глубже -0.40% (-0.0040), чтобы не упускать ракеты (фикс ELSA, AAVE)
+            if total_missed_pumps > 4:
+                self.tuning["hunt"] = round(max(-0.0032, min(-0.0015, avg_pull / 100 * 0.22)), 4)
             else:
-                self.tuning["hunt"] = round(max(-0.007, min(-0.002, avg_pull / 100 * 0.45)), 4)
+                self.tuning["hunt"] = round(max(-0.0040, min(-0.0018, avg_pull / 100 * 0.35)), 4)
 
-            self.tuning["sl_mult"] = round(max(0.85, min(1.3, 1.0 + abs(avg_mae) / 100 * 0.25)), 2)
+            self.tuning["sl_mult"] = round(max(0.85, min(1.25, 1.0 + abs(avg_mae) / 100 * 0.25)), 2)
 
         self._apply_weight_lift()
         self._calibrate_signal_windows()
@@ -424,7 +427,7 @@ class Shadow:
         self.tuning = {
             "auto": True,
             "nudge_rocket": 0.0, "nudge_sniper": 0.0, "nudge_reversal": 0.0,
-            "hunt": -0.004, "near": -0.0015, "capture": +0.002,
+            "hunt": -0.0035, "near": -0.0015, "capture": +0.002,
             "sl_mult": 1.0, "tp_mult": 1.0,
             "signal_windows": {"rsi_hi": 90, "chg_hi": 30, "vol_lo": 1.3},
         }
