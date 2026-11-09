@@ -22,14 +22,14 @@ from bot.core.state import bot_state
 
 
 class OrderManagerWorker:
-    """Управляет портфелем: Умный Овербукинг (3 поз. / до 5 орд. на тир), честный резерв USDT и защита от клонов BTC."""
+    """Управляет портфелем: Умный Овербукинг (3 поз. / до 5 орд. на тир), ротация строго после валидации SL/TP."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
         self.signal_queue = self.bus.subscribe("SIGNALS_READY", maxsize=2)
 
     async def run(self):
-        logger.info("💼 Order Manager запущен: Умный Овербукинг, 3 поз./тир и анти-клон фильтр BTC...")
+        logger.info("💼 Order Manager запущен: Умный Овербукинг, 3 поз./тир и безопасная ротация...")
         while True:
             try:
                 event = await self.signal_queue.get()
@@ -64,7 +64,7 @@ class OrderManagerWorker:
         return effective
 
     def _try_rotate_order(self, cand: dict, cand_grade: str, tickers: dict, reason_tag: str = "освобождение USDT", target_tier: str = None) -> bool:
-        """Снимает старый слабый ордер при нехватке USDT/риска или при переполнении буфера ордеров конкретного тира."""
+        """Снимает старый слабый ордер ТОЛЬКО после того, как новый кандидат полностью прошёл валидацию SL/TP."""
         if not paper.orders:
             return False
 
@@ -193,15 +193,6 @@ class OrderManagerWorker:
                     logger.info(f"OrderManager: {sym} пропущен -> режим {risk_mode} требует [💎] A+ для {entry_mode}")
                     continue
 
-            # 3. Умный Овербукинг ордеров внутри тира (до +2 запасных ордера сверх свободных слотов, макс. 5)
-            avail_tier_slots = MAX_POSITIONS_PER_TIER - tier_pos_count
-            max_tier_orders = min(MAX_ORDERS_PER_TIER, avail_tier_slots + 2)
-            tier_ord_count = paper.count_tier_orders(tier)
-            if tier_ord_count >= max_tier_orders:
-                if not self._try_rotate_order(cand, grade, tickers, reason_tag=f"буфер тира {tier}", target_tier=tier):
-                    logger.debug(f"OrderManager: {sym} пропущен -> в тире {tier} уже {tier_ord_count}/{max_tier_orders} ордеров")
-                    continue
-
             name = await get_coin_name(base)
             neg, pos_news, mentions, _ = check_sentiment(news_items, [base, name])
             if neg >= 2 and neg >= (pos_news * 2) and neg >= (mentions * 0.33):
@@ -212,20 +203,25 @@ class OrderManagerWorker:
             thr = cand.get("thr") or thrs.get(entry_mode, 6.0)
             off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], entry_mode, tier=tier, is_accumulation=is_accum)
 
+            # Для высокобалльных сетапов (score >= 8.5 или [💎] A+ в sniper/rocket) ставим более плотный вход,
+            # чтобы не упускать ракеты вроде ELSA (9.7) и AAVE [💎] на -0.45%
+            if entry_mode in ("sniper", "rocket") and (cand["score"] >= 8.5 or grade == "A+"):
+                off = max(off, -0.0028 if tier in ("SMALL", "MICRO") else -0.0020)
+
             t_data = tickers.get(sym, {})
             bid1 = t_data.get("bid1", cand["last"])
             ideal_entry = cand["last"] * (1 + off)
-            entry = min(ideal_entry, bid1 * 0.9990)
+            entry = min(ideal_entry, bid1 * 0.9992)
 
             wick_entry = cand.get("wick_entry_price")
             if entry_mode == "reversal" and wick_entry and 0 < wick_entry < entry:
-                entry = max(wick_entry, cand["last"] * 0.988)
+                entry = max(wick_entry, cand["last"] * 0.990)
 
             sup = cand.get("nearest_sup")
             sup_touches = cand.get("sup_touches", 0)
             if sup and sup_touches >= 2 and not is_mom:
                 retest_floor = sup * 1.0012
-                if entry < sup and retest_floor <= cand["last"] * 0.9975:
+                if entry < sup and retest_floor <= cand["last"] * 0.9980:
                     entry = retest_floor
 
             off = (entry - cand["last"]) / cand["last"] if cand["last"] > 0 else off
@@ -270,6 +266,15 @@ class OrderManagerWorker:
             if sl_dist_pct <= 0:
                 continue
 
+            # 3. ТЕПЕРЬ (после полной валидации SL/TP!) проверяем буфер ордеров тира
+            avail_tier_slots = MAX_POSITIONS_PER_TIER - tier_pos_count
+            max_tier_orders = min(MAX_ORDERS_PER_TIER, avail_tier_slots + 2)
+            tier_ord_count = paper.count_tier_orders(tier)
+            if tier_ord_count >= max_tier_orders:
+                if not self._try_rotate_order(cand, grade, tickers, reason_tag=f"буфер тира {tier}", target_tier=tier):
+                    logger.debug(f"OrderManager: {sym} пропущен -> в тире {tier} уже {tier_ord_count}/{max_tier_orders} ордеров")
+                    continue
+
             trade_risk_budget_pct = policy["risk_per_trade_core"] if entry_mode == "sniper" else policy["risk_per_trade_alt"]
             current_risk_pct = calc_total_open_risk_pct(paper.positions, self._effective_orders_for_risk(), equity)
             avail_risk_budget_pct = policy["max_portfolio_risk_pct"] - current_risk_pct
@@ -286,7 +291,6 @@ class OrderManagerWorker:
             effective_risk_pct = min(trade_risk_budget_pct, avail_risk_budget_pct)
             size_by_risk = (equity * (effective_risk_pct / 100.0)) / (sl_dist_pct / 100.0)
 
-            # Считаем свободный USDT через Умный Овербукинг (резервируются только реально исполнимые слоты каждого тира)
             locked_usdt = paper.effective_locked_usdt()
             free_usdt = max(0.0, paper.usdt - locked_usdt)
 
