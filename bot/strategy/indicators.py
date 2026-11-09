@@ -55,7 +55,7 @@ def _dedup_levels(levels):
     return deduped
 
 
-def _count_spaced_touches(price_target: float, points: list, tol: float = 0.005) -> int:
+def _count_spaced_touches(price_target: float, points: list, tol: float = 0.005, is_res: bool = False) -> int:
     if price_target <= 0:
         return 0
     matched = [pt for pt in points if abs(pt[0] - price_target) / price_target <= tol]
@@ -79,8 +79,13 @@ def _count_spaced_touches(price_target: float, points: list, tol: float = 0.005)
     if h1_touches_count > 0 and "15m" in last_idx_by_tf:
         touches_weight = max(2, touches_weight - 1)
 
-    if touches_weight >= 4 and h1_touches_count < 2:
-        touches_weight = 3
+    # Для сопротивления статус «капитальной часовой стены» (вес >= 6) даём только при >= 3 реальных касаниях на 1H
+    if is_res:
+        if touches_weight >= 6 and h1_touches_count < 3:
+            touches_weight = 5
+    else:
+        if touches_weight >= 4 and h1_touches_count < 2:
+            touches_weight = 3
 
     return touches_weight
 
@@ -115,13 +120,14 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72
 
     unique_highs = {pt[0] for pt in high_points if pt[0] > 0}
     clusters_res = []
-    recent_closes = [c["close"] for c in recent_15m[-32:]] if len(recent_15m) >= 32 else [c["close"] for c in recent_15m]
+    recent_closes = [c["close"] for c in recent_15m[-36:]] if len(recent_15m) >= 36 else [c["close"] for c in recent_15m]
     max_recent_close = max(recent_closes) if recent_closes else 0.0
 
     for h in unique_highs:
-        touches = _count_spaced_touches(h, high_points, tol=0.005)
-        if touches >= 4 and max_recent_close > h * 1.003:
-            touches = 3
+        touches = _count_spaced_touches(h, high_points, tol=0.005, is_res=True)
+        # Если цена недавно уже закрывалась выше этого уровня — уровень распилен и не является капитальной стеной
+        if touches >= 6 and max_recent_close > h * 1.0025:
+            touches = 4
         if touches >= 2:
             clusters_res.append((h, touches))
     clusters_res.sort(key=lambda x: x[0])
@@ -129,7 +135,7 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72
     unique_lows = {pt[0] for pt in low_points if pt[0] > 0}
     clusters_sup = []
     for l in unique_lows:
-        touches = _count_spaced_touches(l, low_points, tol=0.005)
+        touches = _count_spaced_touches(l, low_points, tol=0.005, is_res=False)
         if touches >= 2:
             clusters_sup.append((l, touches))
     clusters_sup.sort(key=lambda x: x[0], reverse=True)
