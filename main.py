@@ -627,7 +627,7 @@ async def cmd_status(update, context):
         prices = await market_data.get_tickers()
         eq = paper.equity(prices)
 
-        locked_usdt = sum(o["qty"] * o["price"] for o in paper.orders)
+        locked_usdt = paper.effective_locked_usdt()
         available_usdt = max(0.0, paper.usdt - locked_usdt)
         free_pct = available_usdt / eq * 100 if eq else 0
 
