@@ -27,7 +27,15 @@ _instruments_cache = {"data": None, "ts": 0}
 STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
                 "USD1", "USDD", "EUR", "EURT", "AEUR", "USDT",
                 "RLUSD", "PYUSD", "EURI", "USDS", "USD0", "FRAX",
-                "LUSD", "GUSD", "XUSD", "USDX", "CUSD", "SUSD"}
+                "LUSD", "GUSD", "XUSD", "USDX", "CUSD", "SUSD",
+                "PAXG", "XAUT"}
+
+# Исключаем токенизированные акции (xStocks), которые стоят без движения вне сессии США (фикс AMZNX)
+SYNTHETIC_BASES = {
+    "AMZNX", "TSLAX", "NVDAX", "AAPLX", "COINX", "MSTRX",
+    "GOOGLX", "METAX", "SPYX", "QQQX", "HOODX", "CRCLX",
+    "MCDX", "NFLXX", "DFDVX", "MSFTX", "BRKX", "INTCX",
+}
 
 BASE_THRESHOLDS = {
     "bull": {"rocket": 6.0, "sniper": 5.5, "reversal": 5.2},
@@ -84,7 +92,7 @@ def is_tradable(symbol):
     if not symbol.endswith("USDT"):
         return False
     base = symbol[:-4]
-    if base in STABLE_BASES:
+    if base in STABLE_BASES or base in SYNTHETIC_BASES:
         return False
     if base.endswith(("3L", "3S", "5L", "5S")):
         return False
@@ -236,20 +244,22 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     has_moderate_sup = bool(nearest_sup and sup_touches >= 2 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 2.2 * a15)
 
     bottom_reclaim = False
-    if pos_in_48h <= 0.48 and has_moderate_sup and candles_15m and len(candles_15m) >= 25:
+    if pos_in_48h <= 0.42 and has_moderate_sup and candles_15m and len(candles_15m) >= 25:
         c15_closes = [c["close"] for c in candles_15m]
         e21_15m = ema(c15_closes, 21)[-1]
         if c15_closes[-1] >= e21_15m * 0.996 or candles_15m[-2]["close"] >= candles_15m[-2]["open"]:
             bottom_reclaim = True
 
+    # Для 1H_SUPPORT_ONLY (reversal) ограничиваем зону нижней частью 48ч-диапазона (pos_in_48h <= 0.42),
+    # чтобы не ловить ножи в середине канала (фикс NEARUSDT #4 на диап. 46%)
     if last_1h < e50_1h and e50_falling_48h:
         dist_below_e50_1h = (e50_1h - last_1h) / a_1h if a_1h > 0 else 0.0
-        if (has_strong_slab or has_moderate_sup or bottom_reclaim) and dist_below_e50_1h <= 3.6 and pos_in_48h <= 0.55 and drop_from_48h_high_pct < 18.0:
+        if (has_strong_slab or has_moderate_sup or bottom_reclaim) and dist_below_e50_1h <= 3.6 and pos_in_48h <= 0.42 and drop_from_48h_high_pct < 18.0:
             tag_str = f"1H плита в даунтренде ({sup_touches}x)" if sup_touches >= 2 else "разворот со дна 48ч"
             return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"{tag_str} (48ч {chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
-        return "1H_BAN", e21_1h, e50_1h, f"1H 48ч даунтренд без плиты ({chg_48h:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
+        return "1H_BAN", e21_1h, e50_1h, f"1H 48ч даунтренд без плиты на дне ({chg_48h:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    if (has_strong_slab or has_moderate_sup or bottom_reclaim) and pos_in_48h <= 0.60:
+    if (has_strong_slab or has_moderate_sup or bottom_reclaim) and pos_in_48h <= 0.45:
         return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"1H опора на плиту ({sup_touches}x, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
     return "1H_BAN", e21_1h, e50_1h, f"1H нет тренда и нет плиты за 48ч ({chg_48h:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
@@ -540,9 +550,9 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
 
     nearest_res, res_touches, nearest_sup, sup_touches = find_sr_levels(candles_15m, candles_1h)
 
-    if nearest_res and res_touches >= 4 and a15 > 0 and not is_open_pos:
+    if nearest_res and res_touches >= 6 and a15 > 0 and not is_open_pos:
         dist_to_res = nearest_res - last
-        if dist_to_res < 0.4 * a15 or (dist_to_res / last * 100) < 0.28:
+        if dist_to_res < 0.4 * a15 or (dist_to_res / last * 100) < 0.24:
             score -= 3.5
             reasons.append(f"в упор к капитальной стене ${fmt_price(nearest_res)} ({res_touches}x)")
 
@@ -563,14 +573,14 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
                 score += sup_bonus
                 reasons.append(f"плита поддержки ${fmt_price(nearest_sup)} ({sup_touches}x, +{sup_bonus:.1f})")
                 keys.append("support_bounce")
-                if sup_touches >= 2 and "reversal" not in matched_modes and (any(p in pattern_keys for p in ("pinbar", "divergence")) or (closed_candle_holds_sup and r <= 50)):
+                if sup_touches >= 2 and "reversal" not in matched_modes and (any(p in pattern_keys for p in ("pinbar", "divergence")) or (closed_candle_holds_sup and r <= 48)):
                     matched_modes.append("reversal")
 
     gate_1h, e21_1h, e50_1h, gate_reason, chg_48h, pos_in_48h = validate_1h_structure(
         candles_1h, nearest_sup, sup_touches, a15, candles_15m=candles_15m, patterns=pattern_keys
     )
 
-    if chg_48h > 16.0 or pos_in_48h > 0.55:
+    if chg_48h > 14.0 or pos_in_48h > 0.42:
         matched_modes = [m for m in matched_modes if m != "reversal"]
 
     if candles_1h and len(candles_1h) >= 50:
@@ -587,9 +597,9 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
 
         if gate_1h == "1H_SUPPORT_ONLY":
             matched_modes = [m for m in matched_modes if m == "reversal"]
-            if not matched_modes and sup_is_near and sup_touches >= 2 and (
+            if not matched_modes and sup_is_near and sup_touches >= 2 and pos_in_48h <= 0.42 and (
                 any(p in pattern_keys for p in ("pinbar", "divergence")) or
-                (closed_candle_holds_sup and r <= 52)
+                (closed_candle_holds_sup and r <= 48)
             ):
                 matched_modes = ["reversal"]
 
@@ -821,7 +831,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             else:
                 if "rocket" in modes and ("breakout" in pats_now or signal_values.get("pos_in_48h", 0.5) > 0.62):
                     entry_mode = "rocket"
-                elif "reversal" in modes:
+                elif "reversal" in modes and signal_values.get("pos_in_48h", 0.5) <= 0.42:
                     entry_mode = "reversal"
                 elif "rocket" in modes:
                     entry_mode = "rocket"
@@ -854,7 +864,8 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                     if curr_15["close"] < curr_15["open"] and (curr_15["open"] - curr_15["close"]) > 0.60 * a:
                         tactical_hold = True
                 elif entry_mode == "reversal":
-                    # Защита от отвесного ножа: блокируем только сильную сливную свечу или пробой самой плиты вниз
+                    if signal_values.get("pos_in_48h", 0.5) > 0.42:
+                        tactical_hold = True
                     if curr_15["close"] < curr_15["open"] and (curr_15["open"] - curr_15["close"]) > 0.48 * a:
                         tactical_hold = True
                     if closed_15["close"] < closed_15["open"] and (closed_15["open"] - closed_15["close"]) > 0.55 * a and curr_15["close"] < closed_15["low"]:
@@ -967,7 +978,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 "res_touches": signal_values.get("res_touches", 0),
                 "nearest_sup": signal_values.get("nearest_sup"),
                 "sup_touches": signal_values.get("sup_touches", 0),
-                "recent_high": signal_values.get("recent_low_2h"),
+                "recent_high": signal_values.get("recent_high"),
                 "recent_low_2h": signal_values.get("recent_low_2h"),
                 "recent_low_6": signal_values.get("recent_low_6"),
                 "e21": signal_values.get("e21"),
