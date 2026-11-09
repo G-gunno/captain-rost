@@ -36,6 +36,7 @@ class PaperExchange:
         self._btc_window = []
         self._recent_fill_ts = []
         self._last_velocity_log_ts = 0.0
+        self._auto_cancelled = []
         self._load()
 
     def _load(self):
@@ -96,6 +97,11 @@ class PaperExchange:
         if time.time() - self._last_upload > 60:
             self._last_upload = time.time()
             upload_state(REMOTE_PATH, payload)
+
+    def pop_auto_cancelled(self) -> list:
+        items = list(self._auto_cancelled)
+        self._auto_cancelled.clear()
+        return items
 
     def log_event(self, symbol, ev_type, price, text="", rsi_val=None, mode=None, tp=None, sl=None, sup=None, res=None):
         if not hasattr(self, "chart_events"):
@@ -195,8 +201,6 @@ class PaperExchange:
         self._recent_fill_ts = [ts for ts in self._recent_fill_ts if now_ts - ts <= 180]
 
         fills = []
-        # Сортируем ожидающие ордера по приоритету ([💎] A+ и высший балл первыми),
-        # чтобы при одновременном касании цен покупались самые сильные сетапы
         sorted_orders = sorted(
             list(self.orders),
             key=lambda o: (1 if o.get("grade") == "A+" else 0, float(o.get("score", 0.0))),
@@ -215,6 +219,7 @@ class PaperExchange:
                 tier = order.get("tier") or "SMALL"
                 if sym not in self.positions and self.count_tier_positions(tier) >= MAX_POSITIONS_PER_TIER:
                     self.orders.remove(order)
+                    self._auto_cancelled.append(order)
                     self.log_event(
                         sym, "cancel", last,
                         f"Лимит позиций тира {tier} ({MAX_POSITIONS_PER_TIER}/{MAX_POSITIONS_PER_TIER})",
@@ -224,8 +229,6 @@ class PaperExchange:
                     logger.info(f"PAPER CANCEL {sym}: тир {tier} уже заполнен ({MAX_POSITIONS_PER_TIER} откр. поз.)")
                     continue
 
-                # Velocity Shield: если BTC в моменте валится (<= -0.35% за 5 мин),
-                # не даём налить более 2 новых позиций за 3 минуты (защита от каскадного залива)
                 if is_btc_dumping and len(self._recent_fill_ts) >= 2:
                     if now_ts - self._last_velocity_log_ts >= 60:
                         self._last_velocity_log_ts = now_ts
@@ -286,13 +289,13 @@ class PaperExchange:
                     fills.append(order)
                     logger.info(f"PAPER FILL BUY {sym} {order['qty']} @ {order['price']} (tier={tier})")
 
-                    # Если после покупки тир достиг лимита в 3 открытые позиции — снимаем лишние ожидающие ордера этого тира
                     if self.count_tier_positions(tier) >= MAX_POSITIONS_PER_TIER:
                         for other_o in list(self.orders):
                             if (other_o.get("tier") or "SMALL") == tier:
                                 o_sym = other_o["symbol"]
                                 o_last = prices.get(o_sym, {}).get("last", other_o["price"])
                                 self.orders.remove(other_o)
+                                self._auto_cancelled.append(other_o)
                                 self.log_event(
                                     o_sym, "cancel", o_last,
                                     f"Наполнен лимит 3 поз. тира {tier}",
@@ -421,7 +424,7 @@ class PaperExchange:
             else:
                 exit_type = "🛡📉"
         else:
-            exit_type = "EARLY"
+            exit_type = "🛡🔒" if is_be else "EARLY"
 
         soft = False
         regime_changed = (
@@ -542,6 +545,7 @@ class PaperExchange:
         self.chart_events.clear()
         self._btc_window.clear()
         self._recent_fill_ts.clear()
+        self._auto_cancelled.clear()
         if hasattr(self, "funding_coins"):
             self.funding_coins.clear()
         self.usdt = self.start_usdt
@@ -601,8 +605,8 @@ class PaperExchange:
         decisive_count = len(decisive)
 
         if decisive_count > 0:
-            avg_win = sum_win / len(wins) if wins else 0
-            avg_loss = sum_loss / len(losses) if losses else 0
+            avg_win = sum(r["pnl"] for r in wins) / len(wins) if wins else 0
+            avg_loss = abs(sum(r["pnl"] for r in losses)) / len(losses) if losses else 0
             winrate = len(wins) / decisive_count
             lossrate = 1 - winrate
             expectancy = (winrate * avg_win) - (lossrate * avg_loss)
