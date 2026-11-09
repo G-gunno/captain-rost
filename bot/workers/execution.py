@@ -23,7 +23,7 @@ class ExecutionRiskWorker:
         self._btc_history = []
 
     async def run(self) -> None:
-        logger.info("⚡ Execution Worker запущен: Дышащий Коридор SL/TP и исполнение позиций...")
+        logger.info("⚡ Execution Worker запущен: Дышащий Коридор SL/TP (35% TP1 / 65% Runner) и исполнение позиций...")
         await asyncio.gather(
             self._price_loop(),
             self._emergency_loop()
@@ -90,6 +90,13 @@ class ExecutionRiskWorker:
                 "urgent": False,
             })
 
+        # Отправляем уведомления по всем резервным ордерам, снятым из-за заполнения лимита 3 позиций тира
+        for ac in paper.pop_auto_cancelled():
+            self.bus.publish("NOTIFY", {
+                "text": f"ℹ️ <b>Снят резервный ордер</b> · {pair_html(ac['symbol'], ac)}{grade_badge(ac)} · тир {ac.get('tier', 'SMALL')} заполнен (3/3)",
+                "urgent": False,
+            })
+
         state_changed = False
 
         for sym, pos in list(paper.positions.items()):
@@ -122,8 +129,9 @@ class ExecutionRiskWorker:
                 candles_1h = await market_data.get_kline(sym, "60", 250)
 
                 if not pos.get("tp1_done"):
-                    is_defensive = (pos.get("entry_mode") == "reversal") or (bot_state.current_regime == "bear")
-                    tp1_ratio = 0.65 if is_defensive else 0.55
+                    # На TP1 продаём меньшую часть (35% для sniper/rocket, 45% для reversal),
+                    # оставляя 65% (55%) позиции на большой трендовый раннер!
+                    tp1_ratio = 0.45 if pos.get("entry_mode") == "reversal" else 0.35
                     part_qty = pos["qty"] * tp1_ratio
                     ex = paper.sell_partial(sym, part_qty, pos["tp"], "🔥 TP1")
                     pos["tp1_done"] = True
@@ -131,7 +139,7 @@ class ExecutionRiskWorker:
                     shadow.mark_success(sym)
 
                     next_target, _, _ = calc_runner_target(sym, last, candles_15m, candles_1h, pos=pos)
-                    pos["tp"] = max(pos["tp"] * 1.015, next_target)
+                    pos["tp"] = max(pos["tp"] * 1.025, next_target)
 
                     _, new_sl, new_state, _ = update_position_sl(pos, max(pos.get("max_price", last), last), last_price=last, candles_15m=candles_15m)
                     pos["sl"] = new_sl
@@ -142,9 +150,10 @@ class ExecutionRiskWorker:
                     state_changed = True
 
                     pct_label = int(round(tp1_ratio * 100))
+                    runner_label = 100 - pct_label
                     self.bus.publish("NOTIFY", {
                         "text": (
-                            f"🔥 <b>TP1</b> · {pair_html(sym, ex)}{grade_badge(pos)} · {pct_label}%\n"
+                            f"🔥 <b>TP1 ({pct_label}%)</b> · {pair_html(sym, ex)}{grade_badge(pos)} · в раннер {runner_label}%\n"
                             f"🟢 {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}\n"
                             f"TP🏃🏻‍➡️ {fmt_price(pos['tp'])} · {sl_emoji(new_state)} {fmt_price(pos['sl'])}"
                         ),
@@ -153,10 +162,10 @@ class ExecutionRiskWorker:
                 else:
                     next_target, can_expand, phase_reason = calc_runner_target(sym, last, candles_15m, candles_1h, pos=pos)
 
-                    if can_expand and next_target > pos["tp"] * 1.008:
+                    if can_expand and next_target > pos["tp"] * 1.010:
                         old_tp = pos["tp"]
                         pos["tp"] = next_target
-                        pos["sl"] = max(pos["sl"], round(old_tp * 0.995, 8))
+                        pos["sl"] = max(pos["sl"], round(old_tp * 0.992, 8))
                         tp1_p = pos.get("tp1_price") or pos.get("initial_tp") or 0.0
                         new_state = "ABOVE_TP1" if (tp1_p > 0 and pos["sl"] >= tp1_p) else "TRAILING_RUNNER"
                         pos["sl_state"] = new_state
@@ -175,13 +184,13 @@ class ExecutionRiskWorker:
                         })
                     elif phase_reason in ("climax_freeze", "shelf_freeze"):
                         old_tp = pos["tp"]
-                        candle_low = candles_15m[-1]["low"] if candles_15m else last * 0.993
-                        tight_sl = round(max(pos["sl"], old_tp * 0.995, candle_low * 0.998, last * 0.993), 8)
-                        if tight_sl >= last * 0.997:
-                            tight_sl = round(last * 0.995, 8)
+                        candle_low = candles_15m[-1]["low"] if candles_15m else last * 0.991
+                        tight_sl = round(max(pos["sl"], old_tp * 0.992, candle_low * 0.996, last * 0.991), 8)
+                        if tight_sl >= last * 0.995:
+                            tight_sl = round(last * 0.992, 8)
                         pos["sl"] = tight_sl
                         pos["sl_state"] = "ABOVE_TP1"
-                        pos["tp"] = round(max(old_tp, last) * 1.018, 8)
+                        pos["tp"] = round(max(old_tp, last) * 1.022, 8)
                         pos["_last_notified_sl_str"] = fmt_price(pos["sl"])
                         pos["_last_notified_sl_state"] = "ABOVE_TP1"
                         pos["_last_sl_notify_ts"] = now_ts
