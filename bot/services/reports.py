@@ -41,7 +41,7 @@ async def build_audit_html(tz, public_url: str = "", hours: int = 48) -> str:
     now = datetime.now(tz)
     cutoff = int(time.time()) - hours * 3600
 
-    locked_usdt = sum(o["qty"] * o["price"] for o in paper.orders)
+    locked_usdt = paper.effective_locked_usdt()
     avail_usdt = max(0.0, paper.usdt - locked_usdt)
     metrics_period = paper.get_metrics(prices, hours=hours)
     a_stats = learner.get_grade_a_stats()
@@ -397,7 +397,7 @@ async def build_audit_html(tz, public_url: str = "", hours: int = 48) -> str:
   <div class="kpi-card">
     <div class="kpi-label">📈 Торговый капитал</div>
     <div class="kpi-val">{usd(eq)}</div>
-    <div class="muted">Свободно: {usd(avail_usdt)} · Ордера: {usd(locked_usdt)}</div>
+    <div class="muted">Свободно: {usd(avail_usdt)} · Резерв орд.: {usd(locked_usdt)}</div>
   </div>
   <div class="kpi-card">
     <div class="kpi-label">💵 PnL за {period_label}</div>
@@ -632,14 +632,14 @@ async def build_report(period, tz):
     total_pnl = sum(r["pnl"] for r in trades)
     clean_wr = (len(wins) / len(decisive) * 100) if decisive else 0.0
 
-    locked_usdt = sum(o["qty"] * o["price"] for o in paper.orders)
+    locked_usdt = paper.effective_locked_usdt()
     avail_usdt = max(0.0, paper.usdt - locked_usdt)
     free_pct = avail_usdt / eq * 100 if eq else 0
 
     lines = [f"📅 <b>{title}</b> ({now.strftime('%d.%m')}) 🕘", ""]
     lines.append(f"💰 Свободно: <b>{usd(avail_usdt)}</b> ({free_pct:.0f}%)")
     if locked_usdt > 0:
-        lines.append(f"🔒 В ордерах: <b>{usd(locked_usdt)}</b>")
+        lines.append(f"🔒 В ордерах (резерв): <b>{usd(locked_usdt)}</b>")
     lines.append(f"🏦 Накопления: <b>{usd(paper.funding)}</b>")
     lines.append(f"📈 Капитал: <b>{usd(eq)}</b>")
     lines.append("")
