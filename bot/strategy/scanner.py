@@ -30,7 +30,6 @@ STABLE_BASES = {"USDC", "USDE", "DAI", "TUSD", "BUSD", "FDUSD", "USDP",
                 "LUSD", "GUSD", "XUSD", "USDX", "CUSD", "SUSD",
                 "PAXG", "XAUT"}
 
-# Исключаем токенизированные акции (xStocks), которые стоят без движения вне сессии США (фикс AMZNX)
 SYNTHETIC_BASES = {
     "AMZNX", "TSLAX", "NVDAX", "AAPLX", "COINX", "MSTRX",
     "GOOGLX", "METAX", "SPYX", "QQQX", "HOODX", "CRCLX",
@@ -39,8 +38,8 @@ SYNTHETIC_BASES = {
 
 BASE_THRESHOLDS = {
     "bull": {"rocket": 6.0, "sniper": 5.5, "reversal": 5.2},
-    "neutral": {"rocket": 6.5, "sniper": 6.0, "reversal": 5.4},
-    "bear": {"rocket": 7.0, "sniper": 6.3, "reversal": 5.5},
+    "neutral": {"rocket": 6.5, "sniper": 6.0, "reversal": 5.5},
+    "bear": {"rocket": 7.0, "sniper": 6.3, "reversal": 5.8},
 }
 
 TIER_CORR_LIMITS = {
@@ -221,11 +220,32 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         not e21_falling_1h and
         not e50_falling_48h and
         0.50 <= pos_in_48h <= 0.86 and
-        0.5 <= chg_48h <= 22.0 and
+        0.5 <= chg_48h <= 25.0 and
         r_1h <= 74
     )
 
-    if is_uptrend_1h or is_fresh_1h_reversal or is_breakout_1h:
+    # Новая фаза 1H_SUPER_TREND: захват откатов к 15m EMA21/50 на мощных ракетах вроде INITUSDT (+141%)
+    is_super_trend_pullback = False
+    if (
+        last_1h >= e21_1h * 1.000 and
+        e21_1h > e50_1h * 1.005 and
+        e21_1h > e21_3h_ago * 1.003 and
+        0.45 <= pos_in_48h <= 0.88 and
+        12.0 <= chg_48h <= 65.0 and
+        r_1h <= 75 and
+        candles_15m and len(candles_15m) >= 35
+    ):
+        c15_closes = [c["close"] for c in candles_15m]
+        e21_15 = ema(c15_closes, 21)[-1]
+        e50_15 = ema(c15_closes, 50)[-1]
+        r_15 = rsi(c15_closes)
+        last_15 = c15_closes[-1]
+        if e21_15 > e50_15 and r_15 <= 62 and last_15 >= e50_15 * 0.998 and abs(last_15 - e21_15) <= 1.15 * a15:
+            is_super_trend_pullback = True
+
+    if is_uptrend_1h or is_fresh_1h_reversal or is_breakout_1h or is_super_trend_pullback:
+        if is_super_trend_pullback and not (is_uptrend_1h or is_fresh_1h_reversal):
+            return "1H_SUPER_TREND", e21_1h, e50_1h, f"1H супер-тренд откат (+{chg_48h:.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
         if is_breakout_1h and not is_uptrend_1h:
             tag_1h = "1H пробой базы"
             ref_chg = chg_48h
@@ -244,14 +264,12 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     has_moderate_sup = bool(nearest_sup and sup_touches >= 2 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 2.2 * a15)
 
     bottom_reclaim = False
-    if pos_in_48h <= 0.42 and has_moderate_sup and candles_15m and len(candles_15m) >= 25:
+    if pos_in_48h <= 0.40 and has_moderate_sup and candles_15m and len(candles_15m) >= 25:
         c15_closes = [c["close"] for c in candles_15m]
         e21_15m = ema(c15_closes, 21)[-1]
         if c15_closes[-1] >= e21_15m * 0.996 or candles_15m[-2]["close"] >= candles_15m[-2]["open"]:
             bottom_reclaim = True
 
-    # Для 1H_SUPPORT_ONLY (reversal) ограничиваем зону нижней частью 48ч-диапазона (pos_in_48h <= 0.42),
-    # чтобы не ловить ножи в середине канала (фикс NEARUSDT #4 на диап. 46%)
     if last_1h < e50_1h and e50_falling_48h:
         dist_below_e50_1h = (e50_1h - last_1h) / a_1h if a_1h > 0 else 0.0
         if (has_strong_slab or has_moderate_sup or bottom_reclaim) and dist_below_e50_1h <= 3.6 and pos_in_48h <= 0.42 and drop_from_48h_high_pct < 18.0:
@@ -587,9 +605,9 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         closes_1h = [c["close"] for c in candles_1h]
         r_1h = rsi(closes_1h)
 
-        if gate_1h == "1H_TREND_OK" and (r_1h < 58 or abs(last - e21) <= 1.2 * a15 or abs(last - e50) <= 1.5 * a15) and e12 >= e26 * 0.998:
+        if gate_1h in ("1H_TREND_OK", "1H_SUPER_TREND") and (r_1h < 62 or abs(last - e21) <= 1.2 * a15 or abs(last - e50) <= 1.5 * a15) and e12 >= e26 * 0.998:
             score += 1.8
-            reasons.append("MTF: выкуп отката в 48ч 1H аптренде (+1.8)")
+            reasons.append("MTF: выкуп отката в 1H аптренде (+1.8)")
             keys.append("mtf_dip")
         elif gate_1h == "1H_BAN" and not is_open_pos:
             score -= 5.0
@@ -676,8 +694,8 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
     gate_1h_live = sv_live.get("gate_1h", "1H_BAN")
 
     if corr > tier_corr_limit and regime in ("neutral", "bear") and entry_mode_live != "reversal":
-        raw -= 1.2
-    elif abs(corr) < 0.25 and gate_1h_live == "1H_TREND_OK":
+        raw -= 0.8
+    elif abs(corr) < 0.25 and gate_1h_live in ("1H_TREND_OK", "1H_SUPER_TREND"):
         raw += learner.weight("indep") * 1.3
     elif corr < 0.45:
         raw += learner.weight("indep")
@@ -749,7 +767,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             return sym, chg_7d, atr_pct_val
 
     pre_stats = await asyncio.gather(*[_check_mom_vol(s) for s in by_vol])
-    by_momentum = [s for s, chg7, _ in sorted(pre_stats, key=lambda x: x[1], reverse=True) if 5 < chg7 < 50][:15]
+    by_momentum = [s for s, chg7, _ in sorted(pre_stats, key=lambda x: x[1], reverse=True) if 5 < chg7 < 65][:15]
     by_volatility = [s for s, _, atrp in sorted(pre_stats, key=lambda x: x[2], reverse=True) if atrp > 2.5][:10]
 
     sources = await fetch_new_listings()
@@ -815,6 +833,13 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
             score, reasons, keys, signal_values = score_symbol(candles_15m, candles_1h, tickers[sym], regime)
 
+            # Обновляем профиль ДНК монеты (амплитуда волн, волатильность, среднесрочный тренд)
+            shadow.update_coin_dna(
+                sym, candles_15m, candles_1h, atr_pct,
+                signal_values.get("chg_48h", 0.0),
+                signal_values.get("pos_in_48h", 0.5),
+            )
+
             gate_1h = signal_values.get("gate_1h", "1H_BAN")
             if gate_1h == "1H_BAN":
                 return None
@@ -828,10 +853,12 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 if "reversal" not in modes:
                     return None
                 entry_mode = "reversal"
+            elif gate_1h == "1H_SUPER_TREND":
+                entry_mode = "rocket" if "breakout" in pats_now else "sniper"
             else:
                 if "rocket" in modes and ("breakout" in pats_now or signal_values.get("pos_in_48h", 0.5) > 0.62):
                     entry_mode = "rocket"
-                elif "reversal" in modes and signal_values.get("pos_in_48h", 0.5) <= 0.42:
+                elif "reversal" in modes and signal_values.get("pos_in_48h", 0.5) <= 0.40:
                     entry_mode = "reversal"
                 elif "rocket" in modes:
                     entry_mode = "rocket"
@@ -866,9 +893,9 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 elif entry_mode == "reversal":
                     if signal_values.get("pos_in_48h", 0.5) > 0.42:
                         tactical_hold = True
-                    if curr_15["close"] < curr_15["open"] and (curr_15["open"] - curr_15["close"]) > 0.48 * a:
+                    if curr_15["close"] < curr_15["open"] and (curr_15["open"] - curr_15["close"]) > 0.45 * a:
                         tactical_hold = True
-                    if closed_15["close"] < closed_15["open"] and (closed_15["open"] - closed_15["close"]) > 0.55 * a and curr_15["close"] < closed_15["low"]:
+                    if closed_15["close"] < closed_15["open"] and (closed_15["open"] - closed_15["close"]) > 0.50 * a and curr_15["close"] < closed_15["low"]:
                         tactical_hold = True
                     nsup = signal_values.get("nearest_sup")
                     if nsup and last_price < nsup * 0.995:
@@ -876,10 +903,11 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
 
             if regime == "bear":
                 if entry_mode == "rocket":
-                    if "breakout" not in pats_now or last_price < signal_values.get("e50_1h", 0) * 0.997 or signal_values.get("pos_in_48h", 1.0) > 0.86:
+                    if "breakout" not in pats_now or last_price < signal_values.get("e50_1h", 0) * 0.997 or signal_values.get("pos_in_48h", 1.0) > 0.88:
                         tactical_hold = True
                 elif entry_mode == "sniper":
-                    if last_price < signal_values.get("e50_1h", 0) * 0.996 or signal_values.get("pos_in_48h", 1.0) > 0.62:
+                    max_pos_48 = 0.88 if gate_1h == "1H_SUPER_TREND" else 0.66
+                    if last_price < signal_values.get("e50_1h", 0) * 0.996 or signal_values.get("pos_in_48h", 1.0) > max_pos_48:
                         tactical_hold = True
 
             if signal_values.get("recent_rejection") and entry_mode in ("sniper", "rocket"):
@@ -888,14 +916,13 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             corr = _corr_candles(candles_15m, btc_candles)
             tier_corr_limit = TIER_CORR_LIMITS.get(tier, 0.82)
 
-            if regime == "bear" and entry_mode in ("sniper", "rocket") and corr >= 0.75:
-                tactical_hold = True
-
-            is_independent_mover = abs(corr) < 0.25 and gate_1h == "1H_TREND_OK"
+            # Убрана слепая блокировка corr >= 0.75 в сканере (которая убивала UNI 10.0, NEAR 10.0, ADA 10.0).
+            # Контроль максимального числа коррелирующих позиций выполняется в OrderManager.
+            is_independent_mover = abs(corr) < 0.25 and gate_1h in ("1H_TREND_OK", "1H_SUPER_TREND")
 
             if corr > tier_corr_limit and regime in ("neutral", "bear") and entry_mode != "reversal":
-                score -= 1.2
-                reasons.append(f"зеркало BTC ({tier}: corr {corr:.2f})")
+                score -= 0.8
+                reasons.append(f"высокая связка с BTC ({tier}: corr {corr:.2f})")
             elif is_independent_mover:
                 score += learner.weight("indep") * 1.3
                 reasons.append(f"иммунитет от BTC (corr {corr:.2f})")
@@ -963,6 +990,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 reasons.append("риск ликвидаций Coinglass (-1.5)")
 
             score10 = round(max(0.0, min(SCORE_MAX, score10)), 2)
+            dna_info = shadow.get_coin_dna(sym)
 
             return {
                 "symbol": sym, "score": score10, "reasons": reasons,
@@ -991,6 +1019,8 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 "pos_in_48h": signal_values.get("pos_in_48h", 0.5),
                 "wick_entry_price": signal_values.get("wick_entry_price"),
                 "is_independent": is_independent_mover,
+                "wave_class": dna_info["wave_class"],
+                "wave_amp_pct": dna_info["wave_amp_pct"],
                 "tactical_hold": tactical_hold,
                 "size_mult": 1.0,
             }
