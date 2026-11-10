@@ -21,7 +21,7 @@ from bot.core.state import bot_state
 
 
 class PositionManagerWorker:
-    """Управление позициями: Дышащий Коридор, анти-зомби выход, умная подтяжка лимиток и честный таймаут ⌛."""
+    """Управление позициями: Волновой Коридор по свечам 15m/1H, анти-зомби выход и умное ведение ордеров."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -29,7 +29,7 @@ class PositionManagerWorker:
         self.current_regime = "neutral"
 
     async def run(self):
-        logger.info("🛡 Position Manager запущен: Дышащий Коридор, анти-зомби фильтр и умное ведение ордеров...")
+        logger.info("🛡 Position Manager запущен: Волновой Коридор, анти-зомби фильтр и умное ведение ордеров...")
         asyncio.create_task(self._regime_updater())
 
         while True:
@@ -64,14 +64,25 @@ class PositionManagerWorker:
         btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
         btc_ret = _returns([c["close"] for c in btc_candles])
 
-        metrics_24h = paper.get_metrics(tickers, hours=24)
+        # Сглаженная оценка за 24ч (70% вес) и 48ч (30% вес) для исключения резких скачков режима риска
+        m_24 = paper.get_metrics(tickers, hours=24)
+        m_48 = paper.get_metrics(tickers, hours=48)
+        pf_24 = m_24["profit_factor"] if m_24["profit_factor"] is not None else 1.0
+        pf_48 = m_48["profit_factor"] if m_48["profit_factor"] is not None else pf_24
+        if pf_24 == float("inf"):
+            pf_24 = 2.2
+        if pf_48 == float("inf"):
+            pf_48 = 2.2
+        blended_pf = (0.70 * pf_24 + 0.30 * pf_48) if m_48["total_trades"] > 0 else None
+        blended_dd = max(m_24["max_drawdown_pct"], m_48["max_drawdown_pct"] * 0.85)
+
         old_mode = getattr(learner, "current_risk_mode", "NORMAL")
-        learner.update_threshold(metrics_24h["profit_factor"], metrics_24h["max_drawdown_pct"], metrics_24h["total_trades"])
+        learner.update_threshold(blended_pf, blended_dd, m_48["total_trades"])
         new_mode = getattr(learner, "current_risk_mode", "NORMAL")
 
-        if old_mode != new_mode and metrics_24h["total_trades"] > 0:
+        if old_mode != new_mode and m_48["total_trades"] > 0:
             mode_icons = {"NORMAL": "🟢", "CAUTIOUS": "🟡", "STRICT": "🔴", "AGGRESSIVE": "🚀"}
-            self._notify(f"🎚 <b>Режим риска (ИИ) изменен:</b> {mode_icons.get(new_mode, '⚪')} {new_mode}\n<i>(строгость {learner.threshold_adj:+.2f})</i>")
+            self._notify(f"🎚 <b>Режим риска (ИИ) плавно изменен:</b> {mode_icons.get(new_mode, '⚪')} {new_mode}\n<i>(строгость {learner.threshold_adj:+.2f})</i>")
 
         news_items = await fetch_news_cache()
         regime = self.current_regime
@@ -80,7 +91,7 @@ class PositionManagerWorker:
         current_time = int(time.time())
 
         # =====================================================================
-        # 1. ПРОВЕРКА ОТКРЫТЫХ ПОЗИЦИЙ И ОБНОВЛЕНИЕ «ДЫШАЩЕГО КОРИДОРА»
+        # 1. ПРОВЕРКА ОТКРЫТЫХ ПОЗИЦИЙ И ОБНОВЛЕНИЕ «ВОЛНОВОГО КОРИДОРА»
         # =====================================================================
         for sym in list(paper.positions.keys()):
             t = tickers.get(sym)
@@ -91,6 +102,7 @@ class PositionManagerWorker:
             pos = paper.positions.get(sym)
             if not pos or score_pos is None or not candles:
                 continue
+            pos["symbol"] = sym
 
             closes = [c["close"] for c in candles]
             a = atr(candles)
@@ -136,7 +148,6 @@ class PositionManagerWorker:
             )
             pos_age = current_time - pos.get("entry_time", current_time)
 
-            # А. Досрочный выход для сохранения уже накопленного профита при сломе тренда
             if pos_age >= 2400 and not is_toxic and pnl_pct >= 0.55 and entry_mode != "reversal" and trend_broken and sym in paper.positions:
                 reason = "🪫 Слом тренда"
                 ex = paper._sell(sym, last, reason, regime_now=regime)
@@ -146,11 +157,9 @@ class PositionManagerWorker:
                 self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)}{grade_badge(ex)} · {reason}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                 continue
 
-            # Б. Анти-зомби ликвидатор (фикс 7-часовых висяков STRK, CC, GRASS):
-            # Если позиция висит >= 2.5 часов (9000с) без взятия TP1, импульс затух (под EMA50 или EMA21 < EMA50),
-            # и цена даёт безубыточный отскок (>= +0.25% грязными / ~+0.05% чистыми) — освобождаем слот!
-            is_stagnant = (not pos.get("tp1_done")) and pos_age >= 9000 and (last <= e50 * 1.001 or e21 < e50)
-            if is_stagnant and pnl_pct >= 0.25 and sym in paper.positions:
+            # Анти-зомби выход (ТОЛЬКО если тренд под EMA50 сломлен и позиция висит >= 2.5ч без TP1)
+            is_stagnant = (not pos.get("tp1_done")) and pos_age >= 9000 and (last < e50 * 0.999 and e21 < e50 * 0.999)
+            if is_stagnant and pnl_pct >= 0.30 and sym in paper.positions:
                 reason = "⏱ Выход по времени (без импульса)"
                 ex = paper._sell(sym, last, reason, regime_now=regime)
                 paper.log_event(sym, "sell_profit", last, reason, tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
@@ -183,25 +192,24 @@ class PositionManagerWorker:
                     coin_compact = format_coin_compact(sym, pos)
                     self._notify(f"🛡 SL поднят по {coin_compact} до {new_sl_str} ({tag_emoji})")
 
-            if pos.get("tp1_done") and last >= (pos["tp"] - 0.5 * a):
+            # Непрерывное волновое скольжение потолка TP🏃🏻‍➡️ после взятия TP1
+            if pos.get("tp1_done"):
                 candles_1h = await market_data.get_kline(sym, "60", 250)
                 pos = paper.positions.get(sym)
                 if not pos:
                     continue
                 next_target, can_expand, phase_reason = calc_runner_target(sym, last, candles, candles_1h, pos=pos)
-                if can_expand and next_target > pos["tp"] * 1.008:
+                if can_expand and next_target > pos["tp"] * 1.005:
                     old_tp = pos["tp"]
                     pos["tp"] = next_target
-                    pos["sl"] = max(pos["sl"], round(old_tp * 0.992, 8))
-                    tp1_p = pos.get("tp1_price") or pos.get("initial_tp") or 0.0
-                    pos["sl_state"] = "ABOVE_TP1" if (tp1_p > 0 and pos["sl"] >= tp1_p) else "TRAILING_RUNNER"
-                    sl_tag = sl_emoji(pos["sl_state"])
                     paper.save()
-                    paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP🏃🏻‍➡️ поднят", mode="TP🏃🏻‍➡️", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
-                    self._notify(f"TP🏃🏻‍➡️ <b>Потолок коридора поднят</b> · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · {sl_tag} {fmt_price(pos['sl'])}")
+                    paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP🏃🏻‍➡️ волна", mode="TP🏃🏻‍➡️", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                    if (next_target - old_tp) / old_tp * 100 >= 1.2:
+                        sl_tag = sl_emoji(pos.get("sl_state", "TRAILING_RUNNER"))
+                        self._notify(f"TP🏃🏻‍➡️ <b>Волна потолка поднята</b> · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · {sl_tag} {fmt_price(pos['sl'])}")
 
         # =====================================================================
-        # 2. ПРОВЕРКА ОЖИДАЮЩИХ ОРДЕРОВ (Защита от ложных отмен и умный таймаут ⌛)
+        # 2. ПРОВЕРКА ОЖИДАЮЩИХ ОРДЕРОВ
         # =====================================================================
         for order in list(paper.orders):
             if order not in paper.orders:
@@ -228,7 +236,6 @@ class PositionManagerWorker:
             entry_mode = order.get("entry_mode", "sniper")
             patterns = order.get("patterns", [])
 
-            # Передаём is_open_pos=True, чтобы подход цены к локальному хаю или откату не штрафовал живой ордер на -4 балла
             score_now, candles = await live_score(
                 sym, t, regime, btc_ret, news_items,
                 deriv_t=deriv_tickers.get(sym),
@@ -268,8 +275,6 @@ class PositionManagerWorker:
             ord_sl = order.get("sl", 0.0)
             sup_broken = bool(ord_sup and closed_c["close"] < ord_sup * 0.992 and t["last"] < ord_sup * 0.992)
 
-            # НЕ снимаем ордер sniper на обычном откате к нашей лимитке (фикс MEGA 7.9 -> 7.9)!
-            # Слом структуры засчитываем только если цена провалилась глубоко под EMA50 и подошла вплотную к SL, а скор рухнул
             near_sl_danger = bool(ord_sl > 0 and t["last"] <= (ord_sl + 0.30 * a))
             sniper_broken = (
                 entry_mode != "reversal" and
@@ -309,7 +314,6 @@ class PositionManagerWorker:
 
             max_order_age = 3600 if entry_mode == "reversal" else 2700
             if order_age > max_order_age:
-                # Если сигнал по-прежнему очень сильный (score_now >= thr + 0.4) — один раз продлеваем жизнь ордера на 30 минут
                 if score_now >= (thr + 0.4) and order.get("extensions", 0) < 1:
                     order["extensions"] = order.get("extensions", 0) + 1
                     order["created"] = current_time - (max_order_age - 1800)
@@ -345,14 +349,11 @@ class PositionManagerWorker:
             dev_pct = abs(ideal_price - old_price) / old_price * 100
             in_freeze_zone = abs(t["last"] - old_price) <= (0.35 * a) or (abs(t["last"] - old_price) / old_price * 100) <= 0.28
 
-            # 1. Мягкая коррекция лимитки ВНИЗ при опускании цены
             if ideal_price < old_price and dev_pct >= 0.45 and not in_freeze_zone:
                 if not (live_sup and ideal_price < live_sup * 1.0015):
                     target_price = ideal_price
                     action_type = "correct"
                     price_icon = "⬇️"
-            # 2. Однократная подтяжка лимитки ВВЕРХ (⬆️) для топовых сигналов (score >= thr + 0.8 или [💎] A+),
-            # которые ждут более 12 минут, пока тренд плавно ползёт вверх над растущей EMA21
             elif (
                 ideal_price > old_price and
                 order_age >= 720 and
