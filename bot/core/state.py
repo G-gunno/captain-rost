@@ -33,8 +33,8 @@ class BotState:
     def record_trade_exit(self, sym: str, pnl_pct: float, exit_price: float, is_sl: bool = False):
         """
         Умный карантин:
-        - Выходы от -0.25% до +0.25% считаются нейтральным БУ (пауза 20 мин, серия стопов не копится).
-        - Профит (> +0.25%) -> пауза 30 мин от мгновенного перезахода в ту же свечу.
+        - Выходы от -0.25% до +0.25% считаются нейтральным БУ (пауза 15 мин, серия стопов не копится).
+        - Профит (> +0.25%) -> пауза 15 мин (1 свеча 15m) от мгновенного перезахода в ту же свечу.
         - 1-й реальный стоп (< -0.25%) -> карантин 90 мин.
         - 2-й реальный стоп подряд -> бан 6 часов.
         """
@@ -46,10 +46,10 @@ class BotState:
             if pnl_pct > 0.25:
                 self.last_win_price[sym] = float(exit_price)
                 self.last_win_ts[sym] = now_ts
-                self.set_cooldown(sym, 1800, structural_reset=False, reason="post_peak_win")
-                logger.info(f"Cooldown {sym}: профитный выход ({pnl_pct:+.2f}%) -> пауза 30 мин")
+                self.set_cooldown(sym, 900, structural_reset=False, reason="post_peak_win")
+                logger.info(f"Cooldown {sym}: профитный выход ({pnl_pct:+.2f}%) -> пауза 15 мин")
             else:
-                self.set_cooldown(sym, 1200, structural_reset=False, reason="neutral_be")
+                self.set_cooldown(sym, 900, structural_reset=False, reason="neutral_be")
             return
 
         streak = self.consecutive_sl.get(sym, 0) + 1
@@ -105,7 +105,11 @@ class BotState:
 
         return False
 
-    def can_enter_sniper(self, sym: str, current_price: float, patterns: list = None) -> tuple:
+    def can_enter_sniper(
+        self, sym: str, current_price: float, patterns: list = None,
+        ema21_15m: float = 0.0, ema50_15m: float = 0.0, atr_15m: float = 0.0,
+        score: float = 0.0, gate_1h: str = ""
+    ) -> tuple:
         self._cleanup_expired_sl(sym)
         last_sl = self.last_sl_price.get(sym)
         if last_sl and current_price < last_sl * 1.001:
@@ -113,10 +117,17 @@ class BotState:
 
         win_p = self.last_win_price.get(sym)
         win_ts = self.last_win_ts.get(sym, 0)
-        if win_p and (time.time() - win_ts) < 5400:
+        if win_p and (time.time() - win_ts) < 3600:
             pats = patterns or []
-            if current_price >= win_p * 0.994 and not any(p in pats for p in ("vcp", "breakout")):
-                return False, f"защита от покупки хая выше точки выхода (${fmt_price(win_p)}) без VCP/Breakout"
+            has_brk_vcp = any(p in pats for p in ("vcp", "breakout", "engulfing"))
+            # Разрешаем перезаход по тренду (фикс INITUSDT 8.8), если цена откатила к растущей EMA21
+            is_healthy_trend_pullback = (
+                ema21_15m > ema50_15m > 0 and
+                current_price >= ema50_15m * 0.998 and
+                ((atr_15m > 0 and abs(current_price - ema21_15m) <= 1.05 * atr_15m) or score >= 8.2 or gate_1h == "1H_SUPER_TREND")
+            )
+            if current_price >= win_p * 0.994 and not (has_brk_vcp or is_healthy_trend_pullback):
+                return False, f"защита от покупки хая выше точки выхода (${fmt_price(win_p)}) без отката к EMA21/VCP"
         return True, "OK"
 
     def can_enter_reversal(self, sym: str, current_price: float, ema21_15m: float) -> tuple:
