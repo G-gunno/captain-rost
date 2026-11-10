@@ -5,6 +5,7 @@ from pathlib import Path
 from loguru import logger
 
 from bot.core.remote_state import download_state, upload_state
+from bot.core.state import bot_state
 
 STATE_FILE = Path("storage/learner.json")
 REMOTE_PATH = "learner.json"
@@ -20,6 +21,7 @@ PATTERN_NAMES = {
 }
 
 TIERS = ["TOP20", "MID", "SMALL", "MICRO"]
+MODE_LADDER = ["STRICT", "CAUTIOUS", "NORMAL", "AGGRESSIVE"]
 
 BE_LOW_PCT = -0.25
 BE_HIGH_PCT = 0.25
@@ -30,7 +32,7 @@ def is_neutral_be(pnl_pct: float) -> bool:
 
 
 class Learner:
-    """Самообучение: сбалансированные веса с Mean Reversion + нейтральная зона БУ (-0.25%..+0.25%)."""
+    """Самообучение: сбалансированные веса с Mean Reversion + плавная почасовая лестница режимов риска."""
 
     def __init__(self):
         self.weights = {k: 1.0 for k in KEYS}
@@ -38,6 +40,7 @@ class Learner:
         self.be_count = 0
         self.threshold_adj = 0.0
         self.current_risk_mode = "NORMAL"
+        self._last_mode_change_ts = 0.0
         self.sector_stats = {}
         self.tier_stats = {}
         self.exit_stats = {}
@@ -70,6 +73,8 @@ class Learner:
             self.results = data.get("results", [])
             self.be_count = int(data.get("be_count", 0))
             self.threshold_adj = float(data.get("threshold_adj", 0))
+            self.current_risk_mode = data.get("current_risk_mode", "NORMAL")
+            self._last_mode_change_ts = float(data.get("last_mode_change_ts", 0.0))
             self.sector_stats = data.get("sector_stats", {})
             self.tier_stats = data.get("tier_stats", {})
             self.exit_stats = data.get("exit_stats", {})
@@ -90,6 +95,8 @@ class Learner:
             "results": self.results[-200:],
             "be_count": self.be_count,
             "threshold_adj": self.threshold_adj,
+            "current_risk_mode": self.current_risk_mode,
+            "last_mode_change_ts": self._last_mode_change_ts,
             "sector_stats": {k: v[-50:] for k, v in self.sector_stats.items()},
             "tier_stats": {k: v[-50:] for k, v in self.tier_stats.items()},
             "exit_stats": {k: v[-50:] for k, v in self.exit_stats.items()},
@@ -112,9 +119,9 @@ class Learner:
 
     def grade_a_trust_mult(self) -> float:
         if self.grade_a_streak <= -3:
-            return 0.70
+            return 0.75
         if self.grade_a_streak == -2:
-            return 0.82
+            return 0.85
         if self.grade_a_streak >= 3:
             return 1.15
         if self.grade_a_streak == 2:
@@ -244,6 +251,7 @@ class Learner:
         self.be_count = 0
         self.threshold_adj = 0.0
         self.current_risk_mode = "NORMAL"
+        self._last_mode_change_ts = 0.0
         self.sector_stats = {}
         self.tier_stats = {}
         self.exit_stats = {}
@@ -258,6 +266,8 @@ class Learner:
         self.results = []
         self.be_count = 0
         self.threshold_adj = 0.0
+        self.current_risk_mode = "NORMAL"
+        self._last_mode_change_ts = 0.0
         self.sector_stats = {}
         self.tier_stats = {}
         self.exit_stats = {}
@@ -272,15 +282,15 @@ class Learner:
         last = self.results[-20:]
         return (sum(last) / len(last), len(last)) if last else (0.0, 0)
 
-    def risk_mode(self, profit_factor, max_dd_pct, total_trades=0):
+    def _raw_target_mode(self, profit_factor, max_dd_pct, total_trades=0) -> tuple:
         adj = 0.0
         enough = total_trades >= 4
         if enough and profit_factor is not None:
-            if profit_factor < 0.55:
+            if profit_factor < 0.60:
                 adj += 1.5
-            elif profit_factor < 1.0:
+            elif profit_factor < 1.02:
                 adj += 0.5
-            elif profit_factor > 1.5 and max_dd_pct and max_dd_pct < 8:
+            elif profit_factor > 1.55 and (max_dd_pct or 0) < 6.0 and total_trades >= 6:
                 adj -= 0.5
         if max_dd_pct and max_dd_pct > 12:
             adj += 1.0
@@ -288,18 +298,45 @@ class Learner:
             adj += 0.5
 
         if adj >= 1.5:
-            mode = "STRICT"
+            target = "STRICT"
         elif adj >= 0.5:
-            mode = "CAUTIOUS"
+            target = "CAUTIOUS"
         elif adj <= -0.5:
-            mode = "AGGRESSIVE"
+            target = "AGGRESSIVE"
         else:
-            mode = "NORMAL"
-        return mode, adj
+            target = "NORMAL"
+
+        # В медвежьем рынке потолок — NORMAL (исключаем перегретый AGGRESSIVE на падающем рынке)
+        if getattr(bot_state, "current_regime", "neutral") == "bear" and target == "AGGRESSIVE":
+            target = "NORMAL"
+            adj = max(0.0, adj)
+
+        return target, adj
+
+    def risk_mode(self, profit_factor, max_dd_pct, total_trades=0):
+        """Возвращает текущий сглаженный режим риска (без скачков через ступень)."""
+        target_mode, _ = self._raw_target_mode(profit_factor, max_dd_pct, total_trades)
+        cur_mode = self.current_risk_mode if self.current_risk_mode in MODE_LADDER else "NORMAL"
+        cur_idx = MODE_LADDER.index(cur_mode)
+        tgt_idx = MODE_LADDER.index(target_mode)
+
+        now = time.time()
+        # Пошаговое изменение не чаще 1 раза в час (3600с) и строго на 1 ступень
+        if tgt_idx != cur_idx and (now - self._last_mode_change_ts >= 3600 or self._last_mode_change_ts == 0.0):
+            step = 1 if tgt_idx > cur_idx else -1
+            cur_idx = max(0, min(len(MODE_LADDER) - 1, cur_idx + step))
+            cur_mode = MODE_LADDER[cur_idx]
+
+        adj_map = {"STRICT": 1.2, "CAUTIOUS": 0.5, "NORMAL": 0.0, "AGGRESSIVE": -0.4}
+        return cur_mode, adj_map.get(cur_mode, 0.0)
 
     def update_threshold(self, profit_factor, max_dd_pct, total_trades=0):
-        mode, dyn_adj = self.risk_mode(profit_factor, max_dd_pct, total_trades)
-        self.current_risk_mode = mode
+        old_mode = self.current_risk_mode if self.current_risk_mode in MODE_LADDER else "NORMAL"
+        new_mode, dyn_adj = self.risk_mode(profit_factor, max_dd_pct, total_trades)
+        if new_mode != old_mode:
+            self.current_risk_mode = new_mode
+            self._last_mode_change_ts = time.time()
+            logger.info(f"learner: плавный переход режима риска {old_mode} -> {new_mode}")
 
         wr_adj = 0.0
         if total_trades >= 5:
@@ -310,7 +347,8 @@ class Learner:
                     wr_adj = 0.20
 
         raw_adj = dyn_adj + wr_adj
-        self.threshold_adj = round(max(-0.20, min(0.20, raw_adj * 0.15)), 2)
+        target_thr_adj = max(-0.20, min(0.20, raw_adj * 0.15))
+        self.threshold_adj = round(0.6 * self.threshold_adj + 0.4 * target_thr_adj, 2)
         self.save()
         return self.threshold_adj
 
