@@ -22,14 +22,14 @@ from bot.core.state import bot_state
 
 
 class OrderManagerWorker:
-    """Управляет портфелем: Умный Овербукинг (3 поз. / до 5 орд. на тир), ротация строго после валидации SL/TP."""
+    """Управляет портфелем: Умный Овербукинг, защита последнего слота тира для [💎] A+ и безопасная ротация."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
         self.signal_queue = self.bus.subscribe("SIGNALS_READY", maxsize=2)
 
     async def run(self):
-        logger.info("💼 Order Manager запущен: Умный Овербукинг, 3 поз./тир и безопасная ротация...")
+        logger.info("💼 Order Manager запущен: Умный Овербукинг, защита слотов [💎] A+ и безопасная ротация...")
         while True:
             try:
                 event = await self.signal_queue.get()
@@ -63,7 +63,7 @@ class OrderManagerWorker:
                 effective.extend(ords_sorted[:avail_slots])
         return effective
 
-    def _try_rotate_order(self, cand: dict, cand_grade: str, tickers: dict, reason_tag: str = "освобождение USDT", target_tier: str = None) -> bool:
+    def _try_rotate_order(self, cand: dict, cand_grade: str, tickers: dict, reason_tag: str = "освобождение USDT", target_tier: str = None, force_replace_b: bool = False) -> bool:
         """Снимает старый слабый ордер ТОЛЬКО после того, как новый кандидат полностью прошёл валидацию SL/TP."""
         if not paper.orders:
             return False
@@ -80,16 +80,20 @@ class OrderManagerWorker:
             o_grade = o.get("grade", "B")
             o_score = o.get("score", 0.0)
 
-            min_age = 180 if target_tier else (300 if (cand_grade == "A+" and o_grade != "A+") else 600)
+            min_age = 60 if force_replace_b else (180 if target_tier else (300 if (cand_grade == "A+" and o_grade != "A+") else 600))
             if o_age < min_age:
                 continue
 
             last_p = tickers.get(o["symbol"], {}).get("last", 0.0)
-            if last_p > 0 and abs(last_p - o["price"]) / o["price"] * 100 <= 0.35:
+            if not force_replace_b and last_p > 0 and abs(last_p - o["price"]) / o["price"] * 100 <= 0.30:
                 continue
 
             score_diff = cand_score - o_score
-            is_upgrade = (score_diff >= 0.8) or (cand_grade == "A+" and o_grade != "A+" and score_diff >= 0.3)
+            is_upgrade = (
+                (force_replace_b and o_grade != "A+" and o_score < 8.0) or
+                (score_diff >= 0.8) or
+                (cand_grade == "A+" and o_grade != "A+" and score_diff >= 0.2)
+            )
             if is_upgrade:
                 priority_key = (1 if o_grade == "A+" else 0, o_score, -o_age)
                 eligible.append((priority_key, o))
@@ -157,12 +161,12 @@ class OrderManagerWorker:
                 logger.debug(f"OrderManager: {sym} пропущен -> в тире {tier} уже открыто {tier_pos_count}/{MAX_POSITIONS_PER_TIER} позиций")
                 continue
 
-            # 2. Защита от синхронного набора клонов BTC (corr >= 0.75) в BEAR и NEUTRAL
+            # 2. Защита от синхронного набора клонов BTC (corr >= 0.78) в BEAR и NEUTRAL
             cand_corr = float(cand.get("corr") or 0.0)
-            if regime in ("bear", "neutral") and cand_corr >= 0.75:
+            if regime in ("bear", "neutral") and cand_corr >= 0.78:
                 max_corr_pos = 2 if regime == "bear" else 3
-                high_corr_pos = sum(1 for p in paper.positions.values() if float(p.get("corr") or 0.0) >= 0.75)
-                high_corr_ord = sum(1 for o in paper.orders if float(o.get("corr") or 0.0) >= 0.75)
+                high_corr_pos = sum(1 for p in paper.positions.values() if float(p.get("corr") or 0.0) >= 0.78)
+                high_corr_ord = sum(1 for o in paper.orders if float(o.get("corr") or 0.0) >= 0.78)
                 if high_corr_pos >= max_corr_pos or (high_corr_pos + high_corr_ord) >= (max_corr_pos + 1):
                     logger.info(f"OrderManager: {sym} пропущен -> лимит BTC-клонов ({high_corr_pos} поз., {high_corr_ord} орд., corr {cand_corr:.2f})")
                     continue
@@ -171,6 +175,9 @@ class OrderManagerWorker:
             is_accum = "vcp" in patterns
             e21_15m = cand.get("e21", 0.0)
             e50_15m = cand.get("e50", 0.0)
+            a = cand["atr"]
+            if a <= 0:
+                continue
 
             bot_state.check_structural_reset(sym, cand["last"], e21_15m, e50_15m)
             if bot_state.is_on_cooldown(sym):
@@ -182,7 +189,11 @@ class OrderManagerWorker:
                     logger.info(f"OrderManager: {sym} reversal заблокирован -> {rev_reason}")
                     continue
             elif entry_mode == "sniper":
-                can_snp, snp_reason = bot_state.can_enter_sniper(sym, cand["last"], patterns)
+                can_snp, snp_reason = bot_state.can_enter_sniper(
+                    sym, cand["last"], patterns,
+                    ema21_15m=e21_15m, ema50_15m=e50_15m, atr_15m=a,
+                    score=cand.get("score", 0.0), gate_1h=cand.get("gate_1h", "")
+                )
                 if not can_snp:
                     logger.info(f"OrderManager: {sym} sniper заблокирован -> {snp_reason}")
                     continue
@@ -191,6 +202,17 @@ class OrderManagerWorker:
             if policy["require_grade_a_for_alt"] and entry_mode in ("reversal", "rocket"):
                 if grade != "A+":
                     logger.info(f"OrderManager: {sym} пропущен -> режим {risk_mode} требует [💎] A+ для {entry_mode}")
+                    continue
+
+            # 3. ЗАЩИТА ПОСЛЕДНЕГО СЛОТА ТИРА (avail_tier_slots == 1):
+            # Не даём слабым ордерам [B] вставать в очередь рядом с [💎] A+ и перехватывать последний слот через AUTO-CANCEL!
+            avail_tier_slots = MAX_POSITIONS_PER_TIER - tier_pos_count
+            is_elite_cand = (grade == "A+" or cand["score"] >= 8.2)
+            if avail_tier_slots == 1:
+                tier_orders = [o for o in paper.orders if (o.get("tier") or "SMALL") == tier]
+                has_elite_waiting = any(o.get("grade") == "A+" or float(o.get("score", 0.0)) >= 8.0 for o in tier_orders)
+                if has_elite_waiting and not is_elite_cand:
+                    logger.debug(f"OrderManager: {sym} [B] пропущен -> последний слот тира {tier} забронирован под [💎] A+")
                     continue
 
             name = await get_coin_name(base)
@@ -203,8 +225,6 @@ class OrderManagerWorker:
             thr = cand.get("thr") or thrs.get(entry_mode, 6.0)
             off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], entry_mode, tier=tier, is_accumulation=is_accum)
 
-            # Для высокобалльных сетапов (score >= 8.5 или [💎] A+ в sniper/rocket) ставим более плотный вход,
-            # чтобы не упускать ракеты вроде ELSA (9.7) и AAVE [💎] на -0.45%
             if entry_mode in ("sniper", "rocket") and (cand["score"] >= 8.5 or grade == "A+"):
                 off = max(off, -0.0028 if tier in ("SMALL", "MICRO") else -0.0020)
 
@@ -225,10 +245,6 @@ class OrderManagerWorker:
                     entry = retest_floor
 
             off = (entry - cand["last"]) / cand["last"] if cand["last"] > 0 else off
-
-            a = cand["atr"]
-            if a <= 0:
-                continue
 
             all_res = cand.get("signal_values", {}).get("all_res", [])
             res_above_entry = []
@@ -266,9 +282,15 @@ class OrderManagerWorker:
             if sl_dist_pct <= 0:
                 continue
 
-            # 3. ТЕПЕРЬ (после полной валидации SL/TP!) проверяем буфер ордеров тира
-            avail_tier_slots = MAX_POSITIONS_PER_TIER - tier_pos_count
-            max_tier_orders = min(MAX_ORDERS_PER_TIER, avail_tier_slots + 2)
+            # 4. Если остался 1 слот в тире и пришёл элитный кандидат [💎] A+, очищаем слабые ордера [B] этого тира
+            if avail_tier_slots == 1 and is_elite_cand:
+                self._try_rotate_order(
+                    cand, grade, tickers,
+                    reason_tag=f"приоритет [💎] последнего слота {tier}",
+                    target_tier=tier, force_replace_b=True
+                )
+
+            max_tier_orders = 2 if avail_tier_slots == 1 else min(MAX_ORDERS_PER_TIER, avail_tier_slots + 2)
             tier_ord_count = paper.count_tier_orders(tier)
             if tier_ord_count >= max_tier_orders:
                 if not self._try_rotate_order(cand, grade, tickers, reason_tag=f"буфер тира {tier}", target_tier=tier):
@@ -331,6 +353,8 @@ class OrderManagerWorker:
                 "sl_state": "SHIELD",
                 "patterns": patterns,
                 "grade": grade,
+                "wave_class": cand.get("wave_class", "mid_wave"),
+                "wave_amp_pct": cand.get("wave_amp_pct", 3.2),
                 "initial_score": cand["score"],
                 "last_move_ts": int(order["created"]),
                 "_ema21": e21_15m,
