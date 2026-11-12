@@ -9,7 +9,10 @@ from bot.strategy.scanner import live_score, get_thresholds, _returns, is_post_p
 from bot.strategy.indicators import atr, ema, find_sr_levels, get_all_sr_levels
 from bot.strategy.learner import learner
 from bot.strategy.shadow import shadow
-from bot.strategy.risk import calc_initial_sl_tp, calc_runner_target, update_position_sl, get_trade_policy
+from bot.strategy.risk import (
+    calc_initial_sl_tp, calc_runner_target, update_position_sl,
+    get_trade_policy, _round_px
+)
 from bot.news.cmc import get_coin_name
 from bot.news.rss_news import fetch_news_cache, check_sentiment
 from bot.strategy.sizing import entry_offset
@@ -21,7 +24,7 @@ from bot.core.state import bot_state
 
 
 class PositionManagerWorker:
-    """Управление позициями: Волновой Коридор по свечам 15m/1H, анти-зомби выход и умное ведение ордеров."""
+    """Управление позициями: частые ступеньки SL/TP на прокол, анти-зомби фильтр и ведение ордеров."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -29,7 +32,7 @@ class PositionManagerWorker:
         self.current_regime = "neutral"
 
     async def run(self):
-        logger.info("🛡 Position Manager запущен: Волновой Коридор, анти-зомби фильтр и умное ведение ордеров...")
+        logger.info("🛡 Position Manager запущен: Ступенчатый Коридор SL/TP (на прокол) и ведение ордеров...")
         asyncio.create_task(self._regime_updater())
 
         while True:
@@ -64,7 +67,6 @@ class PositionManagerWorker:
         btc_candles = await market_data.get_kline("BTCUSDT", "15", 120)
         btc_ret = _returns([c["close"] for c in btc_candles])
 
-        # Сглаженная оценка за 24ч (70% вес) и 48ч (30% вес) для исключения резких скачков режима риска
         m_24 = paper.get_metrics(tickers, hours=24)
         m_48 = paper.get_metrics(tickers, hours=48)
         pf_24 = m_24["profit_factor"] if m_24["profit_factor"] is not None else 1.0
@@ -91,7 +93,7 @@ class PositionManagerWorker:
         current_time = int(time.time())
 
         # =====================================================================
-        # 1. ПРОВЕРКА ОТКРЫТЫХ ПОЗИЦИЙ И ОБНОВЛЕНИЕ «ВОЛНОВОГО КОРИДОРА»
+        # 1. ПРОВЕРКА ОТКРЫТЫХ ПОЗИЦИЙ И ЧАСТЫЕ СТУПЕНЬКИ SL / TP «НА ПРОКОЛ»
         # =====================================================================
         for sym in list(paper.positions.keys()):
             t = tickers.get(sym)
@@ -138,17 +140,17 @@ class PositionManagerWorker:
             e21_falling = len(e21_series) >= 4 and e21 < e21_series[-3] * 0.9995
             closed_2_below = (
                 len(candles) >= 3 and
-                candles[-2]["close"] < (e50 - 0.65 * a) and
-                candles[-3]["close"] < (e50 - 0.65 * a)
+                candles[-2]["close"] < (e50 - 0.55 * a) and
+                candles[-3]["close"] < (e50 - 0.55 * a)
             )
             trend_broken = (
                 closed_2_below and
-                last < (e50 - 0.65 * a) and
+                last < (e50 - 0.55 * a) and
                 (e21 < e50 * 0.997 or e21_falling)
             )
             pos_age = current_time - pos.get("entry_time", current_time)
 
-            if pos_age >= 2400 and not is_toxic and pnl_pct >= 0.55 and entry_mode != "reversal" and trend_broken and sym in paper.positions:
+            if pos_age >= 2400 and not is_toxic and pnl_pct >= 0.45 and entry_mode != "reversal" and trend_broken and sym in paper.positions:
                 reason = "🪫 Слом тренда"
                 ex = paper._sell(sym, last, reason, regime_now=regime)
                 paper.log_event(sym, "sell_profit", last, reason, tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
@@ -157,9 +159,8 @@ class PositionManagerWorker:
                 self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)}{grade_badge(ex)} · {reason}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                 continue
 
-            # Анти-зомби выход (ТОЛЬКО если тренд под EMA50 сломлен и позиция висит >= 2.5ч без TP1)
-            is_stagnant = (not pos.get("tp1_done")) and pos_age >= 9000 and (last < e50 * 0.999 and e21 < e50 * 0.999)
-            if is_stagnant and pnl_pct >= 0.30 and sym in paper.positions:
+            is_stagnant = (not pos.get("tp1_done")) and pos_age >= 7200 and (last < e50 * 0.999 and e21 < e50 * 0.999)
+            if is_stagnant and pnl_pct >= 0.25 and sym in paper.positions:
                 reason = "⏱ Выход по времени (без импульса)"
                 ex = paper._sell(sym, last, reason, regime_now=regime)
                 paper.log_event(sym, "sell_profit", last, reason, tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
@@ -192,21 +193,32 @@ class PositionManagerWorker:
                     coin_compact = format_coin_compact(sym, pos)
                     self._notify(f"🛡 SL поднят по {coin_compact} до {new_sl_str} ({tag_emoji})")
 
-            # Непрерывное волновое скольжение потолка TP🏃🏻‍➡️ после взятия TP1
+            # СТУПЕНЧАТОЕ ДВИЖЕНИЕ ТЕЙКА «В РАСЧЁТЕ НА ПРОКОЛ» (ВВЕРХ И ВНИЗ)
             if pos.get("tp1_done"):
                 candles_1h = await market_data.get_kline(sym, "60", 250)
                 pos = paper.positions.get(sym)
                 if not pos:
                     continue
-                next_target, can_expand, phase_reason = calc_runner_target(sym, last, candles, candles_1h, pos=pos)
-                if can_expand and next_target > pos["tp"] * 1.005:
-                    old_tp = pos["tp"]
+                next_target, can_step, phase_reason = calc_runner_target(sym, last, candles, candles_1h, pos=pos)
+                old_tp = float(pos.get("tp", 0.0))
+                if can_step and old_tp > 0 and abs(next_target - old_tp) / old_tp >= 0.0018:
                     pos["tp"] = next_target
                     paper.save()
-                    paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP🏃🏻‍➡️ волна", mode="TP🏃🏻‍➡️", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
-                    if (next_target - old_tp) / old_tp * 100 >= 1.2:
+                    step_dir = "⬇️ под прокол" if next_target < old_tp else "⬆️ по волне"
+                    paper.log_event(sym, "tp_runner_raised", pos["tp"], f"TP🏃🏻‍➡️ ступень {step_dir}", mode="TP🏃🏻‍➡️", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                    if abs(next_target - old_tp) / old_tp * 100 >= 0.85:
                         sl_tag = sl_emoji(pos.get("sl_state", "TRAILING_RUNNER"))
-                        self._notify(f"TP🏃🏻‍➡️ <b>Волна потолка поднята</b> · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · {sl_tag} {fmt_price(pos['sl'])}")
+                        self._notify(f"TP🏃🏻‍➡️ <b>Ступень тейка ({step_dir})</b> · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · {sl_tag} {fmt_price(pos['sl'])}")
+            else:
+                # ДО TP1: если позиция висит >= 45 мин, цена ходила в плюс >= +0.75%, но застряла под крышей (фикс PYTHUSDT),
+                # опускаем ступеньку TP1 ближе к текущей волне (+0.85%..+1.05% от входа), чтобы поймать прокол шпилькой!
+                peak_pct = (max_p - pos["avg"]) / pos["avg"] * 100 if pos["avg"] > 0 else 0.0
+                if pos_age >= 2700 and peak_pct >= 0.75 and e21_falling and last > pos["avg"] * 1.002:
+                    step_down_tp1 = _round_px(max(pos["avg"] * 1.0085, last + 0.65 * a, e21 + 0.80 * a))
+                    if step_down_tp1 < pos["tp"] * 0.9980:
+                        pos["tp"] = step_down_tp1
+                        paper.save()
+                        paper.log_event(sym, "tp_runner_raised", pos["tp"], "🎯 TP1 снижен под прокол", mode="TP1", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
 
         # =====================================================================
         # 2. ПРОВЕРКА ОЖИДАЮЩИХ ОРДЕРОВ
@@ -278,13 +290,13 @@ class PositionManagerWorker:
             near_sl_danger = bool(ord_sl > 0 and t["last"] <= (ord_sl + 0.30 * a))
             sniper_broken = (
                 entry_mode != "reversal" and
-                t["last"] < (e50 - 0.85 * a) and
-                e21 < e50 * 0.994 and
-                (near_sl_danger or score_now < thr - 1.2)
+                t["last"] < (e50 - 0.65 * a) and
+                e21 < e50 * 0.996 and
+                (near_sl_danger or score_now < thr - 1.0)
             )
             reversal_broken = (
                 entry_mode == "reversal" and
-                (sup_broken or (curr_c["open"] - curr_c["close"]) > 1.15 * a)
+                (sup_broken or (curr_c["open"] - curr_c["close"]) > 0.95 * a)
             )
 
             if sniper_broken or reversal_broken:
@@ -295,8 +307,8 @@ class PositionManagerWorker:
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ ({init_score:.1f}-{score_now:.1f})")
                 continue
 
-            base_intact = (entry_mode != "reversal" and t["last"] >= e50 * 0.994 and e21 >= e50 * 0.995)
-            if order_age >= 1500 and not base_intact and score_now < (thr - 2.0):
+            base_intact = (entry_mode != "reversal" and t["last"] >= e50 * 0.996 and e21 >= e50 * 0.997)
+            if order_age >= 1500 and not base_intact and score_now < (thr - 1.8):
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], f"Ослаб ({score_now:.1f})", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 600)
@@ -304,7 +316,7 @@ class PositionManagerWorker:
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🪫📉 ({score_now:.1f})")
                 continue
 
-            if t["last"] > order["price"] + 2.8 * a:
+            if t["last"] > order["price"] + 2.6 * a:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], "Улетела без нас", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 300)
@@ -314,7 +326,7 @@ class PositionManagerWorker:
 
             max_order_age = 3600 if entry_mode == "reversal" else 2700
             if order_age > max_order_age:
-                if score_now >= (thr + 0.4) and order.get("extensions", 0) < 1:
+                if score_now >= (thr + 0.5) and order.get("extensions", 0) < 1 and base_intact:
                     order["extensions"] = order.get("extensions", 0) + 1
                     order["created"] = current_time - (max_order_age - 1800)
                     paper.save()
@@ -332,7 +344,7 @@ class PositionManagerWorker:
                 continue
 
             atr_pct = a / t["last"] * 100
-            off = entry_offset(score_now, thr, regime, atr_pct, entry_mode, tier=tier, is_accumulation=is_accum)
+            off = entry_offset(score_now, thr, regime, atr_pct, entry_mode, tier=tier, is_accumulation=is_accum, symbol=sym)
             ideal_price = min(t["last"] * (1 + off), t.get("bid1", t["last"]) * 0.9992)
             old_price = order["price"]
 
@@ -349,18 +361,20 @@ class PositionManagerWorker:
             dev_pct = abs(ideal_price - old_price) / old_price * 100
             in_freeze_zone = abs(t["last"] - old_price) <= (0.35 * a) or (abs(t["last"] - old_price) / old_price * 100) <= 0.28
 
-            if ideal_price < old_price and dev_pct >= 0.45 and not in_freeze_zone:
+            # В BEAR и NEUTRAL погоня за ценой вверх (pull_up) отключена — двигаем ордер только глубже на откат!
+            if ideal_price < old_price and dev_pct >= 0.40 and not in_freeze_zone:
                 if not (live_sup and ideal_price < live_sup * 1.0015):
                     target_price = ideal_price
                     action_type = "correct"
                     price_icon = "⬇️"
             elif (
+                regime == "bull" and
                 ideal_price > old_price and
                 order_age >= 720 and
                 order.get("requotes_up", 0) < 1 and
-                (score_now >= thr + 0.8 or order.get("grade") == "A+") and
-                e21 >= e50 and
-                0.28 <= dev_pct <= 0.85
+                score_now >= thr + 1.2 and
+                e21 > e50 and
+                0.28 <= dev_pct <= 0.65
             ):
                 target_price = ideal_price
                 action_type = "pull_up"
