@@ -14,7 +14,7 @@ from bot.strategy.risk import update_position_sl, calc_runner_target, _round_px
 
 
 class ExecutionRiskWorker:
-    """Критический воркер исполнения ордеров, Волнового Коридора SL/TP и антиспам-нотификаций."""
+    """Критический воркер исполнения ордеров, Ступенчатого Коридора на прокол SL/TP и антиспам-нотификаций."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -23,7 +23,7 @@ class ExecutionRiskWorker:
         self._btc_history = []
 
     async def run(self) -> None:
-        logger.info("⚡ Execution Worker запущен: Волновой Коридор SL/TP (Coin DNA Split) и исполнение позиций...")
+        logger.info("⚡ Execution Worker запущен: Ступенчатый Коридор SL/TP (работа на прокол) и исполнение позиций...")
         await asyncio.gather(
             self._price_loop(),
             self._emergency_loop()
@@ -139,11 +139,14 @@ class ExecutionRiskWorker:
                     part_qty = pos["qty"] * tp1_ratio
                     ex = paper.sell_partial(sym, part_qty, pos["tp"], "🔥 TP1")
                     pos["tp1_done"] = True
+                    pos["tp1_time"] = int(now_ts)
+                    pos["runner_steps"] = 0
                     paper.log_event(sym, "tp1", pos["tp"], f"🔥 TP1 (+{ex['pnl_pct']:.1f}%)", mode="🔥 TP1", tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                     shadow.mark_success(sym)
 
+                    # Ставим ступеньку TP🏃🏻‍➡️ не в луну, а под реальный прокол следующей волны (+0.70%..+1.35%)
                     next_target, _, _ = calc_runner_target(sym, last, candles_15m, candles_1h, pos=pos)
-                    pos["tp"] = _round_px(max(pos["tp"] * 1.022, next_target))
+                    pos["tp"] = _round_px(max(last * 1.0070, next_target))
 
                     _, new_sl, new_state, _ = update_position_sl(pos, max(pos.get("max_price", last), last), last_price=last, candles_15m=candles_15m)
                     pos["sl"] = new_sl
@@ -152,6 +155,7 @@ class ExecutionRiskWorker:
                     pos["_last_notified_sl_state"] = new_state
                     pos["_last_sl_notify_ts"] = now_ts
                     state_changed = True
+                    paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP🏃🏻‍➡️ ступень на прокол", mode="TP🏃🏻‍➡️", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
 
                     pct_label = int(round(tp1_ratio * 100))
                     runner_label = 100 - pct_label
@@ -165,57 +169,48 @@ class ExecutionRiskWorker:
                         "urgent": False,
                     })
                 else:
-                    next_target, can_expand, phase_reason = calc_runner_target(sym, last, candles_15m, candles_1h, pos=pos)
+                    # Произошёл ПРОКОЛ планки TP🏃🏻‍➡️!
+                    # Проверяем: это полнотелая пробойная ракета (делаем шаг TP2 + продаём 50% остатка) или прокол шпилькой (забираем 100% на проколе!)
+                    curr_c = candles_15m[-1] if candles_15m else None
+                    c_rng = (curr_c["high"] - curr_c["low"]) if curr_c else 0.0
+                    close_near_high = bool(curr_c and c_rng > 0 and (curr_c["high"] - curr_c["close"]) <= 0.25 * c_rng and curr_c["close"] > curr_c["open"])
+                    r_steps = int(pos.get("runner_steps", 0))
 
-                    if can_expand and next_target > pos["tp"] * 1.008:
-                        pos["tp"] = next_target
-                        # Вместо резкого прыжка SL на old_tp * 0.992 используем плавный 4-фазный волновой расчёт!
-                        _, new_sl, new_state, _ = update_position_sl(pos, max(pos.get("max_price", last), last), last_price=last, candles_15m=candles_15m)
-                        pos["sl"] = max(pos["sl"], new_sl)
-                        pos["sl_state"] = new_state
-                        pos["_last_notified_sl_str"] = fmt_price(pos["sl"])
-                        pos["_last_notified_sl_state"] = new_state
-                        pos["_last_sl_notify_ts"] = now_ts
-                        state_changed = True
-                        sl_tag = sl_emoji(new_state)
-                        paper.log_event(sym, "tp_runner_raised", pos["tp"], "TP🏃🏻‍➡️ волна расширена", mode="TP🏃🏻‍➡️", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
-                        self.bus.publish("NOTIFY", {
-                            "text": (
-                                f"TP🏃🏻‍➡️ <b>Волна потолка расширена</b> · {pair_html(sym, pos)}\n"
-                                f"🎯 {fmt_price(pos['tp'])} · {sl_tag} {fmt_price(pos['sl'])}"
-                            ),
-                            "urgent": False,
-                        })
-                    elif phase_reason in ("climax_freeze", "shelf_freeze"):
-                        old_tp = pos["tp"]
-                        candle_low = candles_15m[-2]["low"] if (candles_15m and len(candles_15m) >= 2) else last * 0.990
-                        tight_sl = _round_px(max(pos["sl"], candle_low * 0.997, last * 0.990))
-                        if tight_sl >= last * 0.995:
-                            tight_sl = _round_px(last * 0.992)
-                        pos["sl"] = tight_sl
+                    if close_near_high and r_steps < 1 and pos.get("wave_class") != "short_wave":
+                        # Продаём 50% раннера прямо на проколе и поднимаем ступеньку TP🏃🏻‍➡️ ещё на +0.85% под следующий прокол!
+                        tp2_price = pos["tp"]
+                        part_qty = pos["qty"] * 0.50
+                        ex = paper.sell_partial(sym, part_qty, tp2_price, "🔥 TP2 Прокол")
+                        pos["runner_steps"] = r_steps + 1
+
+                        a15 = float(pos.get("_atr15") or (last * 0.008))
+                        pos["sl"] = _round_px(max(pos["sl"], tp2_price * 0.9935, last - 0.55 * a15))
                         pos["sl_state"] = "ABOVE_TP1"
-                        pos["tp"] = _round_px(max(old_tp, last) * 1.022)
+                        pos["tp"] = _round_px(max(last * 1.0080, last + 0.90 * a15))
                         pos["_last_notified_sl_str"] = fmt_price(pos["sl"])
                         pos["_last_notified_sl_state"] = "ABOVE_TP1"
                         pos["_last_sl_notify_ts"] = now_ts
                         state_changed = True
-                        paper.log_event(sym, "tp_runner_raised", pos["tp"], f"🛡🔥 Свечной трейлинг на пике ({phase_reason})", mode="🛡🔥", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+
+                        paper.log_event(sym, "tp_runner_raised", pos["tp"], f"🔥 TP2 Прокол (+{ex['pnl_pct']:.1f}%)", mode="TP🏃🏻‍➡️", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                         self.bus.publish("NOTIFY", {
                             "text": (
-                                f"🛡🔥 <b>Свечной трейлинг на кульминации</b> · {pair_html(sym, pos)}\n"
+                                f"🔥 <b>TP2 Прокол (50% раннера)</b> · {pair_html(sym, pos)}{grade_badge(pos)}\n"
+                                f"🟢 {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}\n"
                                 f"TP🏃🏻‍➡️ {fmt_price(pos['tp'])} · 🛡🔥 {fmt_price(pos['sl'])}"
                             ),
                             "urgent": False,
                         })
                     else:
+                        # Забираем 100% оставшегося раннера прямо на проколе шпильки!
                         tp_exec_price = pos["tp"]
                         ex = paper._sell(sym, tp_exec_price, "TP🏃🏻‍➡️", regime_now=bot_state.current_regime)
-                        paper.log_event(sym, "tp_runner", tp_exec_price, f"TP🏃🏻‍➡️ (+{ex['pnl_pct']:.1f}%, {phase_reason})", mode="TP🏃🏻‍➡️", tp=tp_exec_price, sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
+                        paper.log_event(sym, "tp_runner", tp_exec_price, f"TP🏃🏻‍➡️ Прокол взят (+{ex['pnl_pct']:.1f}%)", mode="TP🏃🏻‍➡️", tp=tp_exec_price, sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
                         shadow.mark_success(sym)
                         bot_state.record_trade_exit(sym, ex["pnl_pct"], tp_exec_price, is_sl=False)
                         self.bus.publish("NOTIFY", {
                             "text": (
-                                f"TP🏃🏻‍➡️ <b>Фиксация на пике волны</b> · {pair_html(sym, ex)}{grade_badge(ex)}\n"
+                                f"TP🏃🏻‍➡️ <b>Фиксация на проколе</b> · {pair_html(sym, ex)}{grade_badge(ex)}\n"
                                 f"{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}"
                             ),
                             "urgent": False,
