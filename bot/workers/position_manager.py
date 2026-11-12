@@ -210,11 +210,12 @@ class PositionManagerWorker:
                         sl_tag = sl_emoji(pos.get("sl_state", "TRAILING_RUNNER"))
                         self._notify(f"TP🏃🏻‍➡️ <b>Ступень тейка ({step_dir})</b> · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · {sl_tag} {fmt_price(pos['sl'])}")
             else:
-                # ДО TP1: если позиция висит >= 45 мин, цена ходила в плюс >= +0.75%, но застряла под крышей (фикс PYTHUSDT),
-                # опускаем ступеньку TP1 ближе к текущей волне (+0.85%..+1.05% от входа), чтобы поймать прокол шпилькой!
+                # ДО TP1: если позиция висит >= 30 мин, ходила в плюс >= +0.70%, но откатила от пика >= 0.25*ATR (фикс PYTHUSDT),
+                # опускаем ступеньку TP1 ближе к текущей цене (+0.75%..+1.00% от входа), чтобы поймать прокол шпилькой!
                 peak_pct = (max_p - pos["avg"]) / pos["avg"] * 100 if pos["avg"] > 0 else 0.0
-                if pos_age >= 2700 and peak_pct >= 0.75 and e21_falling and last > pos["avg"] * 1.002:
-                    step_down_tp1 = _round_px(max(pos["avg"] * 1.0085, last + 0.65 * a, e21 + 0.80 * a))
+                pulled_back = (max_p - last) >= 0.25 * a
+                if pos_age >= 1800 and peak_pct >= 0.70 and pulled_back and last >= pos["avg"] * 0.998:
+                    step_down_tp1 = _round_px(max(pos["avg"] * 1.0075, last + 0.50 * a, e21 + 0.55 * a))
                     if step_down_tp1 < pos["tp"] * 0.9980:
                         pos["tp"] = step_down_tp1
                         paper.save()
@@ -361,7 +362,6 @@ class PositionManagerWorker:
             dev_pct = abs(ideal_price - old_price) / old_price * 100
             in_freeze_zone = abs(t["last"] - old_price) <= (0.35 * a) or (abs(t["last"] - old_price) / old_price * 100) <= 0.28
 
-            # В BEAR и NEUTRAL погоня за ценой вверх (pull_up) отключена — двигаем ордер только глубже на откат!
             if ideal_price < old_price and dev_pct >= 0.40 and not in_freeze_zone:
                 if not (live_sup and ideal_price < live_sup * 1.0015):
                     target_price = ideal_price
