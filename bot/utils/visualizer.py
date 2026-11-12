@@ -109,7 +109,6 @@ class TradeVisualizer:
         fig.add_trace(go.Scatter(x=df_kline['datetime'], y=df_kline['EMA21'], mode='lines', name='EMA 21', line=dict(color='rgba(255, 235, 59, 0.8)', width=1.5)), row=1, col=1)
         fig.add_trace(go.Scatter(x=df_kline['datetime'], y=df_kline['EMA50'], mode='lines', name='EMA 50', line=dict(color='rgba(255, 152, 0, 0.8)', width=1.5)), row=1, col=1)
 
-        # Отрисовка уровней S/R
         df_sr_15m = df_kline if self.interval == "15" else self.fetch_klines(start_ts, end_ts, interval_override="15")
         if df_sr_15m.empty:
             df_sr_15m = df_kline
@@ -132,7 +131,6 @@ class TradeVisualizer:
                 hoverinfo="name+y", showlegend=(idx == 0)
             ), row=1, col=1)
 
-        # ФОНОВАЯ ПОДСВЕТКА ФАЗ РЫНКА (BULL / BEAR / NEUTRAL)
         if market_history:
             history_sorted = sorted(market_history, key=lambda x: x.get("ts", 0))
             for i in range(len(history_sorted)):
@@ -152,7 +150,6 @@ class TradeVisualizer:
                 reg_color = "rgba(38, 166, 154, 0.08)" if reg == "bull" else ("rgba(239, 83, 80, 0.08)" if reg == "bear" else "rgba(255, 235, 59, 0.04)")
                 fig.add_vrect(x0=x0_val, x1=x1_val, fillcolor=reg_color, opacity=1.0, layer="below", line_width=0, row=1, col=1)
 
-        # Потрейдовый анализ волнового коридора стопов и тейков
         trade_groups = []
         current_trade = []
         for _, ev in df_ev.sort_values('ts').iterrows():
@@ -185,13 +182,16 @@ class TradeVisualizer:
                 if is_active_trade and pos.get('sl'):
                     sl_x.append(max_time)
                     sl_y.append(pos['sl'])
+                elif len(sl_x) == 1:
+                    sl_x.append(t_end)
+                    sl_y.append(sl_y[0])
 
                 fig.add_trace(go.Scatter(
                     x=sl_x, y=sl_y,
                     mode="lines+markers",
-                    line=dict(color="rgba(255, 23, 68, 0.88)", width=2.2, shape="spline", smoothing=0.65),
+                    line=dict(color="rgba(255, 23, 68, 0.90)", width=2.0, shape="hv"),
                     marker=dict(size=4, color="red"), name=f"Стоп ({label_tag})",
-                    hoverinfo="text+y", text=[f"🛡 Волна SL: {fmt_price(p)}" for p in sl_y]
+                    hoverinfo="text+y", text=[f"🛡 SL: {fmt_price(p)}" for p in sl_y]
                 ), row=1, col=1)
 
             tp_points = tr_df[tr_df['tp'].notna() & (tr_df['tp'] > 0)]
@@ -201,13 +201,16 @@ class TradeVisualizer:
                 if is_active_trade and pos.get('tp'):
                     tp_x.append(max_time)
                     tp_y.append(pos['tp'])
+                elif len(tp_x) == 1:
+                    tp_x.append(t_end)
+                    tp_y.append(tp_y[0])
 
                 fig.add_trace(go.Scatter(
                     x=tp_x, y=tp_y,
                     mode="lines+markers",
-                    line=dict(color="rgba(0, 230, 118, 0.88)", width=2.2, shape="spline", smoothing=0.65),
+                    line=dict(color="rgba(0, 230, 118, 0.90)", width=2.0, shape="hv"),
                     marker=dict(size=4, color="green"), name=f"Тейк ({label_tag})",
-                    hoverinfo="text+y", text=[f"🎯 Волна TP: {fmt_price(p)}" for p in tp_y]
+                    hoverinfo="text+y", text=[f"🎯 TP: {fmt_price(p)}" for p in tp_y]
                 ), row=1, col=1)
 
         # 2 СЛОЙ: Объем
@@ -228,7 +231,7 @@ class TradeVisualizer:
             "sell_loss": ("#ff1744", "x", "Убыток"),
             "sell": ("red", "x", "Продажа"),
             "sl_moved": ("orange", "circle-open", "Трейлинг"),
-            "tp_runner_raised": ("#00e5ff", "triangle-up-open", "TP поднят"),
+            "tp_runner_raised": ("#00e5ff", "triangle-up-open", "TP сдвиг"),
             "cancel": ("silver", "x-open", "Отмена")
         }
 
