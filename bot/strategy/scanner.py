@@ -173,7 +173,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     if drop_from_48h_high_pct >= 15.0 and last_1h < e21_1h and e21_1h < e50_1h:
         return "1H_BAN", e21_1h, e50_1h, f"1H крах с хая (-{drop_from_48h_high_pct:.1f}% под EMA21/50)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    # --- ЗАЩИТА ОТ ПОКУПКИ НА СЛИВЕ ПОСЛЕ ПИКА (SPCXX, NEAR, BR, TRUMP, PYTH, NIGHT день 2) ---
     recent_24_1h = candles_1h[-24:] if len(candles_1h) >= 24 else candles_1h
     hi24_idx = max(range(len(recent_24_1h)), key=lambda i: recent_24_1h[i]["high"])
     max_h_24 = recent_24_1h[hi24_idx]["high"]
@@ -186,7 +185,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     prev_1h = candles_1h[-2]
     prev2_1h = candles_1h[-3] if len(candles_1h) >= 3 else prev_1h
 
-    # 1. Крупные красные часовые свечи, пробивающие 1H EMA21 сверху вниз (SPCXX, BR, NEAR)
     big_1h_dump_candle = (
         ((curr_1h["open"] - curr_1h["close"]) > 0.65 * a_1h and curr_1h["close"] < e21_1h * 1.001) or
         ((prev_1h["open"] - prev_1h["close"]) > 0.70 * a_1h and last_1h <= prev_1h["open"] * 0.997 and last_1h < e21_1h * 1.002) or
@@ -195,7 +193,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     if big_1h_dump_candle and bars_since_hi24 >= 1:
         return "1H_BAN", e21_1h, e50_1h, f"1H активный слив под EMA21 (-{drop_from_hi24_pct:.1f}% от пика)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    # 2. Затухание волны и разворот среднесрока вниз после пика (PYTH, TRUMP, NIGHT день 2, ENA)
     if bars_since_hi24 >= 3 and wave_24_pct >= 3.2:
         retrace_ratio = (max_h_24 - last_1h) / (max_h_24 - min_before_hi24) if max_h_24 > min_before_hi24 else 0.0
         e21_rolling_over = e21_1h <= e21_3h_ago * 1.0002
@@ -205,33 +202,31 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
 
     e21_rising_1h = e21_1h > e21_3h_ago * 1.0004
     e50_rising_1h = e50_1h >= e50_6h_ago * 0.9998
-    e21_falling_1h = (e21_1h < e21_3h_ago * 0.9985) or (last_1h < e21_1h * 0.996)
+    e21_falling_1h = (e21_1h < e21_3h_ago * 0.9980) and (last_1h < e21_1h * 0.995)
     e50_falling_48h = (e50_1h < e50_12h_ago * 0.996) and (e50_1h < e50_24h_ago * 0.992)
 
-    # Проверяем 15m структуру, чтобы не покупать на отрыве от 15m EMA21 и не покупать при сломе 15m тренда
+    has_breakout_pat = "breakout" in (patterns or [])
     healthy_15m_trend = True
     reversal_15m_confirmed = False
     if candles_15m and len(candles_15m) >= 35:
         c15_closes = [c["close"] for c in candles_15m]
-        e21_15_s = ema(c15_closes, 21)
-        e50_15_s = ema(c15_closes, 50)
-        e21_15 = e21_15_s[-1]
-        e50_15 = e50_15_s[-1]
+        e21_15 = ema(c15_closes, 21)[-1]
+        e50_15 = ema(c15_closes, 50)[-1]
         r_15 = rsi(c15_closes)
         last_15 = c15_closes[-1]
         closed_15 = candles_15m[-2]
         prev_closed_15 = candles_15m[-3]
 
-        # Для трендового входа на 15m: EMA21 >= EMA50, цена не перегрета и не провалилась под EMA50
+        max_atr_dist = 2.20 if has_breakout_pat else 1.50
+        max_rsi_15 = 73 if has_breakout_pat else 69
         if (
             e21_15 < e50_15 * 0.9985 or
             last_15 < e50_15 * 0.996 or
-            (a15 > 0 and (last_15 - e21_15) > 1.35 * a15) or
-            r_15 > 69
+            (a15 > 0 and (last_15 - e21_15) > max_atr_dist * a15) or
+            r_15 > max_rsi_15
         ):
             healthy_15m_trend = False
 
-        # Для контртрендового reversal: обязательный разворот на 15m (закрытие над EMA21 или зелёный Higher High)
         if (
             last_15 >= e21_15 * 0.999 and
             closed_15["close"] >= closed_15["open"] and
@@ -240,18 +235,17 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         ):
             reversal_15m_confirmed = True
 
-    # 1. Ступенчатый растущий тренд (NIGHT, OPG, SPCXX #1, NFT, PYTH #1):
-    # Разрешаем pos_in_48h до 0.96, если 1H EMA21 > EMA50 уверенно растут, нет слива с пика, а на 15m здоровый откат к EMA21!
     max_allowed_pos_48 = 0.96 if (e21_rising_1h and e50_rising_1h and last_1h >= e21_1h * 0.998 and healthy_15m_trend) else 0.66
+    min_1h_anchor = (e21_1h * 0.998) if pos_in_48h > 0.66 else (e50_1h * 0.997)
 
     is_uptrend_1h = (
-        last_1h >= e21_1h * 0.997 and
-        e21_1h >= e50_1h * 0.998 and
+        last_1h >= min_1h_anchor and
+        e21_1h >= e50_1h * 0.997 and
         not e21_falling_1h and
         not e50_falling_48h and
         healthy_15m_trend and
         0.20 <= pos_in_48h <= max_allowed_pos_48 and
-        0.3 <= chg_48h <= 28.0 and
+        0.2 <= chg_48h <= 28.0 and
         r_1h <= 76
     )
 
@@ -266,7 +260,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         r_1h <= 70
     )
 
-    has_breakout_pat = "breakout" in (patterns or [])
     is_breakout_1h = (
         has_breakout_pat and
         last_1h >= e21_1h * 1.000 and
@@ -306,6 +299,27 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
 
     if pos_in_48h > 0.66 or chg_48h > 22.0:
         return "1H_BAN", e21_1h, e50_1h, f"1H крыша/перегрев без отката ({chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
+
+    has_strong_slab = bool(nearest_sup and sup_touches >= 3 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 2.2 * a15)
+    is_1h_waterfall = (
+        (curr_1h["close"] < curr_1h["open"] and prev_1h["close"] < prev_1h["open"]) or
+        (curr_1h["low"] <= low_48h * 1.003) or
+        ((e21_3h_ago - e21_1h) > 0.65 * a_1h)
+    )
+
+    if is_1h_waterfall and not reversal_15m_confirmed:
+        return "1H_BAN", e21_1h, e50_1h, f"1H падающий нож без разворота 15m ({chg_48h:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
+
+    if last_1h < e50_1h and e50_falling_48h:
+        dist_below_e50_1h = (e50_1h - last_1h) / a_1h if a_1h > 0 else 0.0
+        if has_strong_slab and reversal_15m_confirmed and dist_below_e50_1h <= 2.8 and pos_in_48h <= 0.35 and drop_from_48h_high_pct < 14.0:
+            return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"1H плита + разворот 15m ({sup_touches}x, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
+        return "1H_BAN", e21_1h, e50_1h, f"1H даунтренд ({chg_48h:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
+
+    if has_strong_slab and reversal_15m_confirmed and pos_in_48h <= 0.38:
+        return "1H_SUPPORT_ONLY", e21_1h, e50_1h, f"1H опора на плиту ({sup_touches}x, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
+
+    return "1H_BAN", e21_1h, e50_1h, f"1H нет тренда и нет разворота ({chg_48h:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
     # --- СТРОГИЙ ФИЛЬТР REVERSAL (ЗАЩИТА ОТ ВОДОПАДОВ CYBER, MEGA, ENA, NEAR) ---
     has_strong_slab = bool(nearest_sup and sup_touches >= 3 and a15 > 0 and 0 <= (last_1h - nearest_sup) <= 2.2 * a15)
