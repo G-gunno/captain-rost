@@ -17,19 +17,19 @@ from bot.strategy.risk import (
 )
 from bot.news.cmc import get_coin_name
 from bot.news.rss_news import fetch_news_cache, check_sentiment
-from bot.utils.format import pair_html, corr_txt, usd, fmt_price, fmt_pct, grade_badge
+from bot.utils.format import pair_html, corr_txt, usd, fmt_price, fmt_pct, pnl_emoji, grade_badge
 from bot.core.state import bot_state
 
 
 class OrderManagerWorker:
-    """Управляет портфелем: Умный Овербукинг, защита последнего слота тира для [💎] A+ и безопасная ротация."""
+    """Управляет портфелем: Умный Овербукинг, вытеснение спящих позиций под ракеты 9.2+ и безопасная ротация."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
         self.signal_queue = self.bus.subscribe("SIGNALS_READY", maxsize=2)
 
     async def run(self):
-        logger.info("💼 Order Manager запущен: Умный Овербукинг, защита слотов [💎] A+ и безопасная ротация...")
+        logger.info("💼 Order Manager запущен: Умный Овербукинг, ротация спящих слотов под ракеты и защита [💎] A+...")
         while True:
             try:
                 event = await self.signal_queue.get()
@@ -44,7 +44,6 @@ class OrderManagerWorker:
         self.bus.publish("NOTIFY", {"text": text, "urgent": urgent})
 
     def _effective_orders_for_risk(self) -> list:
-        """Возвращает только те ожидающие ордера в каждом тире, которые реально могут исполниться до лимита 3 позиций."""
         if not paper.orders:
             return []
         by_tier = defaultdict(list)
@@ -63,8 +62,51 @@ class OrderManagerWorker:
                 effective.extend(ords_sorted[:avail_slots])
         return effective
 
+    def _try_evict_sleeping_position(self, cand: dict, tier: str, tickers: dict, regime: str) -> bool:
+        """
+        Если пришёл элитный трендовый сигнал (score >= 9.2), а все 3 слота тира заняты,
+        проверяем: нет ли среди них «спящей» позиции (> 75 мин без TP1 в околонулевой зоне -0.05%..+0.40%),
+        чтобы освободить слот под ракету (фикс упущенного пампа GRAMUSDT +10.8% из-за спящей AAVE).
+        """
+        if cand.get("score", 0.0) < 9.2 or cand.get("entry_mode") not in ("sniper", "rocket"):
+            return False
+
+        now_ts = int(time.time())
+        sleeping_candidates = []
+
+        for sym, pos in list(paper.positions.items()):
+            if (pos.get("tier") or "SMALL") != tier:
+                continue
+            if pos.get("tp1_done"):
+                continue
+            pos_age = now_ts - int(pos.get("entry_time", now_ts))
+            if pos_age < 4500:  # минимум 75 минут
+                continue
+            last_p = tickers.get(sym, {}).get("last", 0.0)
+            avg_p = pos.get("avg", 0.0)
+            if last_p <= 0 or avg_p <= 0:
+                continue
+            pnl_pct = (last_p - avg_p) / avg_p * 100.0
+            if -0.05 <= pnl_pct <= 0.42 and (cand["score"] - float(pos.get("score", 6.0))) >= 1.5:
+                sleeping_candidates.append((pos_age, sym, pos, last_p))
+
+        if not sleeping_candidates:
+            return False
+
+        sleeping_candidates.sort(key=lambda x: x[0], reverse=True)
+        _, v_sym, v_pos, v_last = sleeping_candidates[0]
+        reason = f"🔄 Ротация слота под ракету {cand['symbol'][:-4]} ({cand['score']:.1f})"
+        ex = paper._sell(v_sym, v_last, "🛡🔒 БУ", regime_now=regime)
+        paper.log_event(v_sym, "sell_profit", v_last, reason, tp=v_pos.get("tp"), sl=v_pos.get("sl"), sup=v_pos.get("nearest_sup"), res=v_pos.get("nearest_res"))
+        bot_state.set_cooldown(v_sym, 600, structural_reset=False, reason="slot_evict")
+        logger.info(f"OrderManager: 🔄 Освобождён спящий слот {v_sym} ({ex['pnl_pct']:+.2f}%) ради ракеты {cand['symbol']} ({cand['score']:.1f})")
+        self._notify(
+            f"🔄 <b>Освобождён спящий слот</b> · продан {pair_html(v_sym, ex)}{grade_badge(ex)} ({pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])})\n"
+            f"➡️ под ракету <b>{cand['symbol'][:-4]}</b> (⭐ {cand['score']:.1f})"
+        )
+        return True
+
     def _try_rotate_order(self, cand: dict, cand_grade: str, tickers: dict, reason_tag: str = "освобождение USDT", target_tier: str = None, force_replace_b: bool = False) -> bool:
-        """Снимает старый слабый ордер ТОЛЬКО после того, как новый кандидат полностью прошёл валидацию SL/TP."""
         if not paper.orders:
             return False
 
@@ -155,18 +197,21 @@ class OrderManagerWorker:
             entry_mode = cand.get("entry_mode", "sniper")
             is_mom = cand.get("is_momentum", False)
 
-            # 1. ПРОВЕРКА ЛИМИТА ТИРА ПО ОТКРЫТЫМ ПОЗИЦИЯМ (макс. 3 позиции одного тира)
+            # 1. ПРОВЕРКА ЛИМИТА ТИРА (если все 3 слота заняты — пробуем разгрузить спящую позицию ради ракеты 9.2+)
             tier_pos_count = paper.count_tier_positions(tier)
             if tier_pos_count >= MAX_POSITIONS_PER_TIER:
-                logger.debug(f"OrderManager: {sym} пропущен -> в тире {tier} уже открыто {tier_pos_count}/{MAX_POSITIONS_PER_TIER} позиций")
-                continue
+                if self._try_evict_sleeping_position(cand, tier, tickers, regime):
+                    tier_pos_count = paper.count_tier_positions(tier)
+                else:
+                    logger.debug(f"OrderManager: {sym} пропущен -> в тире {tier} уже открыто {tier_pos_count}/{MAX_POSITIONS_PER_TIER} позиций")
+                    continue
 
-            # 2. Защита от синхронного набора клонов BTC (corr >= 0.78) в BEAR и NEUTRAL
+            # 2. Смягчённый фильтр BTC-клонов (corr >= 0.85), НЕ блокирующий ракеты 9.0+ (фикс NEAR 10.0, SOL 10.0, WLD 10.0)
             cand_corr = float(cand.get("corr") or 0.0)
-            if regime in ("bear", "neutral") and cand_corr >= 0.78:
-                max_corr_pos = 2 if regime == "bear" else 3
-                high_corr_pos = sum(1 for p in paper.positions.values() if float(p.get("corr") or 0.0) >= 0.78)
-                high_corr_ord = sum(1 for o in paper.orders if float(o.get("corr") or 0.0) >= 0.78)
+            if regime in ("bear", "neutral") and cand_corr >= 0.85 and cand.get("score", 0.0) < 9.0:
+                max_corr_pos = 3 if regime == "bear" else 4
+                high_corr_pos = sum(1 for p in paper.positions.values() if float(p.get("corr") or 0.0) >= 0.85)
+                high_corr_ord = sum(1 for o in paper.orders if float(o.get("corr") or 0.0) >= 0.85)
                 if high_corr_pos >= max_corr_pos or (high_corr_pos + high_corr_ord) >= (max_corr_pos + 1):
                     logger.info(f"OrderManager: {sym} пропущен -> лимит BTC-клонов ({high_corr_pos} поз., {high_corr_ord} орд., corr {cand_corr:.2f})")
                     continue
@@ -179,7 +224,9 @@ class OrderManagerWorker:
             if a <= 0:
                 continue
 
-            bot_state.check_structural_reset(sym, cand["last"], e21_15m, e50_15m)
+            # Если монета в чёрном списке Coin Trust (после серии стопов) — не сбрасываем карантин досрочно
+            if learner.coin_bias(sym) > -1.0:
+                bot_state.check_structural_reset(sym, cand["last"], e21_15m, e50_15m)
             if bot_state.is_on_cooldown(sym):
                 continue
 
@@ -204,8 +251,6 @@ class OrderManagerWorker:
                     logger.info(f"OrderManager: {sym} пропущен -> режим {risk_mode} требует [💎] A+ для {entry_mode}")
                     continue
 
-            # 3. ЗАЩИТА ПОСЛЕДНЕГО СЛОТА ТИРА (avail_tier_slots == 1):
-            # Не даём слабым ордерам [B] вставать в очередь рядом с [💎] A+ и перехватывать последний слот через AUTO-CANCEL!
             avail_tier_slots = MAX_POSITIONS_PER_TIER - tier_pos_count
             is_elite_cand = (grade == "A+" or cand["score"] >= 8.2)
             if avail_tier_slots == 1:
@@ -223,15 +268,18 @@ class OrderManagerWorker:
                 continue
 
             thr = cand.get("thr") or thrs.get(entry_mode, 6.0)
-            off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], entry_mode, tier=tier, is_accumulation=is_accum)
-
-            if entry_mode in ("sniper", "rocket") and (cand["score"] >= 8.5 or grade == "A+"):
-                off = max(off, -0.0028 if tier in ("SMALL", "MICRO") else -0.0020)
+            off = entry_offset(cand["score"], thr, regime, cand["atr_pct"], entry_mode, tier=tier, is_accumulation=is_accum, symbol=sym)
 
             t_data = tickers.get(sym, {})
             bid1 = t_data.get("bid1", cand["last"])
             ideal_entry = cand["last"] * (1 + off)
-            entry = min(ideal_entry, bid1 * 0.9992)
+            entry = min(ideal_entry, bid1 * 0.9990)
+
+            # Если монета высоко в 48ч-диапазоне (> 68%), привязываем лимитку ближе к 15m EMA21, чтобы не покупать верхушку свечи!
+            if entry_mode == "sniper" and cand.get("pos_in_48h", 0.5) > 0.68 and e21_15m > 0:
+                ema_pullback_cap = e21_15m + 0.40 * a
+                if ema_pullback_cap < entry and ema_pullback_cap >= cand["last"] * 0.988:
+                    entry = ema_pullback_cap
 
             wick_entry = cand.get("wick_entry_price")
             if entry_mode == "reversal" and wick_entry and 0 < wick_entry < entry:
@@ -282,7 +330,6 @@ class OrderManagerWorker:
             if sl_dist_pct <= 0:
                 continue
 
-            # 4. Если остался 1 слот в тире и пришёл элитный кандидат [💎] A+, очищаем слабые ордера [B] этого тира
             if avail_tier_slots == 1 and is_elite_cand:
                 self._try_rotate_order(
                     cand, grade, tickers,
@@ -323,7 +370,7 @@ class OrderManagerWorker:
 
             size_base = buy_size(
                 equity, cand["score"], thr, cand["liquidity"], free_usdt,
-                entry_mode=entry_mode, grade=grade
+                entry_mode=entry_mode, grade=grade, symbol=sym
             )
 
             size = min(size_base, size_by_risk, free_usdt * 0.98, equity * 0.14)
