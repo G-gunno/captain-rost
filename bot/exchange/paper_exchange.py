@@ -58,6 +58,11 @@ class PaperExchange:
             self.realized = data.get("realized", [])
             self.market_history = data.get("market_history", [])
             self.chart_events = data.get("chart_events", [])
+            if not getattr(learner, "coin_stats", None):
+                for r in self.realized:
+                    if not r.get("partial") and r.get("symbol"):
+                        learner.coin_stats.setdefault(r["symbol"], []).append(round(float(r.get("pnl_pct", 0.0)), 2))
+                learner.save()
             logger.info(f"Paper state загружен: USDT={self.usdt:.2f}, позиций={len(self.positions)}")
         else:
             self.chart_events = []
@@ -447,12 +452,13 @@ class PaperExchange:
 
         try:
             learner.record(
-                pos.get("reason_keys", []), total_pnl > 0,
-                total_pnl_pct, sector=sector, tier=tier,
-                exit_type=exit_type, runner_bonus=runner_bonus,
-                soft=soft, entry_mode=entry_mode,
+                pos.get("reason_keys", []), pnl > 0, pnl_pct=total_pnl_pct,
+                sector=pos.get("sector"), tier=pos.get("tier"),
+                exit_type=exit_type, runner_bonus=runner_bonus, soft=soft,
+                entry_mode=pos.get("entry_mode", "sniper"),
                 patterns=pos.get("patterns", []),
-                grade=grade,
+                grade=pos.get("grade", "B"),
+                symbol=sym,
             )
         except Exception as e:
             logger.error(f"learner record error: {e}")
