@@ -15,6 +15,15 @@ MAX_EVENTS_PER_SYMBOL = 150
 MAX_TOTAL_EVENTS = 5000
 
 
+def _round_ev_px(val):
+    if val is None:
+        return None
+    v = float(val)
+    if v <= 0:
+        return 0.0
+    return round(v, 10) if v < 0.0001 else round(v, 8)
+
+
 class PaperExchange:
     """Виртуальная биржа с Умным Овербукингом, защитой от каскадного залива (Velocity Shield) и 48ч аналитикой."""
 
@@ -119,10 +128,10 @@ class PaperExchange:
             "text": text,
             "rsi": round(rsi_val, 1) if rsi_val else None,
             "mode": mode,
-            "tp": round(float(tp), 8) if tp is not None else None,
-            "sl": round(float(sl), 8) if sl is not None else None,
-            "sup": round(float(sup), 8) if sup is not None else None,
-            "res": round(float(res), 8) if res is not None else None,
+            "tp": _round_ev_px(tp),
+            "sl": _round_ev_px(sl),
+            "sup": _round_ev_px(sup),
+            "res": _round_ev_px(res),
         })
 
     def _resolve_sector(self, symbol, fallback_sector=None):
@@ -169,12 +178,6 @@ class PaperExchange:
         return sum(1 for o in self.orders if (o.get("tier") or "SMALL") == t_norm)
 
     def effective_locked_usdt(self) -> float:
-        """
-        Умный Овербукинг кэша:
-        Поскольку в каждом тире может исполниться не более (MAX_POSITIONS_PER_TIER - открыто_в_тире) ордеров,
-        а остальные резервные ордера тира автоматически снимутся, считаем заблокированным только
-        реально исполнимый объём топ-ордеров каждого тира.
-        """
         if not self.orders:
             return 0.0
         orders_by_tier = defaultdict(list)
@@ -266,6 +269,8 @@ class PaperExchange:
                     pos["reason_keys"] = order.get("reason_keys", [])
                     pos["patterns"] = order.get("patterns", [])
                     pos["grade"] = order.get("grade", "B")
+                    pos["wave_class"] = order.get("wave_class", "mid_wave")
+                    pos["wave_amp_pct"] = order.get("wave_amp_pct", 3.2)
                     pos["sector"] = self._resolve_sector(sym, order.get("sector"))
                     pos["tier"] = tier
                     pos["regime_entry"] = order.get("regime")
@@ -452,12 +457,17 @@ class PaperExchange:
 
         try:
             learner.record(
-                pos.get("reason_keys", []), pnl > 0, pnl_pct=total_pnl_pct,
-                sector=pos.get("sector"), tier=pos.get("tier"),
-                exit_type=exit_type, runner_bonus=runner_bonus, soft=soft,
-                entry_mode=pos.get("entry_mode", "sniper"),
+                pos.get("reason_keys", []),
+                total_pnl > 0,
+                pnl_pct=total_pnl_pct,
+                sector=sector,
+                tier=tier,
+                exit_type=exit_type,
+                runner_bonus=runner_bonus,
+                soft=soft,
+                entry_mode=entry_mode,
                 patterns=pos.get("patterns", []),
-                grade=pos.get("grade", "B"),
+                grade=grade,
                 symbol=sym,
             )
         except Exception as e:
