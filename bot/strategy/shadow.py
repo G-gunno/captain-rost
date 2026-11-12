@@ -5,7 +5,7 @@ from pathlib import Path
 
 from loguru import logger
 from bot.core.remote_state import download_state, upload_state
-from bot.strategy.learner import learner
+from bot.strategy.learner import learner, clamp_weight
 
 STATE_FILE = Path(os.getenv("STORAGE_DIR", "storage")) / "shadow.json"
 REMOTE_PATH = "shadow.json"
@@ -32,7 +32,7 @@ def _band(score):
 
 
 class Shadow:
-    """Теневой журнал + Память ДНК Монет (Coin DNA): калибрует пороги по корзинам и адаптирует длину волны."""
+    """Теневой журнал + Память ДНК Монет (Coin DNA): калибрует пороги, глубину отката и цели под рынок."""
 
     def __init__(self):
         self.episodes = {}
@@ -42,7 +42,7 @@ class Shadow:
         self.tuning = {
             "auto": True,
             "nudge_rocket": 0.0, "nudge_sniper": 0.0, "nudge_reversal": 0.0,
-            "hunt": -0.0032, "near": -0.0015, "capture": +0.002,
+            "hunt": -0.0035, "near": -0.0020, "capture": +0.002,
             "sl_mult": 1.0, "tp_mult": 1.0,
             "signal_windows": {"rsi_hi": 90, "chg_hi": 30, "vol_lo": 1.3},
         }
@@ -65,8 +65,9 @@ class Shadow:
             self.cooldown = data.get("cooldown", {})
             self.coin_dna = data.get("coin_dna", {})
             self.tuning.update(data.get("tuning", {}))
-            if float(self.tuning.get("hunt", -0.0032)) < -0.0042:
-                self.tuning["hunt"] = -0.0032
+            h_val = float(self.tuning.get("hunt", -0.0035))
+            if h_val < -0.0055 or h_val > -0.0028:
+                self.tuning["hunt"] = -0.0035
             logger.info(
                 f"shadow: загружен ({len(self.episodes)} эпиз., ДНК {len(self.coin_dna)} монет, hunt={self.tuning['hunt']})"
             )
@@ -93,21 +94,21 @@ class Shadow:
             upload_state(REMOTE_PATH, payload)
 
     def update_coin_dna(self, symbol: str, candles_15m: list, candles_1h: list, atr_pct: float, chg_48h: float, pos_in_48h: float):
-        """Обновляет профиль волатильности, средней длины волны и среднесрочного тренда монеты."""
+        """Обновляет профиль волатильности, средней длины волны и глубины откатов монеты."""
         if not candles_1h or len(candles_1h) < 24:
             return
 
         recent_1h = candles_1h[-48:] if len(candles_1h) >= 48 else candles_1h
         swings = []
-        chunk_size = 8
-        for i in range(0, len(recent_1h) - 3, chunk_size):
+        chunk_size = 6
+        for i in range(0, len(recent_1h) - 2, chunk_size):
             slc = recent_1h[i:i + chunk_size]
             lo = min(c["low"] for c in slc)
             hi = max(c["high"] for c in slc)
             if lo > 0:
                 swings.append((hi - lo) / lo * 100.0)
 
-        raw_wave_amp = (sum(swings) / len(swings)) if swings else max(2.5, atr_pct * 3.2)
+        raw_wave_amp = (sum(swings) / len(swings)) if swings else max(2.2, atr_pct * 2.8)
 
         pullbacks = []
         if candles_15m and len(candles_15m) >= 30:
@@ -117,7 +118,7 @@ class Shadow:
                 lo_15 = min(c["low"] for c in w)
                 if hi_15 > 0:
                     pullbacks.append((hi_15 - lo_15) / hi_15 * 100.0)
-        avg_pullback = (sum(pullbacks) / len(pullbacks)) if pullbacks else max(0.6, atr_pct * 0.9)
+        avg_pullback = (sum(pullbacks) / len(pullbacks)) if pullbacks else max(0.5, atr_pct * 0.85)
 
         prev = self.coin_dna.get(symbol, {})
         hist_mfe = prev.get("hist_mfe", raw_wave_amp)
@@ -125,17 +126,17 @@ class Shadow:
         blended_wave = round(0.55 * raw_wave_amp + 0.25 * prev_wave + 0.20 * hist_mfe, 2)
         blended_atr = round(0.6 * atr_pct + 0.4 * prev.get("atr_pct", atr_pct), 3)
 
-        if chg_48h >= 4.0 and pos_in_48h >= 0.45:
+        if chg_48h >= 3.5 and pos_in_48h >= 0.45:
             med_trend = "bull"
-        elif chg_48h <= -4.0 and pos_in_48h <= 0.45:
+        elif chg_48h <= -3.5 and pos_in_48h <= 0.45:
             med_trend = "bear"
         else:
             med_trend = "range"
 
         self.coin_dna[symbol] = {
-            "wave_amp_pct": max(1.4, min(18.0, blended_wave)),
+            "wave_amp_pct": max(1.4, min(16.0, blended_wave)),
             "atr_pct": max(0.2, min(6.0, blended_atr)),
-            "pullback_pct": round(max(0.25, min(3.5, avg_pullback)), 2),
+            "pullback_pct": round(max(0.28, min(3.2, avg_pullback)), 2),
             "chg_48h": round(chg_48h, 2),
             "pos_in_48h": round(pos_in_48h, 2),
             "med_trend": med_trend,
@@ -144,29 +145,28 @@ class Shadow:
         }
 
     def get_coin_dna(self, symbol: str) -> dict:
-        """Возвращает ДНК монеты и рекомендуемые параметры ведения волны (TP1 split, wave class)."""
         dna = self.coin_dna.get(symbol) or {}
-        wave_amp = float(dna.get("wave_amp_pct", 3.2))
+        wave_amp = float(dna.get("wave_amp_pct", 3.0))
         med_trend = dna.get("med_trend", "range")
         atr_pct = float(dna.get("atr_pct", 0.8))
 
-        if wave_amp >= 4.2 or (wave_amp >= 3.5 and med_trend == "bull"):
+        if wave_amp >= 4.0 or (wave_amp >= 3.3 and med_trend == "bull"):
             wave_class = "long_wave"
-            tp1_ratio = 0.30
-            wave_mult = 1.25
-        elif wave_amp < 2.55 and med_trend != "bull":
+            tp1_ratio = 0.32
+            wave_mult = 1.20
+        elif wave_amp < 2.50 and med_trend != "bull":
             wave_class = "short_wave"
             tp1_ratio = 0.55
-            wave_mult = 0.82
+            wave_mult = 0.80
         else:
             wave_class = "mid_wave"
-            tp1_ratio = 0.38
+            tp1_ratio = 0.40
             wave_mult = 1.0
 
         return {
             "wave_amp_pct": wave_amp,
             "atr_pct": atr_pct,
-            "pullback_pct": float(dna.get("pullback_pct", 0.8)),
+            "pullback_pct": float(dna.get("pullback_pct", 0.75)),
             "med_trend": med_trend,
             "wave_class": wave_class,
             "tp1_ratio": tp1_ratio,
@@ -309,7 +309,6 @@ class Shadow:
         mfe = (ep["hi"] - dec) / dec * 100
         pullback = (ep.get("lo_before_pump", ep["lo"]) - dec) / dec * 100
 
-        # Обогащаем ДНК монеты реальным пиком MFE из закрытого наблюдения
         if sym in self.coin_dna and mfe > 0.5:
             old_mfe = self.coin_dna[sym].get("hist_mfe", mfe)
             self.coin_dna[sym]["hist_mfe"] = round(0.7 * old_mfe + 0.3 * mfe, 2)
@@ -362,6 +361,7 @@ class Shadow:
 
         active_agg = self._combined_agg()
         actionable_bands = {"6-7", "7-8", "8+"}
+        is_fade_market = False
 
         for mode in ["rocket", "sniper", "reversal"]:
             band_stats = {}
@@ -387,7 +387,7 @@ class Shadow:
             total_act_n = mid_n + high_n
 
             nudge = 0.0
-            if total_act_n >= 6:
+            if total_act_n >= 5:
                 mid_sum24 = band_stats.get("6-7", {}).get("sum24", 0.0) + band_stats.get("7-8", {}).get("sum24", 0.0)
                 mid_mfe = band_stats.get("6-7", {}).get("sum_mfe", 0.0) + band_stats.get("7-8", {}).get("sum_mfe", 0.0)
                 mid_mae = band_stats.get("6-7", {}).get("sum_mae", 0.0) + band_stats.get("7-8", {}).get("sum_mae", 0.0)
@@ -404,23 +404,24 @@ class Shadow:
                 high_pumps = band_stats.get("8+", {}).get("pumps", 0)
                 high_traded = band_stats.get("8+", {}).get("traded", 0)
 
-                # 1. Если средние корзины (6-7 и 7-8) сливают (avg_24 < -0.3% или отрицательный Edge),
-                # а корзина 8+ плюсовая — автотюн САМ поднимает порог к 8+, отсекая слабые сделки!
+                if mode == "sniper" and high_n >= 6 and high_avg24 < -0.5 and high_avg_mfe >= 2.8:
+                    is_fade_market = True
+
                 if mid_n >= 4 and (mid_avg24 < -0.35 or mid_edge < -0.25):
-                    severity = min(0.85, max(0.25, abs(mid_avg24) * 0.30))
+                    severity = min(0.75, max(0.25, abs(mid_avg24) * 0.25))
                     nudge = round(severity, 2)
-                # 2. Если же средние и старшие корзины дают отличный плюс и пики >= 3.2%, а пампы упускаются — снижаем порог
-                elif mid_n >= 4 and mid_avg24 >= 0.45 and mid_avg_mfe >= 3.2 and (mid_pumps - mid_traded) >= 2:
-                    nudge = -0.25
-                elif high_n >= 5 and high_avg24 >= 1.5 and high_avg_mfe >= 4.0 and (high_pumps - high_traded) >= 3 and mid_avg24 >= 0.0:
+                elif high_n >= 6 and high_avg24 < -1.0 and mid_n < 4:
+                    nudge = 0.35
+                elif mid_n >= 4 and mid_avg24 >= 0.45 and mid_avg_mfe >= 3.0 and (mid_pumps - mid_traded) >= 2:
+                    nudge = -0.20
+                elif high_n >= 5 and high_avg24 >= 1.0 and high_avg_mfe >= 3.5 and (high_pumps - high_traded) >= 2 and mid_avg24 >= -0.2:
                     nudge = -0.15
 
             prev_nudge = float(self.tuning.get(f"nudge_{mode}", 0.0))
             smoothed_nudge = round(0.5 * prev_nudge + 0.5 * nudge, 2)
-            self.tuning[f"nudge_{mode}"] = max(-0.35, min(0.85, smoothed_nudge))
+            self.tuning[f"nudge_{mode}"] = max(-0.30, min(0.75, smoothed_nudge))
 
         total_pumps = 0
-        total_missed_pumps = 0
         sum_pull_pump = 0.0
         sum_mae_pump = 0.0
 
@@ -429,7 +430,6 @@ class Shadow:
             if len(parts) == 3 and parts[2] in actionable_bands:
                 pumps = a.get("pumps24", 0)
                 total_pumps += pumps
-                total_missed_pumps += max(0, pumps - a.get("traded", 0))
                 sum_pull_pump += a.get("sum_pull_pump", 0.0)
                 sum_mae_pump += a.get("sum_mae_pump", 0.0)
 
@@ -437,12 +437,16 @@ class Shadow:
             avg_pull = sum_pull_pump / total_pumps
             avg_mae = sum_mae_pump / total_pumps
 
-            if total_missed_pumps > 4:
-                self.tuning["hunt"] = round(max(-0.0032, min(-0.0015, avg_pull / 100 * 0.22)), 4)
+            # Запрещаем hunt сжиматься до -0.18% (чтобы не покупать верхушки свечей!)
+            # На рынке сдувающихся пампов (is_fade_market) ждём более глубокий откат (-0.38%..-0.50%) и берём TP1 чуть ближе
+            if is_fade_market:
+                self.tuning["hunt"] = round(max(-0.0050, min(-0.0036, avg_pull / 100 * 0.42)), 4)
+                self.tuning["tp_mult"] = 0.92
             else:
-                self.tuning["hunt"] = round(max(-0.0038, min(-0.0018, avg_pull / 100 * 0.32)), 4)
+                self.tuning["hunt"] = round(max(-0.0045, min(-0.0030, avg_pull / 100 * 0.35)), 4)
+                self.tuning["tp_mult"] = 1.0
 
-            self.tuning["sl_mult"] = round(max(0.90, min(1.20, 1.0 + abs(avg_mae) / 100 * 0.20)), 2)
+            self.tuning["sl_mult"] = round(max(0.95, min(1.15, 1.0 + abs(avg_mae) / 100 * 0.15)), 2)
 
         self._apply_weight_lift()
         self._calibrate_signal_windows()
@@ -460,12 +464,12 @@ class Shadow:
         total_all = sum(ka.values()) or 1
         base_rate = total_pump / total_all
         for k in list(learner.weights):
-            if ka.get(k, 0) >= 10 and base_rate > 0:
+            if ka.get(k, 0) >= 12 and base_rate > 0:
                 lift = (kp.get(k, 0) / ka.get(k, 0)) / base_rate
-                if lift > 1.2:
-                    learner.weights[k] = round(min(1.45, learner.weights[k] + 0.03), 3)
-                elif lift < 0.8:
-                    learner.weights[k] = round(max(0.55, learner.weights[k] - 0.03), 3)
+                if lift > 1.22:
+                    learner.weights[k] = clamp_weight(k, learner.weights[k] + 0.02)
+                elif lift < 0.78:
+                    learner.weights[k] = clamp_weight(k, learner.weights[k] - 0.02)
         learner.save()
 
     def _calibrate_signal_windows(self):
@@ -548,10 +552,27 @@ class Shadow:
         if not shown:
             out.append("   (накапливается)")
 
+        # Выводим персональный рейтинг доверия к монетам (Coin Trust)
+        if getattr(learner, "coin_stats", None):
+            trusted, penalized = [], []
+            for sym, _ in learner.coin_stats.items():
+                b = learner.coin_bias(sym)
+                base_s = sym[:-4] if sym.endswith("USDT") else sym
+                if b >= 0.20:
+                    trusted.append((b, f"{base_s} ({b:+.2f})"))
+                elif b <= -0.45:
+                    penalized.append((b, f"{base_s} ({b:+.2f})"))
+            trusted.sort(reverse=True)
+            penalized.sort()
+            if trusted:
+                out.append(f"   🟢 Доверие (фавориты): {', '.join(x[1] for x in trusted[:5])}")
+            if penalized:
+                out.append(f"   🔴 Штраф доверия: {', '.join(x[1] for x in penalized[:5])}")
+
         t = self.tuning
         w = t.get("signal_windows", {})
         out.append(f"   ⚙️ тюнинг: 🚀 {t.get('nudge_rocket', 0):+.2f} | 🏹 {t.get('nudge_sniper', 0):+.2f} | 🧲 {t.get('nudge_reversal', 0):+.2f}")
-        out.append(f"   📏 откат {t['hunt']*100:+.2f}% · SL ×{t['sl_mult']:.2f}")
+        out.append(f"   📏 откат {t['hunt']*100:+.2f}% · SL ×{t['sl_mult']:.2f} · TP ×{t.get('tp_mult', 1.0):.2f}")
         out.append(f"   📏 RSI ≤{w.get('rsi_hi', 90)} · chg ≤{w.get('chg_hi', 30)}% · vol ≥{w.get('vol_lo', 1.3)}×")
         return out
 
@@ -565,7 +586,7 @@ class Shadow:
         self.tuning = {
             "auto": True,
             "nudge_rocket": 0.0, "nudge_sniper": 0.0, "nudge_reversal": 0.0,
-            "hunt": -0.0032, "near": -0.0015, "capture": +0.002,
+            "hunt": -0.0035, "near": -0.0020, "capture": +0.002,
             "sl_mult": 1.0, "tp_mult": 1.0,
             "signal_windows": {"rsi_hi": 90, "chg_hi": 30, "vol_lo": 1.3},
         }
