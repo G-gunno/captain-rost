@@ -22,14 +22,14 @@ from bot.core.state import bot_state
 
 
 class OrderManagerWorker:
-    """Управляет портфелем: Умный Овербукинг, вытеснение спящих позиций под ракеты 9.2+ и безопасная ротация."""
+    """Управляет портфелем: Умный Овербукинг, безопасная ротация спящих слотов и защита от покупки шпилек."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
         self.signal_queue = self.bus.subscribe("SIGNALS_READY", maxsize=2)
 
     async def run(self):
-        logger.info("💼 Order Manager запущен: Умный Овербукинг, ротация спящих слотов под ракеты и защита [💎] A+...")
+        logger.info("💼 Order Manager запущен: Умный Овербукинг, выверенные точки входа и защита от суеты...")
         while True:
             try:
                 event = await self.signal_queue.get()
@@ -64,9 +64,8 @@ class OrderManagerWorker:
 
     def _try_evict_sleeping_position(self, cand: dict, tier: str, tickers: dict, regime: str) -> bool:
         """
-        Если пришёл элитный трендовый сигнал (score >= 9.2), а все 3 слота тира заняты,
-        проверяем: нет ли среди них «спящей» позиции (> 75 мин без TP1 в околонулевой зоне -0.05%..+0.40%),
-        чтобы освободить слот под ракету (фикс упущенного пампа GRAMUSDT +10.8% из-за спящей AAVE).
+        Вызывается ТОЛЬКО тогда, когда новая ракета (score >= 9.2) УЖЕ прошла все проверки стен и RR!
+        Не трогает свежие донные позиции (reversal / 1H_DIP_BOUNCE), чтобы не выбрасывать сделки на дне (фикс INJUSDT).
         """
         if cand.get("score", 0.0) < 9.2 or cand.get("entry_mode") not in ("sniper", "rocket"):
             return False
@@ -80,14 +79,15 @@ class OrderManagerWorker:
             if pos.get("tp1_done"):
                 continue
             pos_age = now_ts - int(pos.get("entry_time", now_ts))
-            if pos_age < 4500:  # минимум 75 минут
+            min_sleep_age = 9000 if (pos.get("entry_mode") == "reversal" or pos.get("gate_1h") == "1H_DIP_BOUNCE") else 6300
+            if pos_age < min_sleep_age:
                 continue
             last_p = tickers.get(sym, {}).get("last", 0.0)
             avg_p = pos.get("avg", 0.0)
             if last_p <= 0 or avg_p <= 0:
                 continue
             pnl_pct = (last_p - avg_p) / avg_p * 100.0
-            if -0.05 <= pnl_pct <= 0.42 and (cand["score"] - float(pos.get("score", 6.0))) >= 1.5:
+            if -0.05 <= pnl_pct <= 0.35 and (cand["score"] - float(pos.get("score", 6.0))) >= 1.6:
                 sleeping_candidates.append((pos_age, sym, pos, last_p))
 
         if not sleeping_candidates:
@@ -99,14 +99,14 @@ class OrderManagerWorker:
         ex = paper._sell(v_sym, v_last, "🛡🔒 БУ", regime_now=regime)
         paper.log_event(v_sym, "sell_profit", v_last, reason, tp=v_pos.get("tp"), sl=v_pos.get("sl"), sup=v_pos.get("nearest_sup"), res=v_pos.get("nearest_res"))
         bot_state.set_cooldown(v_sym, 600, structural_reset=False, reason="slot_evict")
-        logger.info(f"OrderManager: 🔄 Освобождён спящий слот {v_sym} ({ex['pnl_pct']:+.2f}%) ради ракеты {cand['symbol']} ({cand['score']:.1f})")
+        logger.info(f"OrderManager: 🔄 Освобождён спящий слот {v_sym} ({ex['pnl_pct']:+.2f}%) ради валидной ракеты {cand['symbol']} ({cand['score']:.1f})")
         self._notify(
             f"🔄 <b>Освобождён спящий слот</b> · продан {pair_html(v_sym, ex)}{grade_badge(ex)} ({pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])})\n"
             f"➡️ под ракету <b>{cand['symbol'][:-4]}</b> (⭐ {cand['score']:.1f})"
         )
         return True
 
-    def _try_rotate_order(self, cand: dict, cand_grade: str, tickers: dict, reason_tag: str = "освобождение USDT", target_tier: str = None, force_replace_b: bool = False) -> bool:
+    def _try_rotate_order(self, cand: dict, cand_grade: str, tickers: dict, reason_tag: str = "освобождение USDT", target_tier: str = None) -> bool:
         if not paper.orders:
             return False
 
@@ -122,19 +122,18 @@ class OrderManagerWorker:
             o_grade = o.get("grade", "B")
             o_score = o.get("score", 0.0)
 
-            min_age = 60 if force_replace_b else (180 if target_tier else (300 if (cand_grade == "A+" and o_grade != "A+") else 600))
-            if o_age < min_age:
+            # Запрещаем дёргать ордера младше 15 минут (900 сек) — убираем пустую суету без сделок (фикс TAUSDT, ARXUSDT)!
+            if o_age < 900:
                 continue
 
             last_p = tickers.get(o["symbol"], {}).get("last", 0.0)
-            if not force_replace_b and last_p > 0 and abs(last_p - o["price"]) / o["price"] * 100 <= 0.30:
+            if last_p > 0 and abs(last_p - o["price"]) / o["price"] * 100 <= 0.45:
                 continue
 
             score_diff = cand_score - o_score
             is_upgrade = (
-                (force_replace_b and o_grade != "A+" and o_score < 8.0) or
-                (score_diff >= 0.8) or
-                (cand_grade == "A+" and o_grade != "A+" and score_diff >= 0.2)
+                (score_diff >= 1.4) or
+                (cand_grade == "A+" and o_grade != "A+" and score_diff >= 0.8)
             )
             if is_upgrade:
                 priority_key = (1 if o_grade == "A+" else 0, o_score, -o_age)
@@ -197,16 +196,15 @@ class OrderManagerWorker:
             entry_mode = cand.get("entry_mode", "sniper")
             is_mom = cand.get("is_momentum", False)
 
-            # 1. ПРОВЕРКА ЛИМИТА ТИРА (если все 3 слота заняты — пробуем разгрузить спящую позицию ради ракеты 9.2+)
             tier_pos_count = paper.count_tier_positions(tier)
+            needs_eviction = False
             if tier_pos_count >= MAX_POSITIONS_PER_TIER:
-                if self._try_evict_sleeping_position(cand, tier, tickers, regime):
-                    tier_pos_count = paper.count_tier_positions(tier)
+                if cand.get("score", 0.0) >= 9.2 and entry_mode in ("sniper", "rocket"):
+                    needs_eviction = True
                 else:
                     logger.debug(f"OrderManager: {sym} пропущен -> в тире {tier} уже открыто {tier_pos_count}/{MAX_POSITIONS_PER_TIER} позиций")
                     continue
 
-            # 2. Смягчённый фильтр BTC-клонов (corr >= 0.85), НЕ блокирующий ракеты 9.0+ (фикс NEAR 10.0, SOL 10.0, WLD 10.0)
             cand_corr = float(cand.get("corr") or 0.0)
             if regime in ("bear", "neutral") and cand_corr >= 0.85 and cand.get("score", 0.0) < 9.0:
                 max_corr_pos = 3 if regime == "bear" else 4
@@ -224,7 +222,6 @@ class OrderManagerWorker:
             if a <= 0:
                 continue
 
-            # Если монета в чёрном списке Coin Trust (после серии стопов) — не сбрасываем карантин досрочно
             if learner.coin_bias(sym) > -1.0:
                 bot_state.check_structural_reset(sym, cand["last"], e21_15m, e50_15m)
             if bot_state.is_on_cooldown(sym):
@@ -251,7 +248,7 @@ class OrderManagerWorker:
                     logger.info(f"OrderManager: {sym} пропущен -> режим {risk_mode} требует [💎] A+ для {entry_mode}")
                     continue
 
-            avail_tier_slots = MAX_POSITIONS_PER_TIER - tier_pos_count
+            avail_tier_slots = max(1 if needs_eviction else 0, MAX_POSITIONS_PER_TIER - tier_pos_count)
             is_elite_cand = (grade == "A+" or cand["score"] >= 8.2)
             if avail_tier_slots == 1:
                 tier_orders = [o for o in paper.orders if (o.get("tier") or "SMALL") == tier]
@@ -275,10 +272,11 @@ class OrderManagerWorker:
             ideal_entry = cand["last"] * (1 + off)
             entry = min(ideal_entry, bid1 * 0.9990)
 
-            # Если монета высоко в 48ч-диапазоне (> 68%), привязываем лимитку ближе к 15m EMA21, чтобы не покупать верхушку свечи!
-            if entry_mode == "sniper" and cand.get("pos_in_48h", 0.5) > 0.68 and e21_15m > 0:
-                ema_pullback_cap = e21_15m + 0.40 * a
-                if ema_pullback_cap < entry and ema_pullback_cap >= cand["last"] * 0.988:
+            # ЗАЩИТА ОТ ВХОДА НА МИНУТНЫХ ШПИЛЬКАХ (фикс TAUSDT):
+            # Для любого sniper (кроме старта со дна 1H_DIP_BOUNCE) лимитка ставится не выше 15m EMA21 + 0.30*ATR!
+            if entry_mode == "sniper" and cand.get("gate_1h") != "1H_DIP_BOUNCE" and e21_15m > 0:
+                ema_pullback_cap = e21_15m + 0.30 * a
+                if ema_pullback_cap < entry and ema_pullback_cap >= cand["last"] * 0.986:
                     entry = ema_pullback_cap
 
             wick_entry = cand.get("wick_entry_price")
@@ -330,12 +328,13 @@ class OrderManagerWorker:
             if sl_dist_pct <= 0:
                 continue
 
-            if avail_tier_slots == 1 and is_elite_cand:
-                self._try_rotate_order(
-                    cand, grade, tickers,
-                    reason_tag=f"приоритет [💎] последнего слота {tier}",
-                    target_tier=tier, force_replace_b=True
-                )
+            # Только ТЕПЕРЬ, когда кандидат 100% валиден и прошёл проверку стен и RR, освобождаем под него спящий слот!
+            if needs_eviction:
+                if self._try_evict_sleeping_position(cand, tier, tickers, regime):
+                    tier_pos_count = paper.count_tier_positions(tier)
+                    avail_tier_slots = max(0, MAX_POSITIONS_PER_TIER - tier_pos_count)
+                else:
+                    continue
 
             max_tier_orders = 2 if avail_tier_slots == 1 else min(MAX_ORDERS_PER_TIER, avail_tier_slots + 2)
             tier_ord_count = paper.count_tier_orders(tier)
