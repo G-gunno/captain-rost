@@ -198,7 +198,7 @@ class Shadow:
             if len(self.episodes) >= MAX_EPISODES:
                 continue
 
-            traded = (sym in paper.positions or any(o["symbol"] == sym for o in paper.orders))
+            traded = (sym in paper.positions)
 
             self.episodes[sym] = {
                 "ts": now, "price": c["last"], "last": c["last"],
