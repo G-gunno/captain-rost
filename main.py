@@ -11,7 +11,7 @@ from functools import wraps
 import aiohttp.web as web
 from loguru import logger
 from telegram import BotCommand, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import Conflict as TelegramConflict, BadRequest
+from telegram.error import Conflict as TelegramConflict, BadRequest, TimedOut, NetworkError
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
 from bot.exchange.market_data import market_data
@@ -62,6 +62,8 @@ async def health_handler(request):
 
 async def webhook_handler(request):
     try:
+        if _app is None or not getattr(_app, "_initialized", False):
+            return web.Response(text="STARTING", status=200)
         data = await request.json()
         update = Update.de_json(data, bot=_app.bot)
         await _app.process_update(update)
@@ -211,7 +213,7 @@ async def chart_handler(request):
 
 async def send_chat(text):
     chat = os.getenv("TELEGRAM_CHAT_ID")
-    if not (chat and _app):
+    if not (chat and _app and getattr(_app, "_initialized", False)):
         return
     for attempt in range(3):
         try:
@@ -748,43 +750,73 @@ async def cmd_status(update, context):
         await reply(update, f"⚠️ Ошибка: {e}")
 
 
-async def run_all(application):
-    global _app
-    _app = application
-    await application.initialize()
-    await application.start()
-
-    try:
-        await application.bot.delete_webhook(drop_pending_updates=True)
-    except Exception:
-        pass
-
+async def _init_telegram_with_retry(application):
+    """Устойчивая инициализация Telegram с повторами при сетевых таймаутах Render."""
     public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
     webhook_url = f"{public_url}{WEBHOOK_PATH}"
 
-    await application.bot.set_webhook(
-        url=webhook_url, drop_pending_updates=True,
-        allowed_updates=["message", "edited_message", "callback_query"],
-    )
+    for attempt in range(1, 6):
+        try:
+            if not getattr(application, "_initialized", False):
+                await application.initialize()
+            if not getattr(application, "running", False):
+                await application.start()
 
-    await application.bot.set_my_commands([
-        BotCommand("start", "🚀 Запустить торговлю"),
-        BotCommand("pause", "⏸ Пауза"),
-        BotCommand("resume", "▶️ Возобновить"),
-        BotCommand("status", "📊 Статус"),
-        BotCommand("funding", "🏦 Накопительный фонд"),
-        BotCommand("chart", "📈 Графики и Аудит 48ч"),
-        BotCommand("learn", "🧠 Обучение"),
-        BotCommand("news", "📰 Новости"),
-        BotCommand("exitall", "🛑 Продать всё"),
-        BotCommand("resetstats", "📊 Сброс статы"),
-        BotCommand("resetlearn", "🧠♻️ Сброс ИИ"),
-        BotCommand("log", "📄 Лог"),
-        BotCommand("autotune", "🎛 Автотюн"),
-        BotCommand("info", "📖 Инфо"),
-        BotCommand("help", "📖 Справка"),
-    ])
+            try:
+                await application.bot.delete_webhook(drop_pending_updates=True)
+            except Exception:
+                pass
 
+            await application.bot.set_webhook(
+                url=webhook_url,
+                drop_pending_updates=True,
+                allowed_updates=["message", "edited_message", "callback_query"],
+            )
+
+            await application.bot.set_my_commands([
+                BotCommand("start", "🚀 Запустить торговлю"),
+                BotCommand("pause", "⏸ Пауза"),
+                BotCommand("resume", "▶️ Возобновить"),
+                BotCommand("status", "📊 Статус"),
+                BotCommand("funding", "🏦 Накопительный фонд"),
+                BotCommand("chart", "📈 Графики и Аудит 48ч"),
+                BotCommand("learn", "🧠 Обучение"),
+                BotCommand("news", "📰 Новости"),
+                BotCommand("exitall", "🛑 Продать всё"),
+                BotCommand("resetstats", "📊 Сброс статы"),
+                BotCommand("resetlearn", "🧠♻️ Сброс ИИ"),
+                BotCommand("log", "📄 Лог"),
+                BotCommand("autotune", "🎛 Автотюн"),
+                BotCommand("info", "📖 Инфо"),
+                BotCommand("help", "📖 Справка"),
+            ])
+            logger.info("✅ Telegram Webhook и команды успешно инициализированы")
+            return
+        except (TimedOut, NetworkError, Exception) as e:
+            logger.warning(f"⏳ Задержка ответа Telegram API при старте (попытка {attempt}/5): {e}")
+            await asyncio.sleep(3.0 * attempt)
+
+
+async def run_all(application):
+    global _app
+    _app = application
+
+    # 1. Сначала сразу открываем HTTP-порт, чтобы Render мгновенно засчитал деплой!
+    web_app = web.Application()
+    web_app.router.add_get("/", health_handler)
+    web_app.router.add_get("/chart", chart_handler)
+    web_app.router.add_get("/audit", audit_handler)
+    web_app.router.add_post(WEBHOOK_PATH, webhook_handler)
+
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"🌐 HTTP-сервер запущен на порту {port}")
+
+    # 2. Инициализируем Telegram с защитой от таймаутов и ветку GitHub
+    await _init_telegram_with_retry(application)
     await asyncio.to_thread(ensure_branch)
 
     from bot.core.event_bus import EventBus
@@ -823,27 +855,19 @@ async def run_all(application):
 
     logger.info("⚡ EDA Core успешно запущено. (WEBHOOK MODE)")
 
-    web_app = web.Application()
-    web_app.router.add_get("/", health_handler)
-    web_app.router.add_get("/chart", chart_handler)
-    web_app.router.add_get("/audit", audit_handler)
-    web_app.router.add_post(WEBHOOK_PATH, webhook_handler)
-
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    port = int(os.getenv("PORT", 10000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
     try:
         while True:
             await asyncio.sleep(3600)
     except asyncio.CancelledError:
         pass
     finally:
-        await application.bot.delete_webhook(drop_pending_updates=True)
-        await application.stop()
-        await application.shutdown()
+        try:
+            if getattr(application, "_initialized", False):
+                await application.bot.delete_webhook(drop_pending_updates=True)
+                await application.stop()
+                await application.shutdown()
+        except Exception:
+            pass
         await runner.cleanup()
 
 
@@ -852,7 +876,15 @@ def main():
     logger.add("logs/bot.log", rotation="5 MB", retention="7 days", enqueue=True, level="INFO")
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
-    app = Application.builder().token(token).build()
+    app = (
+        Application.builder()
+        .token(token)
+        .connect_timeout(30.0)
+        .read_timeout(30.0)
+        .write_timeout(30.0)
+        .pool_timeout(30.0)
+        .build()
+    )
 
     app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start", cmd_start))
