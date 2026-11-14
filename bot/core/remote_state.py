@@ -3,7 +3,6 @@ import json
 import base64
 import time
 import threading
-import queue
 
 import httpx
 from loguru import logger
@@ -11,8 +10,9 @@ from loguru import logger
 GITHUB_API = "https://api.github.com"
 _last_get_sha = {}
 
-# Очередь задач на выгрузку, чтобы не блокировать Event Loop
-_upload_queue = queue.Queue()
+_lock = threading.Lock()
+_pending_uploads = {}
+_has_work = threading.Event()
 
 
 def _headers():
@@ -60,6 +60,8 @@ def download_state(path):
                          params={"ref": "learner-state"})
         if code != 200:
             return None
+        if data.get("sha"):
+            _last_get_sha[path] = data["sha"]
         raw = base64.b64decode(data.get("content", "")).decode()
         return json.loads(raw)
     except Exception as e:
@@ -68,13 +70,14 @@ def download_state(path):
 
 
 def _sync_upload_state(path, payload):
-    """Выполняет реальную выгрузку в GitHub (Синхронно)"""
+    """Выполняет реальную выгрузку самой свежей версии файла в GitHub."""
     repo = _repo()
+    if not repo:
+        return
     content = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode()).decode()
     message = f"auto: update {path}"
 
     for attempt in range(3):
-        # Запрашиваем свежий SHA файла перед апдейтом
         code, data = _do("GET", f"{GITHUB_API}/repos/{repo}/contents/{path}", params={"ref": "learner-state"})
         sha = data.get("sha") if code == 200 else _last_get_sha.get(path)
 
@@ -90,9 +93,8 @@ def _sync_upload_state(path, payload):
                 _last_get_sha[path] = new_sha
             return
 
-        if code == 409:
-            logger.warning(f"remote_state: 409 conflict on {path}, retry {attempt+1}/3")
-            time.sleep(1.5)  # Спим в фоновом потоке, не вешая бота
+        if code in (409, 500, 502, 503):
+            time.sleep(2.5 * (attempt + 1))
             continue
 
         logger.error(f"remote_state upload error: {code} {data}")
@@ -100,22 +102,30 @@ def _sync_upload_state(path, payload):
 
 
 def _upload_worker():
-    """Разгребает очередь выгрузок строго по одному."""
+    """Берёт только самый свежий срез каждого файла, исключая очередь устаревших коммитов и 409 Conflict."""
     while True:
-        path, payload = _upload_queue.get()
+        _has_work.wait()
+        time.sleep(1.0)
+        with _lock:
+            if not _pending_uploads:
+                _has_work.clear()
+                continue
+            path, payload = next(iter(_pending_uploads.items()))
+            del _pending_uploads[path]
+            if not _pending_uploads:
+                _has_work.clear()
         try:
             _sync_upload_state(path, payload)
         except Exception as e:
             logger.error(f"upload_worker error: {e}")
-        finally:
-            _upload_queue.task_done()
 
 
-# Запускаем один фоновый поток (Daemon) при старте модуля
 threading.Thread(target=_upload_worker, daemon=True).start()
 
 
 def upload_state(path, payload):
-    """Отправляет задачу в очередь, моментально возвращая управление Event Loop'у."""
+    """Сохраняет последний актуальный срез файла для фоновой выгрузки."""
     if os.getenv("GITHUB_TOKEN"):
-        _upload_queue.put((path, payload))
+        with _lock:
+            _pending_uploads[path] = payload
+            _has_work.set()
