@@ -45,7 +45,7 @@ def _dedup_levels(levels):
         return []
     deduped = []
     for lvl in levels:
-        match = next((d for d in deduped if abs(d[0] - lvl[0]) / lvl[0] <= 0.005), None)
+        match = next((d for d in deduped if abs(d[0] - lvl[0]) / lvl[0] <= 0.0055), None)
         if match:
             if lvl[1] > match[1]:
                 deduped.remove(match)
@@ -55,7 +55,7 @@ def _dedup_levels(levels):
     return deduped
 
 
-def _count_spaced_touches(price_target: float, points: list, tol: float = 0.005, is_res: bool = False) -> int:
+def _count_spaced_touches(price_target: float, points: list, tol: float = 0.0055, is_res: bool = False) -> int:
     if price_target <= 0:
         return 0
     matched = [pt for pt in points if abs(pt[0] - price_target) / price_target <= tol]
@@ -79,65 +79,89 @@ def _count_spaced_touches(price_target: float, points: list, tol: float = 0.005,
     if h1_touches_count > 0 and "15m" in last_idx_by_tf:
         touches_weight = max(2, touches_weight - 1)
 
-    # Для сопротивления статус «капитальной часовой стены» (вес >= 6) даём только при >= 3 реальных касаниях на 1H
     if is_res:
         if touches_weight >= 6 and h1_touches_count < 3:
             touches_weight = 5
     else:
-        if touches_weight >= 4 and h1_touches_count < 2:
-            touches_weight = 3
+        if touches_weight >= 3 and h1_touches_count >= 1:
+            touches_weight = max(touches_weight, 3)
 
     return touches_weight
 
 
 def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72):
+    """
+    Строит 48-часовую карту уровней Поддержки и Сопротивления (1H + 15m) с учётом:
+    1. Зеркальных уровней (S/R Flip): пробитые вверх часовые и 15m максимумы становятся ступенями Поддержки под ценой.
+    2. Часовых зон спроса (длинных нижних теней откупа на 1H).
+    """
     if not candles_15m or len(candles_15m) < 15:
         return [], []
 
+    last_price = float(candles_15m[-1]["close"])
     high_points = []
     low_points = []
 
     if candles_1h and isinstance(candles_1h, list) and len(candles_1h) >= 20:
         recent_1h = candles_1h[-window_1h:] if len(candles_1h) >= window_1h else candles_1h
         n1 = len(recent_1h)
-        for i in range(2, n1 - 2):
-            h = recent_1h[i]["high"]
-            l = recent_1h[i]["low"]
-            if all(h >= recent_1h[i + j]["high"] for j in (-2, -1, 1, 2)):
-                high_points.append((h, "1h", i, 4, 2))
-            if all(l <= recent_1h[i + j]["low"] for j in (-2, -1, 1, 2)):
-                low_points.append((l, "1h", i, 4, 2))
+        for i in range(2, n1 - 1):
+            h = float(recent_1h[i]["high"])
+            l = float(recent_1h[i]["low"])
+            o = float(recent_1h[i]["open"])
+            c = float(recent_1h[i]["close"])
+            rng = h - l
+
+            is_1h_high = (h >= recent_1h[i - 1]["high"] and h >= recent_1h[i - 2]["high"] and h >= recent_1h[i + 1]["high"])
+            is_1h_low = (l <= recent_1h[i - 1]["low"] and l <= recent_1h[i - 2]["low"] and l <= recent_1h[i + 1]["low"])
+
+            if is_1h_high:
+                high_points.append((h, "1h", i, 3, 2))
+            if is_1h_low:
+                low_points.append((l, "1h", i, 3, 2))
+            elif rng > 0 and (min(o, c) - l) / rng >= 0.45 and l <= min(recent_1h[i - 1]["low"], recent_1h[i + 1]["low"]):
+                # Часовой выкуп тенью (зона спроса 1H)
+                low_points.append((l, "1h", i, 3, 2))
 
     recent_15m = candles_15m[-window_15m:] if len(candles_15m) >= window_15m else candles_15m
     n15 = len(recent_15m)
     for i in range(3, n15 - 1):
-        h = recent_15m[i]["high"]
-        l = recent_15m[i]["low"]
+        h = float(recent_15m[i]["high"])
+        l = float(recent_15m[i]["low"])
         if all(h >= recent_15m[i - j]["high"] for j in (1, 2, 3)) and h >= recent_15m[i + 1]["high"]:
             high_points.append((h, "15m", i, 4, 1))
         if all(l <= recent_15m[i - j]["low"] for j in (1, 2, 3)) and l <= recent_15m[i + 1]["low"]:
             low_points.append((l, "15m", i, 4, 1))
 
-    unique_highs = {pt[0] for pt in high_points if pt[0] > 0}
-    clusters_res = []
+    # Объединяем пики и впадины для расчёта зеркальных уровней (S/R Flip)
+    all_pivots = high_points + low_points
+    unique_prices = {pt[0] for pt in all_pivots if pt[0] > 0}
+
     recent_closes = [c["close"] for c in recent_15m[-36:]] if len(recent_15m) >= 36 else [c["close"] for c in recent_15m]
     max_recent_close = max(recent_closes) if recent_closes else 0.0
 
-    for h in unique_highs:
-        touches = _count_spaced_touches(h, high_points, tol=0.005, is_res=True)
-        # Если цена недавно уже закрывалась выше этого уровня — уровень распилен и не является капитальной стеной
-        if touches >= 6 and max_recent_close > h * 1.0025:
-            touches = 4
-        if touches >= 2:
-            clusters_res.append((h, touches))
-    clusters_res.sort(key=lambda x: x[0])
-
-    unique_lows = {pt[0] for pt in low_points if pt[0] > 0}
+    clusters_res = []
     clusters_sup = []
-    for l in unique_lows:
-        touches = _count_spaced_touches(l, low_points, tol=0.005, is_res=False)
-        if touches >= 2:
-            clusters_sup.append((l, touches))
+
+    for p_lvl in unique_prices:
+        if p_lvl > last_price * 1.0005:
+            # Уровень ВЫШЕ текущей цены -> Сопротивление
+            touches = _count_spaced_touches(p_lvl, high_points, tol=0.0055, is_res=True)
+            if touches < 2:
+                touches = _count_spaced_touches(p_lvl, all_pivots, tol=0.0050, is_res=True)
+            if touches >= 6 and max_recent_close > p_lvl * 1.0025:
+                touches = 4
+            if touches >= 2:
+                clusters_res.append((p_lvl, touches))
+        elif p_lvl < last_price * 0.9995:
+            # Уровень НИЖЕ текущей цены -> Поддержка (прямые впадины + зеркальные пробитые уровни)
+            touches_low = _count_spaced_touches(p_lvl, low_points, tol=0.0055, is_res=False)
+            touches_flip = _count_spaced_touches(p_lvl, all_pivots, tol=0.0050, is_res=False)
+            touches = max(touches_low, touches_flip)
+            if touches >= 2:
+                clusters_sup.append((p_lvl, touches))
+
+    clusters_res.sort(key=lambda x: x[0])
     clusters_sup.sort(key=lambda x: x[0], reverse=True)
 
     return _dedup_levels(clusters_res), _dedup_levels(clusters_sup)
