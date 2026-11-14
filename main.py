@@ -1,4 +1,5 @@
 import os
+import socket
 import asyncio
 import calendar
 import html as _html
@@ -8,6 +9,22 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from functools import wraps
 
+# Принудительно используем IPv4 (AF_INET), чтобы обойти зависания IPv6 до api.telegram.org на Render
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if family in (0, socket.AF_UNSPEC):
+        try:
+            return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+        except socket.gaierror:
+            pass
+    return _orig_getaddrinfo(host, port, family, type, proto, flags)
+
+
+socket.getaddrinfo = _ipv4_only_getaddrinfo
+
+import httpx
 import aiohttp.web as web
 from loguru import logger
 from telegram import BotCommand, Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -213,9 +230,12 @@ async def chart_handler(request):
 
 async def send_chat(text):
     chat = os.getenv("TELEGRAM_CHAT_ID")
-    if not (chat and _app and getattr(_app, "_initialized", False)):
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not (chat and token):
         return
-    for attempt in range(3):
+
+    # 1. Пробуем через штатный бот, если он уже инициализирован
+    if _app and getattr(_app, "_initialized", False):
         try:
             await _app.bot.send_message(chat_id=chat, text=text, parse_mode="HTML", disable_web_page_preview=True)
             return
@@ -223,8 +243,29 @@ async def send_chat(text):
             try:
                 await _app.bot.send_message(chat_id=chat, text=text, disable_web_page_preview=True)
                 return
-            except Exception as e:
-                logger.error(f"send_chat plain fallback error: {e}")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # 2. Прямой резервный отправщик по IPv4 через httpx
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                r = await client.post(url, json={
+                    "chat_id": chat,
+                    "text": text,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                })
+                if r.status_code == 200:
+                    return
+                await client.post(url, json={
+                    "chat_id": chat,
+                    "text": text,
+                    "disable_web_page_preview": True,
+                })
                 return
         except Exception as e:
             if attempt < 2:
@@ -750,12 +791,14 @@ async def cmd_status(update, context):
         await reply(update, f"⚠️ Ошибка: {e}")
 
 
-async def _init_telegram_with_retry(application):
-    """Устойчивая инициализация Telegram с повторами при сетевых таймаутах Render."""
+async def _init_telegram_forever(application):
+    """Фоновое подключение к Telegram по IPv4 до победного конца без блокировки воркеров."""
     public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
     webhook_url = f"{public_url}{WEBHOOK_PATH}"
+    attempt = 0
 
-    for attempt in range(1, 6):
+    while True:
+        attempt += 1
         try:
             if not getattr(application, "_initialized", False):
                 await application.initialize()
@@ -790,18 +833,19 @@ async def _init_telegram_with_retry(application):
                 BotCommand("info", "📖 Инфо"),
                 BotCommand("help", "📖 Справка"),
             ])
-            logger.info("✅ Telegram Webhook и команды успешно инициализированы")
+            logger.info("✅ Telegram Webhook и команды успешно инициализированы (IPv4)")
             return
         except (TimedOut, NetworkError, Exception) as e:
-            logger.warning(f"⏳ Задержка ответа Telegram API при старте (попытка {attempt}/5): {e}")
-            await asyncio.sleep(3.0 * attempt)
+            wait_sec = min(30.0, 3.0 * attempt)
+            logger.warning(f"⏳ Ожидание ответа Telegram API (попытка {attempt}, повтор через {wait_sec:.0f}с): {e}")
+            await asyncio.sleep(wait_sec)
 
 
 async def run_all(application):
     global _app
     _app = application
 
-    # 1. Сначала сразу открываем HTTP-порт, чтобы Render мгновенно засчитал деплой!
+    # 1. Мгновенно поднимаем HTTP-сервер
     web_app = web.Application()
     web_app.router.add_get("/", health_handler)
     web_app.router.add_get("/chart", chart_handler)
@@ -815,9 +859,9 @@ async def run_all(application):
     await site.start()
     logger.info(f"🌐 HTTP-сервер запущен на порту {port}")
 
-    # 2. Инициализируем Telegram с защитой от таймаутов и ветку GitHub
-    await _init_telegram_with_retry(application)
-    await asyncio.to_thread(ensure_branch)
+    # 2. Запускаем инициализацию Telegram и GitHub-ветки параллельно, НЕ задерживая старт воркеров!
+    asyncio.create_task(_init_telegram_forever(application))
+    asyncio.create_task(asyncio.to_thread(ensure_branch))
 
     from bot.core.event_bus import EventBus
     from bot.workers.market_data import MarketDataWorker
@@ -879,10 +923,10 @@ def main():
     app = (
         Application.builder()
         .token(token)
-        .connect_timeout(30.0)
-        .read_timeout(30.0)
-        .write_timeout(30.0)
-        .pool_timeout(30.0)
+        .connect_timeout(20.0)
+        .read_timeout(20.0)
+        .write_timeout(20.0)
+        .pool_timeout(20.0)
         .build()
     )
 
