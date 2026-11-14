@@ -187,7 +187,7 @@ class Shadow:
                 ep = self.episodes[sym]
                 if c["score"] > ep["max_score"]:
                     ep["max_score"] = c["score"]
-                if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
+                if sym in paper.positions:
                     ep["traded"] = True
                 continue
 
