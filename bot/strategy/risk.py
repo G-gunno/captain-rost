@@ -96,41 +96,44 @@ def evaluate_setup_grade(cand: dict) -> str:
     tier = cand.get("tier", "MICRO")
     sector = cand.get("sector", "Other")
     gate_1h = cand.get("gate_1h", "")
+    sym = cand.get("symbol", "")
 
-    if entry_mode == "reversal" and pos_in_48h > 0.38:
+    if entry_mode == "reversal" and pos_in_48h > 0.36:
         return "B"
-    if corr > 0.86 and entry_mode != "reversal":
+    if entry_mode == "sniper" and pos_in_48h > 0.62 and "breakout" not in cand.get("patterns", []):
+        return "B"
+    if corr > 0.85 and entry_mode != "reversal":
         return "B"
     if sector == "Other" and tier == "MICRO":
         return "B"
+    if sym and learner.coin_bias(sym) < -0.30:
+        return "B"
 
     patterns = cand.get("patterns", [])
-    strong_pats = [p for p in patterns if p in ("pinbar", "divergence", "vcp", "breakout")]
+    strong_pats = [p for p in patterns if p in ("pinbar", "divergence", "vcp", "breakout", "engulfing")]
     sv = cand.get("signal_values", {})
     vol_ratio = sv.get("volume", 1.0)
     r_val = sv.get("rsi", 50.0)
     sup_touches = cand.get("sup_touches", 0)
-    keys = cand.get("reason_keys", [])
 
-    has_strong_slab_setup = (sup_touches >= 3 and (vol_ratio >= 1.15 or r_val <= 44.0))
-    if not strong_pats and not has_strong_slab_setup:
+    is_dip_turn = (gate_1h == "1H_DIP_BOUNCE" and sup_touches >= 2 and pos_in_48h <= 0.52)
+    has_strong_slab_setup = (sup_touches >= 3 and pos_in_48h <= 0.52 and (vol_ratio >= 1.25 or r_val <= 42.0))
+
+    if not strong_pats and not is_dip_turn and not has_strong_slab_setup:
         return "B"
 
-    confluence = 2 if (strong_pats or sup_touches >= 3) else 1
+    confluence = 2 if (strong_pats or is_dip_turn) else 1
     if strong_pats and sup_touches >= 3:
         confluence += 1
-    if sup_touches >= 4:
-        confluence += 1
-
-    if gate_1h in ("1H_TREND_OK", "1H_SUPER_TREND") and ("mtf_dip" in keys or pos_in_48h <= 0.75):
+    if gate_1h == "1H_DIP_BOUNCE" or (gate_1h in ("1H_TREND_OK", "1H_SUPER_TREND") and pos_in_48h <= 0.58):
         confluence += 1
     elif gate_1h == "1H_SUPPORT_ONLY" and pos_in_48h <= 0.35 and sup_touches >= 3:
         confluence += 1
 
-    if vol_ratio >= 1.25:
+    if vol_ratio >= 1.30:
         confluence += 1
 
-    if tier in ("TOP20", "MID") or corr < 0.40:
+    if tier in ("TOP20", "MID") or corr < 0.35:
         confluence += 1
 
     return "A+" if confluence >= 4 else "B"
@@ -263,11 +266,11 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
 
 def calc_runner_target(symbol: str, current_price: float, candles_15m: list, candles_1h: list = None, pos: dict = None) -> tuple:
     """
-    Частый Ступенчатый Тейк «В РАСЧЁТЕ НА ПРОКОЛ» (Wick-Pierce Step Target):
-    - Не улетает в луну (+5%), а держится в зоне досягаемости импульсного прокола (+0.65%..+1.35% от цены).
-    - Двигается ступеньками каждую минуту:
-      * Если свечи давят вверх — шагает ступеньками вверх (+0.20%..+0.35%).
-      * Если цена топчется или откатила от пика — спускается ступеньками ВНИЗ ближе к цене, чтобы поймать следующий прокол!
+    Многоступенчатый Тейк Коридора (Multi-Step Wave Runner):
+    - Держит планку TP🏃🏻‍➡️ на высоте импульсного шага (+0.75%..+1.35% от текущей цены).
+    - Пока цена идёт ВЫШЕ 15m EMA21 (живой тренд, как на CAPUSDT перед ракетой +18%),
+      НЕ прижимает TP вниз к цене, а шагает ступеньками ВВЕРХ вместе с волной!
+    - Опускает ступеньку TP ниже под прокол только тогда, когда цена ушла ПОД 15m EMA21 и импульс реально затухает.
     """
     if not candles_15m or len(candles_15m) < 25:
         return _round_px(current_price * 1.010), True, "step_init"
@@ -278,9 +281,7 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
 
     closes = [c["close"] for c in candles_15m]
     e21_series = ema(closes, 21)
-    e50_series = ema(closes, 50)
     e21 = e21_series[-1]
-    e50 = e50_series[-1]
     r15 = rsi(closes)
     a15 = atr(candles_15m)
 
@@ -289,42 +290,35 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
     tp1_ref = float(pos.get("tp1_price") or pos.get("initial_tp") or current_price)
     max_p = max(float(pos.get("max_price", current_price)), current_price)
 
-    # Дистанция на прокол шпилькой (в зависимости от класса волны монеты: от +0.65% до +1.35%)
-    pierce_atr_mult = 1.15 if wave_class == "long_wave" else (0.72 if wave_class == "short_wave" else 0.90)
-    pierce_step = max(a15 * pierce_atr_mult * wave_mult, current_price * 0.0065)
-    pierce_step = min(pierce_step, current_price * 0.0155)
+    pierce_atr_mult = 1.20 if wave_class == "long_wave" else (0.78 if wave_class == "short_wave" else 0.95)
+    pierce_step = max(a15 * pierce_atr_mult * wave_mult, current_price * 0.0075)
+    pierce_step = min(pierce_step, current_price * 0.0160)
 
-    # 1. Если цена откатила от локального пика или импульс остывает — ОПУСКАЕМ ступеньку TP ниже (под прокол)!
+    # 1. Снижаем ступеньку TP под прокол ТОЛЬКО если цена провалилась ПОД 15m EMA21 и откатила от пика >= 0.65*ATR
     pullback_from_peak = max_p - current_price
-    e21_flattening = len(e21_series) >= 3 and e21 <= e21_series[-3] * 1.0005
+    e21_falling = len(e21_series) >= 4 and e21 < e21_series[-3] * 0.9995
 
-    if old_tp > current_price and (pullback_from_peak >= 0.30 * a15 or e21_flattening or r15 < 56):
+    if old_tp > current_price and current_price < e21 * 0.999 and pullback_from_peak >= 0.65 * a15 and e21_falling:
         lowered_tp = max(
-            tp1_ref * 1.0035,
-            current_price + max(0.65 * a15, current_price * 0.0055),
-            e21 + 1.05 * a15
+            tp1_ref * 1.0045,
+            current_price + max(0.75 * a15, current_price * 0.0065),
+            e21 + 0.85 * a15
         )
-        if lowered_tp < old_tp * 0.9985:
+        if lowered_tp < old_tp * 0.9980:
             return _round_px(lowered_tp), True, "step_down_for_pierce"
 
-    # 2. Если свечи идут вверх — ставим/поднимаем ступеньку TP на расстояние одного импульсного прокола
+    # 2. Шаг ступеньки ВВЕРХ по волне
     ideal_pierce_tp = max(
         current_price + pierce_step,
-        e21 + (1.45 * wave_mult) * a15
+        e21 + (1.50 * wave_mult) * a15
     )
-
-    all_res, _ = get_all_sr_levels(candles_15m, candles_1h)
-    res_above = [r[0] for r in all_res if current_price * 1.004 < r[0] < ideal_pierce_tp and r[1] >= 4]
-    if res_above:
-        res_above.sort()
-        ideal_pierce_tp = min(ideal_pierce_tp, res_above[0] * 0.9985)
 
     if old_tp <= current_price:
         return _round_px(ideal_pierce_tp), True, "step_up_pierce"
 
-    # Если цена подошла близко к текущему TP (< 0.30*ATR) на сильном импульсе — шагаем на +1 ступеньку вверх
-    if (old_tp - current_price) <= 0.30 * a15 and r15 >= 58 and current_price > e21:
-        stepped_up = max(old_tp * 1.0035, current_price + pierce_step * 0.85)
+    # Если цена подошла к текущему TP (< 0.35*ATR) над растущей EMA21 — шагаем ступенькой вверх!
+    if (old_tp - current_price) <= 0.35 * a15 and r15 >= 55 and current_price >= e21:
+        stepped_up = max(old_tp * 1.0045, current_price + pierce_step * 0.85)
         return _round_px(stepped_up), True, "step_up_wave"
 
     return _round_px(old_tp), False, "step_hold"
@@ -333,9 +327,9 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
 def update_position_sl(pos: dict, max_p: float, last_price: float = None, candles_15m: list = None) -> tuple:
     """
     Частый Ступенчатый Стоп (Frequent Step-Wave SL):
-    - Двигается дискретными ступеньками (от +0.10%) каждую минуту вслед за ростом цены, EMA и локальных лоёв.
-    - До TP1: плавно поджимает начальный стоп вдоль растущей EMA50 без раннего удушения в БУ (фикс NFTUSDT).
-    - После TP1: держит буфер ретеста в первые 15 мин (фикс GRAMUSDT), а затем плотными ступеньками идёт под волной.
+    - ДО TP1: НЕ душит сделку на 20-й минуте в зоне шума (-0.35% — фикс JUP, POL, ARX)!
+      Поджимает стоп только когда цена прошла >= 55% пути к TP1 (>= +0.68%) или при реальном сломе 15m EMA21 < EMA50 после 60 мин.
+    - ПОСЛЕ TP1: плотными ступеньками идёт под растущей волной и зажимает стоп прямо под шпильку при каждом пробое TP🏃🏻‍➡️.
     """
     avg_p = pos.get("avg", 0.0)
     if avg_p <= 0:
@@ -347,7 +341,6 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
     wave_class = pos.get("wave_class") or dna.get("wave_class", "mid_wave")
 
     tier = pos.get("tier") or "SMALL"
-    entry_mode = pos.get("entry_mode", "sniper")
     cfg = TIER_TRAIL_CONFIG.get(tier, TIER_TRAIL_CONFIG["SMALL"])
 
     current_sl = _round_px(pos.get("sl", 0.0))
@@ -387,43 +380,37 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
         tp1_pct = ((tp1_ref - avg_p) / avg_p * 100.0) if tp1_ref > avg_p else tp_target_pct
         tp1_age = now_ts - int(pos.get("tp1_time", now_ts))
 
-        # Базовый пол сразу после TP1: +0.35% от входа
         runner_floor = _round_px(max(breakeven, avg_p * 1.0035))
 
-        # Если цена прошла ещё +0.35% выше TP1 — поднимаем пол ступенькой на +0.75% от входа
         if peak_profit_pct >= tp1_pct + 0.35:
-            mid_lock = _round_px(avg_p + (tp1_ref - avg_p) * 0.60) if tp1_ref > avg_p else _round_px(avg_p * 1.0075)
+            mid_lock = _round_px(avg_p + (tp1_ref - avg_p) * 0.62) if tp1_ref > avg_p else _round_px(avg_p * 1.0075)
             runner_floor = max(runner_floor, mid_lock)
 
-        # Если цена оторвалась на +0.70% выше TP1 — пол шагает ЗА линию TP1 (🛡🔥)
-        if tp1_ref > 0 and ((a15 > 0 and max_p >= tp1_ref + 0.70 * a15) or peak_profit_pct >= tp1_pct + 0.70):
+        if tp1_ref > 0 and ((a15 > 0 and max_p >= tp1_ref + 0.65 * a15) or peak_profit_pct >= tp1_pct + 0.65):
             runner_floor = max(runner_floor, _round_px(tp1_ref * 1.0010))
 
-        # В первые 18 минут после TP1 держим буфер ретеста под EMA50 (чтобы не выбило тенью GRAM перед ракетой +10.8%),
-        # а затем плотными ступеньками идём под волной EMA21 / лоями свечей
         wave_step_sl = 0.0
         if a15 > 0 and e21 > 0 and e50 > 0:
             if is_climax:
-                candle_anchor = (closed_low - 0.15 * a15) if closed_low > 0 else (last_p - 0.55 * a15)
-                wave_step_sl = max(e21, candle_anchor, last_p * 0.991)
-            elif tp1_age < 1080 and wave_class == "long_wave" and peak_profit_pct < tp1_pct + 1.0:
+                candle_anchor = (closed_low - 0.12 * a15) if closed_low > 0 else (last_p - 0.50 * a15)
+                wave_step_sl = max(e21, candle_anchor, last_p * 0.992)
+            elif tp1_age < 900 and wave_class == "long_wave" and peak_profit_pct < tp1_pct + 0.9:
                 wave_step_sl = min(e50 - 0.35 * a15, last_p - 0.85 * a15)
             else:
-                anchor = (0.4 * e50 + 0.6 * e21) if wave_class == "long_wave" else e21
-                wave_step_sl = anchor - 0.35 * a15
+                anchor = (0.35 * e50 + 0.65 * e21) if wave_class == "long_wave" else e21
+                wave_step_sl = anchor - 0.32 * a15
                 if prev_closed_low > wave_step_sl and last_p > prev_closed_low * 1.003:
                     wave_step_sl = prev_closed_low - 0.15 * a15
 
-        dist_mult = 1.05 if wave_class == "long_wave" else (0.75 if wave_class == "short_wave" else 0.90)
+        dist_mult = 1.00 if wave_class == "long_wave" else (0.72 if wave_class == "short_wave" else 0.85)
         if peak_profit_pct >= tp1_pct + 1.0:
-            dist_mult *= 0.80
+            dist_mult *= 0.78
         runner_trail = _round_px(max_p * (1.0 - cfg["runner_dist"] * dist_mult))
 
         raw_candidate = _round_px(max(breakeven, runner_floor, runner_trail, wave_step_sl))
-        if raw_candidate >= last_p * 0.994:
-            raw_candidate = _round_px(last_p * 0.993)
+        if raw_candidate >= last_p * 0.9945:
+            raw_candidate = _round_px(last_p * 0.9935)
 
-        # Ступенька фиксируется при любом сдвиге вверх >= 0.08%
         if raw_candidate > new_sl * 1.0008 and last_p > raw_candidate * 1.0020:
             new_sl = raw_candidate
 
@@ -434,29 +421,26 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
         else:
             new_state = "BREAKEVEN"
     else:
-        # ДО TP1: частые ступеньки поджатия риска вдоль растущей волны (БЕЗ удушения живого тренда в БУ на 90-й минуте!)
-        if pos_age >= 1200 and curr_profit_pct >= 0.25 and a15 > 0 and e50 > 0:
-            # Плавное ступенчатое подтягивание начального стопа под растущую EMA50 и свинги
-            step_shield = min(avg_p * 0.9975, e50 - 0.60 * a15)
-            if prev_closed_low > 0 and prev_closed_low < avg_p:
-                step_shield = max(step_shield, prev_closed_low - 0.25 * a15)
-            step_shield = _round_px(step_shield)
-            if step_shield > new_sl * 1.0012 and last_p > step_shield * 1.004:
+        # ДО TP1: поджимаем стоп ТОЛЬКО когда цена уже прошла заметную часть пути к тейку (>= +0.68% или 55% пути к TP1),
+        # чтобы не выбивать сделки на 20-й минуте в -0.37%..-0.54% (фикс JUP, POL, ARX)!
+        shield_step_trigger = max(0.68, tp_target_pct * 0.55)
+        if curr_profit_pct >= shield_step_trigger and a15 > 0 and e50 > 0:
+            step_shield = _round_px(min(avg_p * 0.9980, max(e50 - 0.45 * a15, prev_closed_low - 0.25 * a15)))
+            if step_shield > new_sl * 1.0015 and last_p > step_shield * 1.004:
                 new_sl = step_shield
                 new_state = "SHIELD"
 
-        # Если же тренд до TP1 реально сломался (EMA21 ушла под EMA50 на 15m, как на PYTH в 20:30),
-        # поджимаем стоп ступенькой под лой закрытой свечи, чтобы не отдавать полный стоп -1.8%!
-        if pos_age >= 2700 and e21 > 0 and e50 > 0 and e21 < e50 * 0.9985 and last_p < e50 and closed_low > 0 and a15 > 0:
-            tight_broken_sl = _round_px(closed_low - 0.20 * a15)
-            if tight_broken_sl > new_sl * 1.0015 and last_p > tight_broken_sl * 1.002:
-                new_sl = tight_broken_sl
-
-        # Перевод в БУ (🛡🔒) до TP1 только при уверенном ТЕКУЩЕМ плюсе >= 0.90% (или 70% пути к TP1)
-        be_trigger = max(0.90, tp_target_pct * 0.70)
+        # Перевод в БУ (🛡🔒) до TP1 при достижении >= 0.88% (или 70% пути к TP1)
+        be_trigger = max(0.88, tp_target_pct * 0.70)
         if curr_profit_pct >= be_trigger and breakeven > new_sl and last_p > breakeven * 1.0035:
             new_sl = breakeven
             new_state = "BREAKEVEN"
+
+        # Если сделка висит >= 60 минут и тренд на 15m реально сломался (EMA21 < EMA50 и закрытие под EMA50) — поджимаем под свечу
+        if pos_age >= 3600 and e21 > 0 and e50 > 0 and e21 < e50 * 0.998 and last_p < e50 * 0.998 and closed_low > 0 and a15 > 0:
+            tight_broken_sl = _round_px(closed_low - 0.25 * a15)
+            if tight_broken_sl > new_sl * 1.002 and last_p > tight_broken_sl * 1.003:
+                new_sl = tight_broken_sl
 
         if is_climax and curr_profit_pct >= cfg["lock_trigger_pct"]:
             lock_sl = _round_px(max(breakeven, last_p * (1.0 - cfg["lock_dist"])))
