@@ -109,26 +109,33 @@ class TradeVisualizer:
         fig.add_trace(go.Scatter(x=df_kline['datetime'], y=df_kline['EMA21'], mode='lines', name='EMA 21', line=dict(color='rgba(255, 235, 59, 0.8)', width=1.5)), row=1, col=1)
         fig.add_trace(go.Scatter(x=df_kline['datetime'], y=df_kline['EMA50'], mode='lines', name='EMA 50', line=dict(color='rgba(255, 152, 0, 0.8)', width=1.5)), row=1, col=1)
 
-        df_sr_15m = df_kline if self.interval == "15" else self.fetch_klines(start_ts, end_ts, interval_override="15")
+        # Загружаем 15m и 1H свечи за 48+ часов для построения полной карты часовых и 15m уровней
+        sr_start_ts = min(start_ts, now_ts - 72 * 3600)
+        df_sr_15m = df_kline if self.interval == "15" else self.fetch_klines(sr_start_ts, end_ts, interval_override="15")
         if df_sr_15m.empty:
             df_sr_15m = df_kline
 
-        all_res, all_sup = get_all_sr_levels(df_sr_15m.to_dict('records'))
+        df_sr_1h = df_kline if self.interval == "60" else self.fetch_klines(sr_start_ts, end_ts, interval_override="60")
+        candles_1h_list = df_sr_1h.to_dict('records') if not df_sr_1h.empty else None
+
+        all_res, all_sup = get_all_sr_levels(df_sr_15m.to_dict('records'), candles_1h_list)
 
         for idx, (r_val, r_tch) in enumerate(all_res):
             fig.add_trace(go.Scatter(
                 x=[min_time, max_time], y=[r_val, r_val],
                 mode="lines", name="Сопротивление",
-                line=dict(color="rgba(233, 30, 99, 0.45)", width=1.0, dash="dot"),
-                hoverinfo="name+y", showlegend=(idx == 0)
+                line=dict(color="rgba(233, 30, 99, 0.50)", width=1.2 if r_tch >= 4 else 1.0, dash="dot"),
+                hoverinfo="text+y", text=[f"Сопротивление ({r_tch}x): {fmt_price(r_val)}"] * 2,
+                showlegend=(idx == 0)
             ), row=1, col=1)
 
         for idx, (s_val, s_tch) in enumerate(all_sup):
             fig.add_trace(go.Scatter(
                 x=[min_time, max_time], y=[s_val, s_val],
                 mode="lines", name="Поддержка",
-                line=dict(color="rgba(33, 150, 243, 0.45)", width=1.0, dash="dot"),
-                hoverinfo="name+y", showlegend=(idx == 0)
+                line=dict(color="rgba(33, 150, 243, 0.55)", width=1.2 if s_tch >= 3 else 1.0, dash="dot"),
+                hoverinfo="text+y", text=[f"Поддержка ({s_tch}x): {fmt_price(s_val)}"] * 2,
+                showlegend=(idx == 0)
             ), row=1, col=1)
 
         if market_history:
