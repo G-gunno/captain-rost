@@ -283,16 +283,23 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
             reversal_15m_confirmed = True
 
     # --- 2. РАННИЙ ВХОД НА ПРОСАДКЕ 1H («1H_DIP_BOUNCE» — ФИКС 06:00 ICP, ZRO, INJ, HYPE, ELSA) ---
+    curr_1h_rng = curr_1h["high"] - curr_1h["low"]
+    prev_1h_rng = prev_1h["high"] - prev_1h["low"]
+    has_1h_bottom_wick = (
+        (curr_1h_rng > 0 and (min(curr_1h["open"], curr_1h["close"]) - curr_1h["low"]) / curr_1h_rng >= 0.38) or
+        (prev_1h_rng > 0 and (min(prev_1h["open"], prev_1h["close"]) - prev_1h["low"]) / prev_1h_rng >= 0.38)
+    )
     near_1h_ema_support = (
-        (e50_1h > 0 and -1.2 * a_1h <= (last_1h - e50_1h) <= 1.2 * a_1h and not e50_falling_48h) or
-        (e21_1h > e50_1h and -0.8 * a_1h <= (last_1h - e21_1h) <= 0.8 * a_1h) or
-        (nearest_sup and sup_touches >= 2 and 0 <= (last_1h - nearest_sup) <= 2.0 * a15)
+        (e50_1h > 0 and -2.2 * a_1h <= (last_1h - e50_1h) <= 1.2 * a_1h and not e50_falling_48h) or
+        (e21_1h > e50_1h and -1.2 * a_1h <= (last_1h - e21_1h) <= 0.8 * a_1h) or
+        (nearest_sup and sup_touches >= 2 and 0 <= (last_1h - nearest_sup) <= 2.2 * a15) or
+        (has_1h_bottom_wick and pos_in_48h <= 0.35)
     )
     if (
         is_15m_dip_turn and
         near_1h_ema_support and
-        0.12 <= pos_in_48h <= 0.56 and
-        -5.0 <= chg_48h <= 22.0 and
+        0.02 <= pos_in_48h <= 0.56 and
+        -8.0 <= chg_48h <= 22.0 and
         not curr_1h_red
     ):
         return "1H_DIP_BOUNCE", e21_1h, e50_1h, f"1H откуп просадки на опоре ({chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
