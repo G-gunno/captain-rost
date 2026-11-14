@@ -148,6 +148,13 @@ class Learner:
         return clamp_weight(key, self.weights.get(key, 1.0))
 
     def grade_a_trust_mult(self) -> float:
+        hist = [p for p in self.grade_stats.get("A+", []) if not is_neutral_be(p)][-25:]
+        if len(hist) >= 6:
+            wr = sum(1 for p in hist if p > 0) / len(hist)
+            if wr < 0.38:
+                return 0.80
+            if wr < 0.48:
+                return 0.95
         if self.grade_a_streak <= -3:
             return 0.75
         if self.grade_a_streak == -2:
