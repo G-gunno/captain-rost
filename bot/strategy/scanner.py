@@ -191,7 +191,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     prev2_1h = candles_1h[-3] if len(candles_1h) >= 3 else prev_1h
 
     # --- 1. ЖЁСТКИЙ БАН ПОКУПОК НА РАЗВОРОТЕ С ХАЯ (ФИКС HYPE, STRK, PEPE, MON, PLUME, POL, INJ) ---
-    # А) Крупная красная часовая свеча или 2 красные часовые свечи подряд после локального пика
     curr_1h_red = curr_1h["close"] < curr_1h["open"]
     prev_1h_red = prev_1h["close"] < prev_1h["open"]
     two_red_1h_from_top = (
@@ -206,7 +205,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     if two_red_1h_from_top or red_reversal_at_high:
         return "1H_BAN", e21_1h, e50_1h, f"1H разворот вниз с локального хая (диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    # Б) Активный слив под EMA21
     big_1h_dump_candle = (
         ((curr_1h["open"] - curr_1h["close"]) > 0.60 * a_1h and curr_1h["close"] < e21_1h * 1.001) or
         ((prev_1h["open"] - prev_1h["close"]) > 0.65 * a_1h and last_1h <= prev_1h["open"] * 0.997 and last_1h < e21_1h * 1.002) or
@@ -215,13 +213,11 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     if big_1h_dump_candle and bars_since_hi24 >= 1:
         return "1H_BAN", e21_1h, e50_1h, f"1H активный слив под EMA21 (-{drop_from_hi24_pct:.1f}% от пика)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    # В) Запрет покупки остывающего пампа в верхней половине канала (фикс INJ по $8.05, ARX по $0.222, ELSA по $0.0684)
     has_breakout_pat = "breakout" in (patterns or [])
     if bars_since_hi24 >= 2 and wave_24_pct >= 4.5 and not has_breakout_pat:
         retrace_ratio = (max_h_24 - last_1h) / (max_h_24 - min_before_hi24) if max_h_24 > min_before_hi24 else 0.0
         e21_rolling_over = e21_1h <= e21_3h_ago * 1.0005
         lower_highs_1h = max(curr_1h["high"], prev_1h["high"]) < max_h_24 * 0.996
-        # Если памп уже прошёл и монета сползает с вершины, запрещаем брать её выше 48% диапазона — ждём просадку на дно!
         if pos_in_48h > 0.48 and lower_highs_1h and (retrace_ratio >= 0.16 or e21_rolling_over or last_1h < e21_1h * 1.001):
             return "1H_BAN", e21_1h, e50_1h, f"1H остывание после пампа (+{wave_24_pct:.1f}%, ждём откат ниже 48%)", round(chg_48h, 1), round(pos_in_48h, 2)
         if retrace_ratio >= 0.28 and (last_1h < e21_1h * 0.999 or e21_rolling_over):
@@ -232,7 +228,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     e21_falling_1h = (e21_1h < e21_3h_ago * 0.9985) or (last_1h < e21_1h * 0.996)
     e50_falling_48h = (e50_1h < e50_12h_ago * 0.996) and (e50_1h < e50_24h_ago * 0.992)
 
-    # --- АНАЛИЗ 15M СТРУКТУРЫ И РАЗВОРОТА СО ДНА ПРОСАДКИ (ФИКС 06:00 НА ICP, ZRO, INJ, HYPE, ELSA) ---
     healthy_15m_trend = True
     is_15m_dip_turn = False
     reversal_15m_confirmed = False
@@ -261,7 +256,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         ):
             healthy_15m_trend = False
 
-        # Разворот вверх на дне часовой просадки (когда 15m EMA21 ещё ниже EMA50, но свечи уже развернулись вверх!)
         bottom_held = low_last_3 >= low_prev_6 * 0.9985
         green_turn_15m = (
             closed_15["close"] > closed_15["open"] and
@@ -305,7 +299,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         return "1H_DIP_BOUNCE", e21_1h, e50_1h, f"1H откуп просадки на опоре ({chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
     # --- 3. ФИЛЬТР ПОТОЛКА ДЛЯ БОКОВИКОВ И ТРЕНДОВ ---
-    # Повышаем потолок только для настоящих широких трендов (wave_24_pct >= 5.0%), отсекая покупку хаёв на MON, STRK, PEPE, PLUME!
     if chg_48h >= 8.5 and wave_24_pct >= 5.5 and e21_rising_1h and e50_rising_1h and bars_since_hi24 <= 1 and not curr_1h_red:
         max_allowed_pos_48 = 0.80
     elif chg_48h >= 5.5 and wave_24_pct >= 4.2 and e21_rising_1h and e50_rising_1h and not curr_1h_red:
@@ -564,7 +557,7 @@ async def fetch_new_listings():
     return out
 
 
-def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_patterns=None, saved_mode=None):
+def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_patterns=None, saved_mode=None, saved_gate_1h=None):
     closes = [c["close"] for c in candles_15m]
     last = closes[-1]
     e21, e50 = ema(closes, 21)[-1], ema(closes, 50)[-1]
@@ -717,6 +710,11 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         candles_1h, nearest_sup, sup_touches, a15, candles_15m=candles_15m, patterns=pattern_keys
     )
 
+    # Защищаем живой ордер 1H_DIP_BOUNCE (фикс INJUSDT): когда цена откатывает к нашей лимитке,
+    # не сбрасываем статус 1H_DIP_BOUNCE, пока держится часовая опора!
+    if is_open_pos and saved_gate_1h == "1H_DIP_BOUNCE" and gate_1h == "1H_BAN" and pos_in_48h <= 0.58:
+        gate_1h = "1H_DIP_BOUNCE"
+
     if chg_48h > 10.0 or pos_in_48h > 0.36:
         matched_modes = [m for m in matched_modes if m != "reversal"]
 
@@ -725,7 +723,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         r_1h = rsi(closes_1h)
 
         if gate_1h == "1H_DIP_BOUNCE":
-            # Компенсируем отставание 15m EMA на дне часовой просадки (фикс 06:00 на ICP, ZRO, INJ, HYPE, ELSA!)
             missing_ema_comp = 0.0
             if last <= e50:
                 missing_ema_comp += learner.weight("ema50")
@@ -792,7 +789,7 @@ def normalize(raw, regime):
     return round(max(0.0, min(SCORE_MAX, raw / rm * SCORE_MAX)), 2)
 
 
-async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_open_pos=False, saved_patterns=None, saved_mode=None, btc_candles=None):
+async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_open_pos=False, saved_patterns=None, saved_mode=None, btc_candles=None, saved_gate_1h=None):
     candles_15m = await market_data.get_kline(sym, "15", 120)
     candles_1h = await market_data.get_kline(sym, "60", 250)
 
@@ -803,7 +800,8 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
         candles_15m, candles_1h, t, regime,
         is_open_pos=is_open_pos,
         saved_patterns=saved_patterns,
-        saved_mode=saved_mode
+        saved_mode=saved_mode,
+        saved_gate_1h=saved_gate_1h,
     )
 
     base = sym[:-4]
@@ -974,7 +972,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
             )
             dna_info = shadow.get_coin_dna(sym)
 
-            # Отсекаем «мёртвые пилы» с микро-волнами (фикс MONUSDT), когда на рынке полно волатильных монет
             if dna_info["wave_amp_pct"] < 2.20 and atr_pct < 0.55 and signal_values.get("chg_48h", 0.0) < 5.0:
                 return None
 
@@ -1023,7 +1020,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 curr_15 = candles_15m[-1]
 
                 if entry_mode in ("sniper", "rocket"):
-                    # Для 1H_DIP_BOUNCE разрешаем вход до пересечения 15m EMA21 > EMA50 (чтобы брать просадку 06:00 на дне!)
                     if gate_1h != "1H_DIP_BOUNCE":
                         if e21_15 < e50_15 * 0.9985 or e50_15 < e50_series_15[-4] * 0.999:
                             tactical_hold = True
