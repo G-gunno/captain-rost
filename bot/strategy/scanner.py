@@ -305,13 +305,13 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         return "1H_DIP_BOUNCE", e21_1h, e50_1h, f"1H откуп просадки на опоре ({chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
     # --- 3. ФИЛЬТР ПОТОЛКА ДЛЯ БОКОВИКОВ И ТРЕНДОВ ---
-    # Если монета не в сильном 48ч-тренде (chg_48h < 7.5%), запрещаем покупать выше 56% диапазона (фикс MON, STRK, PEPE, PLUME)!
-    if chg_48h >= 8.0 and e21_rising_1h and e50_rising_1h and bars_since_hi24 <= 1 and not curr_1h_red:
-        max_allowed_pos_48 = 0.82
-    elif chg_48h >= 4.5 and e21_rising_1h and e50_rising_1h and not curr_1h_red:
-        max_allowed_pos_48 = 0.65
+    # Повышаем потолок только для настоящих широких трендов (wave_24_pct >= 5.0%), отсекая покупку хаёв на MON, STRK, PEPE, PLUME!
+    if chg_48h >= 8.5 and wave_24_pct >= 5.5 and e21_rising_1h and e50_rising_1h and bars_since_hi24 <= 1 and not curr_1h_red:
+        max_allowed_pos_48 = 0.80
+    elif chg_48h >= 5.5 and wave_24_pct >= 4.2 and e21_rising_1h and e50_rising_1h and not curr_1h_red:
+        max_allowed_pos_48 = 0.62
     else:
-        max_allowed_pos_48 = 0.56
+        max_allowed_pos_48 = 0.52
 
     is_uptrend_1h = (
         last_1h >= e21_1h * 0.999 and
