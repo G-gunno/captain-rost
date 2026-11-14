@@ -100,7 +100,16 @@ class PositionManagerWorker:
             if not t or sym not in paper.positions:
                 continue
 
-            score_pos, candles = await live_score(sym, t, regime, btc_ret, news_items, deriv_t=deriv_tickers.get(sym), is_open_pos=True, btc_candles=btc_candles)
+            pos_snapshot = paper.positions.get(sym, {})
+            score_pos, candles = await live_score(
+                sym, t, regime, btc_ret, news_items,
+                deriv_t=deriv_tickers.get(sym),
+                is_open_pos=True,
+                saved_patterns=pos_snapshot.get("patterns"),
+                saved_mode=pos_snapshot.get("entry_mode"),
+                btc_candles=btc_candles,
+                saved_gate_1h=pos_snapshot.get("gate_1h"),
+            )
             pos = paper.positions.get(sym)
             if not pos or score_pos is None or not candles:
                 continue
@@ -193,7 +202,6 @@ class PositionManagerWorker:
                     coin_compact = format_coin_compact(sym, pos)
                     self._notify(f"🛡 SL поднят по {coin_compact} до {new_sl_str} ({tag_emoji})")
 
-            # СТУПЕНЧАТОЕ ДВИЖЕНИЕ ТЕЙКА «В РАСЧЁТЕ НА ПРОКОЛ» (ВВЕРХ И ВНИЗ)
             if pos.get("tp1_done"):
                 candles_1h = await market_data.get_kline(sym, "60", 250)
                 pos = paper.positions.get(sym)
@@ -210,8 +218,6 @@ class PositionManagerWorker:
                         sl_tag = sl_emoji(pos.get("sl_state", "TRAILING_RUNNER"))
                         self._notify(f"TP🏃🏻‍➡️ <b>Ступень тейка ({step_dir})</b> · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · {sl_tag} {fmt_price(pos['sl'])}")
             else:
-                # ДО TP1: если позиция висит >= 30 мин, ходила в плюс >= +0.70%, но откатила от пика >= 0.25*ATR (фикс PYTHUSDT),
-                # опускаем ступеньку TP1 ближе к текущей цене (+0.75%..+1.00% от входа), чтобы поймать прокол шпилькой!
                 peak_pct = (max_p - pos["avg"]) / pos["avg"] * 100 if pos["avg"] > 0 else 0.0
                 pulled_back = (max_p - last) >= 0.25 * a
                 if pos_age >= 1800 and peak_pct >= 0.70 and pulled_back and last >= pos["avg"] * 0.998:
@@ -248,6 +254,7 @@ class PositionManagerWorker:
 
             entry_mode = order.get("entry_mode", "sniper")
             patterns = order.get("patterns", [])
+            ord_gate_1h = order.get("gate_1h", "")
 
             score_now, candles = await live_score(
                 sym, t, regime, btc_ret, news_items,
@@ -256,6 +263,7 @@ class PositionManagerWorker:
                 saved_patterns=patterns,
                 saved_mode=entry_mode,
                 btc_candles=btc_candles,
+                saved_gate_1h=ord_gate_1h,
             )
             if order not in paper.orders or score_now is None or not candles:
                 continue
@@ -289,18 +297,23 @@ class PositionManagerWorker:
             sup_broken = bool(ord_sup and closed_c["close"] < ord_sup * 0.992 and t["last"] < ord_sup * 0.992)
 
             near_sl_danger = bool(ord_sl > 0 and t["last"] <= (ord_sl + 0.30 * a))
+            is_dip_order = (ord_gate_1h == "1H_DIP_BOUNCE")
+
+            # Для 1H_DIP_BOUNCE (вход на дне часовой просадки, где цена заведомо под 15m EMA50)
+            # НЕ отменяем ордер из-за last < e50, отменяем только при пробое опоры или угрозе стопа!
             sniper_broken = (
                 entry_mode != "reversal" and
+                not is_dip_order and
                 t["last"] < (e50 - 0.65 * a) and
                 e21 < e50 * 0.996 and
                 (near_sl_danger or score_now < thr - 1.0)
             )
-            reversal_broken = (
-                entry_mode == "reversal" and
-                (sup_broken or (curr_c["open"] - curr_c["close"]) > 0.95 * a)
+            dip_or_rev_broken = (
+                (entry_mode == "reversal" or is_dip_order) and
+                (sup_broken or near_sl_danger or (curr_c["open"] - curr_c["close"]) > 0.95 * a)
             )
 
-            if sniper_broken or reversal_broken:
+            if sniper_broken or dip_or_rev_broken:
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], f"Слом структуры ({init_score:.1f}-{score_now:.1f})", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
                 bot_state.set_cooldown(sym, 900)
@@ -308,7 +321,11 @@ class PositionManagerWorker:
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · ☠️⚰️ ({init_score:.1f}-{score_now:.1f})")
                 continue
 
-            base_intact = (entry_mode != "reversal" and t["last"] >= e50 * 0.996 and e21 >= e50 * 0.997)
+            base_intact = (
+                (not sup_broken and not near_sl_danger)
+                if is_dip_order
+                else (entry_mode != "reversal" and t["last"] >= e50 * 0.996 and e21 >= e50 * 0.997)
+            )
             if order_age >= 1500 and not base_intact and score_now < (thr - 1.8):
                 paper.cancel_order(order["id"])
                 paper.log_event(sym, "cancel", t["last"], f"Ослаб ({score_now:.1f})", tp=order.get("tp"), sl=order.get("sl"), sup=order.get("nearest_sup"), res=order.get("nearest_res"))
@@ -325,7 +342,7 @@ class PositionManagerWorker:
                 self._notify(f"⚠️ Снят · {pair_html(sym, order)} · 🚀👋🏻")
                 continue
 
-            max_order_age = 3600 if entry_mode == "reversal" else 2700
+            max_order_age = 3600 if (entry_mode == "reversal" or is_dip_order) else 2700
             if order_age > max_order_age:
                 if score_now >= (thr + 0.5) and order.get("extensions", 0) < 1 and base_intact:
                     order["extensions"] = order.get("extensions", 0) + 1
