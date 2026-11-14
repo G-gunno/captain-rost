@@ -1,4 +1,5 @@
 import os
+import json
 import asyncio
 import calendar
 import html as _html
@@ -68,6 +69,100 @@ async def whitepaper_download_handler(request):
         content_type="text/plain; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="CaptainRost_Whitepaper.txt"'}
     )
+
+
+async def fix_telegram_handler(request):
+    """
+    Сервисная веб-страница: восстанавливает Telegram Webhook прямо из браузера пользователя
+    (в обход исходящего фаервола Render) и позволяет управлять ботом в 1 клик.
+    """
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com").rstrip("/")
+    webhook_url = f"{public_url}{WEBHOOK_PATH}"
+
+    action = request.query.get("action", "")
+    action_result = ""
+    if action == "resetstats":
+        action_result = await action_resetstats()
+    elif action == "resetlearn":
+        action_result = await action_resetlearn()
+    elif action == "start":
+        bot_state.fresh_start()
+        action_result = "🤖 Капитан Рост: торговля запущена!"
+    elif action == "pause":
+        action_result = await action_pause()
+    elif action == "resume":
+        action_result = await action_resume()
+
+    html = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Капитан Рост — Восстановление связи Telegram</title>
+<style>
+  body {{ background:#0f1218; color:#e6edf3; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; padding:24px; max-width:720px; margin:0 auto; }}
+  .card {{ background:#171c26; border:1px solid #262f40; border-radius:10px; padding:20px; margin-bottom:16px; }}
+  h2 {{ margin-top:0; color:#00e5ff; }}
+  .btn {{ display:inline-block; text-decoration:none; color:#fff; background:#2962ff; padding:10px 16px; border-radius:6px; font-weight:600; margin:6px 6px 6px 0; border:none; cursor:pointer; font-size:14px; }}
+  .btn-green {{ background:#00c853; }}
+  .btn-orange {{ background:#ff9100; }}
+  .status-box {{ padding:12px; border-radius:8px; background:#1d2432; border:1px solid #334155; margin-top:12px; font-family:monospace; font-size:13px; white-space:pre-wrap; }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h2>🔧 Авто-восстановление Telegram Webhook</h2>
+    <p>Эта страница автоматически прописывает адрес вебхука <code>{webhook_url}</code> напрямую через твой браузер.</p>
+    <button class="btn btn-green" onclick="registerWebhook()">🔄 Привязать Webhook Telegram сейчас</button>
+    <div id="wh-status" class="status-box">Проверка и привязка вебхука...</div>
+  </div>
+
+  {"<div class='card' style='border-color:#00e676;'><b>✅ Выполнено:</b><br>" + action_result + "</div>" if action_result else ""}
+
+  <div class="card">
+    <h2>🎛 Прямое управление ботом (работает всегда)</h2>
+    <a class="btn btn-green" href="/fix-telegram?action=start">🚀 Запустить торговлю (/start)</a>
+    <a class="btn btn-orange" href="/fix-telegram?action=resetstats">📊 Сбросить статистику ($1,000)</a>
+    <a class="btn btn-orange" href="/fix-telegram?action=resetlearn">🧠♻️ Сбросить опыт ИИ</a>
+    <a class="btn" href="/fix-telegram?action=pause">⏸ Пауза</a>
+    <a class="btn" href="/fix-telegram?action=resume">▶️ Возобновить</a>
+    <hr style="border:0; border-top:1px solid #262f40; margin:16px 0;">
+    <a class="btn" href="/audit?hours=48">📊 Открыть дашборд /audit (48ч)</a>
+    <a class="btn" href="/download-log">📥 Скачать лог (bot.log)</a>
+  </div>
+
+<script>
+const TOKEN = {json.dumps(token)};
+const WEBHOOK_URL = {json.dumps(webhook_url)};
+
+async function registerWebhook() {{
+  const box = document.getElementById('wh-status');
+  box.innerHTML = '⏳ Отправка запроса в api.telegram.org...';
+  try {{
+    const setUrl = `https://api.telegram.org/bot${{TOKEN}}/setWebhook?url=${{encodeURIComponent(WEBHOOK_URL)}}&drop_pending_updates=true`;
+    const r = await fetch(setUrl);
+    const data = await r.json();
+    const infoR = await fetch(`https://api.telegram.org/bot${{TOKEN}}/getWebhookInfo`);
+    const info = await infoR.json();
+    if (data.ok) {{
+      box.style.borderColor = '#00e676';
+      box.innerHTML = '✅ ВЕБХУК УСПЕШНО УСТАНОВЛЕН! Теперь все команды в Telegram (/status, /resetstats, /chart и др.) работают мгновенно!\\n\\n' + JSON.stringify(info.result, null, 2);
+    }} else {{
+      box.style.borderColor = '#ff5252';
+      box.innerHTML = '⚠️ Ответ Telegram: ' + JSON.stringify(data, null, 2);
+    }}
+  }} catch (e) {{
+    box.style.borderColor = '#ff5252';
+    box.innerHTML = '⚠️ Браузер не смог достучаться до api.telegram.org (включи VPN в браузере и нажми кнопку выше): ' + e;
+  }}
+}}
+
+window.addEventListener('DOMContentLoaded', registerWebhook);
+</script>
+</body>
+</html>"""
+    return web.Response(text=html, content_type="text/html")
 
 
 async def audit_handler(request):
@@ -707,7 +802,6 @@ async def webhook_handler(request):
         return web.Response(text="OK")
 
     try:
-        # 1. Обработка нажатий инлайн-кнопок (Подтвердить / Отмена)
         if "callback_query" in data:
             cb = data["callback_query"]
             msg = cb.get("message") or {}
@@ -745,7 +839,6 @@ async def webhook_handler(request):
 
             return web.Response(text="OK")
 
-        # 2. Обработка текстовых команд (/status, /resetstats, /resetlearn, /start и т.д.)
         msg = data.get("message") or data.get("edited_message")
         if msg:
             chat_id = msg.get("chat", {}).get("id")
@@ -831,6 +924,7 @@ async def run_all(application):
     web_app.router.add_get("/", health_handler)
     web_app.router.add_get("/chart", chart_handler)
     web_app.router.add_get("/audit", audit_handler)
+    web_app.router.add_get("/fix-telegram", fix_telegram_handler)
     web_app.router.add_get("/download-log", log_download_handler)
     web_app.router.add_get("/whitepaper", whitepaper_download_handler)
     web_app.router.add_post(WEBHOOK_PATH, webhook_handler)
@@ -887,7 +981,7 @@ async def run_all(application):
     except asyncio.CancelledError:
         pass
     finally:
-        # Никогда не вызываем delete_webhook при остановке контейнера, чтобы вебхук оставался активным!
+        # Никогда не вызываем delete_webhook при остановке контейнера!
         try:
             if getattr(application, "_initialized", False):
                 await application.stop()
