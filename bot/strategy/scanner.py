@@ -112,7 +112,6 @@ def is_post_pump_dump(candles_15m: list, candles_1h: list = None) -> tuple:
                 pump_24 = (hi_val - lo_before) / lo_before * 100.0
                 retrace_24 = (hi_val - last_c) / (hi_val - lo_before)
                 upper_wick_spike = (hi_val - max(r24[hi_idx]["open"], r24[hi_idx]["close"])) / (hi_val - lo_before)
-                # Если монета стрельнула шпилькой >= 8% и слила >= 50% этого роста, и стоит в мертвом боковике без нового роста
                 if pump_24 >= 8.0 and retrace_24 >= 0.50 and (last_c - lo_after) / lo_after * 100.0 < 3.0 and upper_wick_spike >= 0.25:
                     return True, f"пост-памп раздача 24ч (+{pump_24:.1f}%, слито {retrace_24*100:.0f}%)"
 
@@ -224,7 +223,7 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         room_to_e21_pct = ((e21_1h - last_1h) / last_1h * 100.0) if last_1h > 0 else 0.0
         room_to_e50_pct = ((e50_1h - last_1h) / last_1h * 100.0) if last_1h > 0 else 0.0
         total_drop_to_e21 = e21_1h - low_12h
-        rebound_ progress = ((last_1h - low_12h) / total_drop_to_e21) if total_drop_to_e21 > 0 else 1.0
+        rebound_progress = ((last_1h - low_12h) / total_drop_to_e21) if total_drop_to_e21 > 0 else 1.0
 
         # Если цена в даунтренде уже отскочила со дна (прошла >= 45% пути к падающей 1H EMA21 или подошла к ней ближе 1.50%),
         # КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕМ покупать в потолок падающей 1H EMA21!
@@ -271,7 +270,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         last_15 = c15_closes[-1]
         curr_15 = candles_15m[-1]
         closed_15 = candles_15m[-2]
-        prev_closed_15 = candles_15m[-3]
 
         low_last_2 = min(curr_15["low"], closed_15["low"])
         low_prev_5 = min(c["low"] for c in candles_15m[-7:-2])
@@ -292,8 +290,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         closed_lwick_15 = min(closed_15["open"], closed_15["close"]) - closed_15["low"]
         has_15m_pin = closed_rng_15 > 0 and (closed_lwick_15 / closed_rng_15) >= 0.38
 
-        # Разворот прямо на дне (внутри белого кружка): лой перестал обновляться, закрылась зелёная 15m свеча или пин-бар,
-        # и цена вернулась над быстрой EMA9 (НЕ ждём 3 часа пересечения EMA21 > EMA50!)
         floor_held_15m = low_last_2 >= low_prev_5 * 0.9975
         green_turn_15m = (
             (closed_15["close"] > closed_15["open"] or has_15m_pin) and
@@ -304,7 +300,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         if floor_held_15m and green_turn_15m:
             is_15m_bottom_turn = True
 
-    # Проверяем часовую базу / хвосты откупа на дне (белые кружки):
     last_4_1h = candles_1h[-4:]
     has_1h_spring_wick = False
     for c1 in last_4_1h:
@@ -314,7 +309,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
             has_1h_spring_wick = True
             break
 
-    # Удержание часового дна (2+ часовые свечи держат лой без провала ниже)
     h1_floor_held = min(curr_1h["low"], prev_1h["low"]) >= min(c["low"] for c in candles_1h[-6:-2]) * 0.9965
     has_1h_floor_or_sup = (
         has_1h_spring_wick or
@@ -322,7 +316,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         (nearest_sup and sup_touches >= 2 and 0 <= (last_1h - nearest_sup) <= 2.2 * a15)
     )
 
-    # Запас хода вверх до 1H EMA21 должен быть >= 1.55% (чтобы мы покупали НА ДНЕ под EMA21, а не в упор к ней!)
     ample_room_to_e21 = (e21_1h > last_1h * 1.0155) or (e21_1h >= e50_1h and abs(last_1h - e21_1h) <= 1.0 * a_1h)
 
     if (
@@ -665,7 +658,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         keys.append("chg24h")
     elif (t["change_pct"] <= -2.5 or local_swing_drop >= 2.0 or pos_in_48h <= 0.30) and (gate_1h == "1H_DIP_BOUNCE" or "reversal" in matched_modes or r <= 54):
         score += learner.weight("chg24h")
-        reasons.append(f"дисконт на дне -{ max(abs(t['change_pct']), local_swing_drop):.1f}%")
+        reasons.append(f"дисконт на дне -{max(abs(t['change_pct']), local_swing_drop):.1f}%")
         keys.append("chg24h")
     elif t["change_pct"] >= w["chg_hi"]:
         score -= 1.0
@@ -708,8 +701,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         r_1h = rsi(closes_1h)
 
         if gate_1h == "1H_DIP_BOUNCE":
-            # На реальном дне (внутри белого кружка) полностью компенсируем отстающие 15m EMA50, EMA21 и Impulse,
-            # чтобы брать просадку ВНИЗУ до начала ралли к 1H EMA21!
             missing_ema_comp = 0.0
             if last <= e50:
                 missing_ema_comp += learner.weight("ema50")
