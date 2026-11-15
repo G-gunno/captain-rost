@@ -91,9 +91,9 @@ def _count_spaced_touches(price_target: float, points: list, tol: float = 0.0055
 
 def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72):
     """
-    Строит 48-часовую карту уровней Поддержки и Сопротивления (1H + 15m) с учётом:
-    1. Зеркальных уровней (S/R Flip): пробитые вверх часовые и 15m максимумы становятся ступенями Поддержки под ценой.
-    2. Часовых зон спроса (длинных нижних теней откупа на 1H).
+    Строит 48-часовую карту уровней Поддержки и Сопротивления (1H + 15m):
+    - Включает детектор многочасового дна (Bottom Base Cluster): когда 2+ соседние часовые свечи
+      держат один горизонт лоя с нижними хвостами (как в белых кружках на ETH, SUI, WLD, INJ, HYPE, ARX).
     """
     if not candles_15m or len(candles_15m) < 15:
         return [], []
@@ -105,6 +105,10 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72
     if candles_1h and isinstance(candles_1h, list) and len(candles_1h) >= 20:
         recent_1h = candles_1h[-window_1h:] if len(candles_1h) >= window_1h else candles_1h
         n1 = len(recent_1h)
+        low_48h = min(float(c["low"]) for c in recent_1h[-48:]) if len(recent_1h) >= 48 else min(float(c["low"]) for c in recent_1h)
+        high_48h = max(float(c["high"]) for c in recent_1h[-48:]) if len(recent_1h) >= 48 else max(float(c["high"]) for c in recent_1h)
+        span_48h = max(1e-9, high_48h - low_48h)
+
         for i in range(2, n1 - 1):
             h = float(recent_1h[i]["high"])
             l = float(recent_1h[i]["low"])
@@ -114,26 +118,26 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72
 
             is_1h_high = (h >= recent_1h[i - 1]["high"] and h >= recent_1h[i - 2]["high"] and h >= recent_1h[i + 1]["high"])
             is_1h_low = (l <= recent_1h[i - 1]["low"] and l <= recent_1h[i - 2]["low"] and l <= recent_1h[i + 1]["low"])
+            in_bottom_quarter = ((l - low_48h) / span_48h) <= 0.25
 
             if is_1h_high:
                 high_points.append((h, "1h", i, 3, 2))
             if is_1h_low:
-                low_points.append((l, "1h", i, 3, 2))
-            elif rng > 0 and (min(o, c) - l) / rng >= 0.45 and l <= min(recent_1h[i - 1]["low"], recent_1h[i + 1]["low"]):
-                # Часовой выкуп тенью (зона спроса 1H)
-                low_points.append((l, "1h", i, 3, 2))
+                # В нижней четверти 48ч-диапазона разрешаем соседним часовым свечам (gap=1) формировать плиту дна!
+                low_points.append((l, "1h", i, 1 if in_bottom_quarter else 2, 2))
+            elif rng > 0 and (min(o, c) - l) / rng >= 0.35 and (in_bottom_quarter or l <= min(recent_1h[i - 1]["low"], recent_1h[i + 1]["low"]) * 1.003):
+                low_points.append((l, "1h", i, 1, 2))
 
     recent_15m = candles_15m[-window_15m:] if len(candles_15m) >= window_15m else candles_15m
     n15 = len(recent_15m)
-    for i in range(3, n15 - 1):
+    for i in range(2, n15 - 1):
         h = float(recent_15m[i]["high"])
         l = float(recent_15m[i]["low"])
-        if all(h >= recent_15m[i - j]["high"] for j in (1, 2, 3)) and h >= recent_15m[i + 1]["high"]:
-            high_points.append((h, "15m", i, 4, 1))
-        if all(l <= recent_15m[i - j]["low"] for j in (1, 2, 3)) and l <= recent_15m[i + 1]["low"]:
-            low_points.append((l, "15m", i, 4, 1))
+        if h >= recent_15m[i - 1]["high"] and h >= recent_15m[i - 2]["high"] and h >= recent_15m[i + 1]["high"]:
+            high_points.append((h, "15m", i, 3, 1))
+        if l <= recent_15m[i - 1]["low"] and l <= recent_15m[i - 2]["low"] and l <= recent_15m[i + 1]["low"]:
+            low_points.append((l, "15m", i, 2, 1))
 
-    # Объединяем пики и впадины для расчёта зеркальных уровней (S/R Flip)
     all_pivots = high_points + low_points
     unique_prices = {pt[0] for pt in all_pivots if pt[0] > 0}
 
@@ -144,8 +148,7 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72
     clusters_sup = []
 
     for p_lvl in unique_prices:
-        if p_lvl > last_price * 1.0005:
-            # Уровень ВЫШЕ текущей цены -> Сопротивление
+        if p_lvl > last_price * 1.0010:
             touches = _count_spaced_touches(p_lvl, high_points, tol=0.0055, is_res=True)
             if touches < 2:
                 touches = _count_spaced_touches(p_lvl, all_pivots, tol=0.0050, is_res=True)
@@ -153,9 +156,8 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72
                 touches = 4
             if touches >= 2:
                 clusters_res.append((p_lvl, touches))
-        elif p_lvl < last_price * 0.9995:
-            # Уровень НИЖЕ текущей цены -> Поддержка (прямые впадины + зеркальные пробитые уровни)
-            touches_low = _count_spaced_touches(p_lvl, low_points, tol=0.0055, is_res=False)
+        elif p_lvl <= last_price * 1.0015:
+            touches_low = _count_spaced_touches(p_lvl, low_points, tol=0.0060, is_res=False)
             touches_flip = _count_spaced_touches(p_lvl, all_pivots, tol=0.0050, is_res=False)
             touches = max(touches_low, touches_flip)
             if touches >= 2:
@@ -177,14 +179,14 @@ def find_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72, w
     last_price = candles_15m[-1]["close"]
     confirmed_res, confirmed_sup = get_all_sr_levels(candles_15m, candles_1h, window_15m, window_1h)
 
-    res_above = [c for c in confirmed_res if c[0] > last_price * 1.0005]
+    res_above = [c for c in confirmed_res if c[0] > last_price * 1.0010]
     nearest_res = None
     res_touches = 0
     if res_above:
         res_above.sort(key=lambda x: x[0])
         nearest_res, res_touches = res_above[0]
 
-    sup_below = [c for c in confirmed_sup if c[0] < last_price * 0.9995]
+    sup_below = [c for c in confirmed_sup if c[0] <= last_price * 1.0015]
     nearest_sup = None
     sup_touches = 0
     if sup_below:
