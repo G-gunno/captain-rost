@@ -56,48 +56,40 @@ def buy_size(equity, score, thr, liquidity=10_000_000, free_usdt=None, entry_mod
 
 def entry_offset(score, thr, regime="neutral", atr_pct=1.5, entry_mode="sniper", tier="SMALL", is_accumulation=False, symbol: str = None):
     """
-    Рассчитывает глубину лимитного ордера с учётом индивидуального ДНК отката монеты (pullback_pct):
-    - rocket: в упор к стакану (-0.08% .. -0.18%)
-    - sniper: ждёт реальный откат волны (-0.28% .. -0.80%), не покупая макушки свечей
-    - reversal: ловит глубокие шпильки капитуляции на плите (-0.35% .. -0.95%)
+    Рассчитывает глубину лимитного ордера:
+    - rocket: в упор к стакану (-0.10% .. -0.18%)
+    - reversal / откуп дна в белых кружках: плотный вход (-0.18% .. -0.32%), чтобы гарантированно забирать разворот со дна!
+    - sniper по тренду: откат (-0.22% .. -0.55%)
     """
     if entry_mode == "rocket":
         if tier in ("TOP20", "MID"):
             return -0.0010
         return -0.0018
 
-    dna = shadow.get_coin_dna(symbol) if symbol else {"pullback_pct": 0.75}
-    dna_pull_frac = max(0.0028, min(0.0090, float(dna.get("pullback_pct", 0.75)) / 100.0 * 0.45))
+    # На подтверждённом дне (reversal) не ставим лимитку на -0.8% в воздух (из-за чего INJ и OPG улетали без нас),
+    # а берём плотный ретест свечи разворота (-0.18% .. -0.32%)!
+    if entry_mode == "reversal":
+        if tier in ("TOP20", "MID"):
+            return -0.0018
+        return -0.0028
+
+    dna = shadow.get_coin_dna(symbol) if symbol else {"pullback_pct": 0.65}
+    dna_pull_frac = max(0.0020, min(0.0060, float(dna.get("pullback_pct", 0.65)) / 100.0 * 0.35))
 
     hunt = shadow.hunt()
     near = shadow.near()
     strength = min(1.0, max(0.0, (score - thr) / 3.0))
     base_offset = hunt + (near - hunt) * strength
-
-    # Смешиваем базовый отступ с индивидуальной глубиной откатов монеты из Coin DNA
-    base_offset = 0.60 * base_offset - 0.40 * dna_pull_frac
+    base_offset = 0.65 * base_offset - 0.35 * dna_pull_frac
 
     if is_accumulation and entry_mode == "sniper":
         if tier in ("TOP20", "MID"):
-            return round(max(-0.0032, min(-0.0018, base_offset * 0.75)), 4)
-        return round(max(-0.0042, min(-0.0024, base_offset * 0.85)), 4)
+            return round(max(-0.0026, min(-0.0016, base_offset * 0.70)), 4)
+        return round(max(-0.0034, min(-0.0020, base_offset * 0.80)), 4)
 
-    vol_factor = min(1.35, max(0.75, atr_pct / 1.5))
-
-    if entry_mode == "reversal":
-        rev_offset = base_offset * vol_factor * 1.25
-        if symbol and learner.coin_bias(symbol) < 0:
-            rev_offset *= 1.25
-        return round(max(-0.0095, min(-0.0035, rev_offset)), 4)
-
+    vol_factor = min(1.25, max(0.75, atr_pct / 1.5))
     if tier in ("TOP20", "MID"):
-        vol_factor *= 0.85
-    elif tier == "MICRO":
-        vol_factor *= 1.10
+        vol_factor *= 0.80
 
-    regime_mult = 1.12 if regime == "bear" else (0.90 if regime == "bull" else 1.0)
-    final_offset = base_offset * vol_factor * regime_mult
-
-    # В BEAR и NEUTRAL запрещаем ставить снайперские лимитки ближе чем в -0.26% от цены
-    min_pullback_cap = -0.0020 if regime == "bull" else -0.0026
-    return round(max(-0.0080, min(min_pullback_cap, final_offset)), 4)
+    final_offset = base_offset * vol_factor
+    return round(max(-0.0055, min(-0.0018, final_offset)), 4)
