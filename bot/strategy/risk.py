@@ -5,17 +5,17 @@ from bot.strategy.learner import learner
 from bot.utils.format import sl_emoji
 
 TIER_SL_FLOOR = {
-    "TOP20": 0.009,  # 0.9%
-    "MID":   0.012,  # 1.2%
-    "SMALL": 0.015,  # 1.5%
-    "MICRO": 0.018,  # 1.8%
+    "TOP20": 0.009,
+    "MID":   0.012,
+    "SMALL": 0.015,
+    "MICRO": 0.018,
 }
 
 TIER_TP_FLOOR = {
-    "TOP20": 0.011,  # 1.1%
-    "MID":   0.013,  # 1.3%
-    "SMALL": 0.014,  # 1.4%
-    "MICRO": 0.016,  # 1.6%
+    "TOP20": 0.011,
+    "MID":   0.013,
+    "SMALL": 0.014,
+    "MICRO": 0.016,
 }
 
 TIER_MAX_SL = {
@@ -37,32 +37,32 @@ TRADE_POLICIES = {
         "max_portfolio_risk_pct": 8.0,
         "risk_per_trade_core": 1.25,
         "risk_per_trade_alt": 1.00,
-        "min_rr_sniper": 0.94,
-        "min_rr_alt": 0.84,
+        "min_rr_sniper": 0.90,
+        "min_rr_alt": 0.82,
         "require_grade_a_for_alt": False,
     },
     "CAUTIOUS": {
         "max_portfolio_risk_pct": 10.0,
         "risk_per_trade_core": 1.50,
         "risk_per_trade_alt": 1.20,
-        "min_rr_sniper": 0.92,
-        "min_rr_alt": 0.84,
+        "min_rr_sniper": 0.90,
+        "min_rr_alt": 0.82,
         "require_grade_a_for_alt": False,
     },
     "NORMAL": {
         "max_portfolio_risk_pct": 12.0,
         "risk_per_trade_core": 1.75,
         "risk_per_trade_alt": 1.45,
-        "min_rr_sniper": 0.90,
-        "min_rr_alt": 0.82,
+        "min_rr_sniper": 0.88,
+        "min_rr_alt": 0.80,
         "require_grade_a_for_alt": False,
     },
     "AGGRESSIVE": {
         "max_portfolio_risk_pct": 16.0,
         "risk_per_trade_core": 2.10,
         "risk_per_trade_alt": 1.75,
-        "min_rr_sniper": 0.88,
-        "min_rr_alt": 0.82,
+        "min_rr_sniper": 0.86,
+        "min_rr_alt": 0.80,
         "require_grade_a_for_alt": False,
     },
 }
@@ -98,11 +98,9 @@ def evaluate_setup_grade(cand: dict) -> str:
     gate_1h = cand.get("gate_1h", "")
     sym = cand.get("symbol", "")
 
-    if entry_mode == "reversal" and pos_in_48h > 0.36:
+    if entry_mode == "reversal" and pos_in_48h > 0.32:
         return "B"
-    if entry_mode == "sniper" and pos_in_48h > 0.62 and "breakout" not in cand.get("patterns", []):
-        return "B"
-    if corr > 0.85 and entry_mode != "reversal":
+    if entry_mode == "sniper" and pos_in_48h > 0.55 and "breakout" not in cand.get("patterns", []):
         return "B"
     if sector == "Other" and tier == "MICRO":
         return "B"
@@ -116,24 +114,20 @@ def evaluate_setup_grade(cand: dict) -> str:
     r_val = sv.get("rsi", 50.0)
     sup_touches = cand.get("sup_touches", 0)
 
-    is_dip_turn = (gate_1h == "1H_DIP_BOUNCE" and sup_touches >= 2 and pos_in_48h <= 0.52)
-    has_strong_slab_setup = (sup_touches >= 3 and pos_in_48h <= 0.52 and (vol_ratio >= 1.25 or r_val <= 42.0))
+    is_dip_turn = (gate_1h == "1H_DIP_BOUNCE" and pos_in_48h <= 0.30)
+    has_strong_slab_setup = (sup_touches >= 3 and pos_in_48h <= 0.35 and (vol_ratio >= 1.25 or r_val <= 42.0))
 
     if not strong_pats and not is_dip_turn and not has_strong_slab_setup:
         return "B"
 
     confluence = 2 if (strong_pats or is_dip_turn) else 1
-    if strong_pats and sup_touches >= 3:
+    if strong_pats and sup_touches >= 2:
         confluence += 1
-    if gate_1h == "1H_DIP_BOUNCE" or (gate_1h in ("1H_TREND_OK", "1H_SUPER_TREND") and pos_in_48h <= 0.58):
+    if gate_1h == "1H_DIP_BOUNCE" or (gate_1h in ("1H_TREND_OK", "1H_SUPER_TREND") and pos_in_48h <= 0.50):
         confluence += 1
-    elif gate_1h == "1H_SUPPORT_ONLY" and pos_in_48h <= 0.35 and sup_touches >= 3:
+    if vol_ratio >= 1.25 or r_val <= 38:
         confluence += 1
-
-    if vol_ratio >= 1.30:
-        confluence += 1
-
-    if tier in ("TOP20", "MID") or corr < 0.35:
+    if tier in ("TOP20", "MID") or corr < 0.45:
         confluence += 1
 
     return "A+" if confluence >= 4 else "B"
@@ -178,15 +172,22 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     sl_tuning = shadow.sl_mult()
     tp_tuning = shadow.tp_mult()
 
-    base_mult = 0.85 if is_mom else (1.22 if entry_mode == "reversal" else 1.15)
+    base_mult = 0.85 if is_mom else (1.20 if entry_mode == "reversal" else 1.15)
     raw_atr_sl_pct = (base_mult * a * sl_tuning / entry) * 100.0 if entry > 0 else 0.0
 
     if raw_atr_sl_pct > max_sl_allowed * 1.30:
         return None, None, False, f"Аномальная волатильность ATR (SL {raw_atr_sl_pct:.2f}% > {max_sl_allowed}%)"
 
+    # ЗАЩИТА ОТ ПОКУПКИ В ПОТОЛОК ПАДАЮЩЕЙ 1H EMA21 (ФИКС ETH, SUI, WLD, HYPE, INJ, ARX):
+    # В 1H даунтренде (e21_1h < e50_1h) падающая 1H EMA21 — это жёсткое сопротивление сверху!
+    if e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry:
+        dist_to_e21_1h_pct = (e21_1h - entry) / entry * 100.0
+        if dist_to_e21_1h_pct < 1.25:
+            return None, None, False, f"В упор к падающей 1H EMA21 ({dist_to_e21_1h_pct:.2f}% < 1.25%)"
+
     sl_dist = 0.0
     if sup and sup_touches >= 2 and sup < entry and (entry - sup) <= 1.8 * a:
-        struct_sl = _round_px(sup * 0.997)
+        struct_sl = _round_px(sup * 0.9965)
         candidate_dist = max(entry - struct_sl, entry * sl_floor_pct)
         if (candidate_dist / entry) * 100 <= max_sl_allowed:
             sl_dist = candidate_dist
@@ -198,29 +199,21 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
         sl = _round_px(entry - sl_dist)
 
     if recent_low_6 and recent_low_6 > 0 and recent_low_6 < entry:
-        wick_safe_sl = _round_px(recent_low_6 * 0.997)
+        wick_safe_sl = _round_px(recent_low_6 * 0.9965)
         if wick_safe_sl < sl:
             wick_dist_pct = (entry - wick_safe_sl) / entry * 100
             if wick_dist_pct <= max_sl_allowed:
                 sl = wick_safe_sl
                 sl_dist = entry - sl
 
-    if ema50 and ema50 > 0 and entry > ema50:
-        ema50_safe_sl = _round_px(ema50 - 0.55 * a)
-        if sl > ema50_safe_sl and abs(sl - ema50) <= 0.55 * a:
-            ema_dist_pct = (entry - ema50_safe_sl) / entry * 100
-            if ema_dist_pct <= max_sl_allowed:
-                sl = ema50_safe_sl
-                sl_dist = entry - sl
-
     if sl >= entry or (sl_dist / entry * 100) > max_sl_allowed:
         return None, None, False, "Недопустимая дистанция SL"
 
     if min_rr is None:
-        min_rr = 0.92 if entry_mode == "sniper" else 0.84
+        min_rr = 0.88 if entry_mode == "sniper" else 0.80
 
     tp_atr_mult = 1.22 if entry_mode == "reversal" else (1.45 if is_mom else 1.28)
-    rr_target = 1.02 if entry_mode == "reversal" else max(1.04, min_rr + 0.04)
+    rr_target = 1.00 if entry_mode == "reversal" else max(1.02, min_rr + 0.04)
     tp_dist_raw = max(tp_atr_mult * a * tp_tuning, sl_dist * rr_target, entry * tp_floor_pct)
 
     if not is_mom:
@@ -229,17 +222,13 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
 
     tp = _round_px(entry + tp_dist_raw)
 
-    if entry_mode == "reversal" and e21_1h and e50_1h and e21_1h < e50_1h:
-        if e21_1h > entry * 1.009:
-            cap_e21 = _round_px(e21_1h * 0.9985)
-            if cap_e21 < tp:
-                tp = cap_e21
-                min_rr = min(min_rr, (tp - entry) / sl_dist)
-        elif e50_1h > entry * 1.010:
-            cap_e50 = _round_px(e50_1h * 0.998)
-            if cap_e50 < tp:
-                tp = cap_e50
-                min_rr = min(min_rr, (tp - entry) / sl_dist)
+    # При откупе со дна в 1H даунтренде (e21_1h < e50_1h) ставим TP1 ПЕРЕД падающей 1H EMA21,
+    # чтобы фиксировать профит на касании 1H EMA21 (как на зелёных свечах 05:00 по ETH, SUI, WLD, HYPE)!
+    if e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry * 1.0125:
+        cap_e21 = _round_px(e21_1h * 0.9965)
+        if cap_e21 < tp:
+            tp = cap_e21
+            min_rr = min(min_rr, max(0.72, (tp - entry) / sl_dist))
 
     if res and res > entry and res_touches >= 6:
         res_dist_pct = (res - entry) / entry * 100
@@ -265,13 +254,6 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
 
 
 def calc_runner_target(symbol: str, current_price: float, candles_15m: list, candles_1h: list = None, pos: dict = None) -> tuple:
-    """
-    Многоступенчатый Тейк Коридора (Multi-Step Wave Runner):
-    - Держит планку TP🏃🏻‍➡️ на высоте импульсного шага (+0.75%..+1.35% от текущей цены).
-    - Пока цена идёт ВЫШЕ 15m EMA21 (живой тренд, как на CAPUSDT перед ракетой +18%),
-      НЕ прижимает TP вниз к цене, а шагает ступеньками ВВЕРХ вместе с волной!
-    - Опускает ступеньку TP ниже под прокол только тогда, когда цена ушла ПОД 15m EMA21 и импульс реально затухает.
-    """
     if not candles_15m or len(candles_15m) < 25:
         return _round_px(current_price * 1.010), True, "step_init"
 
@@ -294,7 +276,6 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
     pierce_step = max(a15 * pierce_atr_mult * wave_mult, current_price * 0.0075)
     pierce_step = min(pierce_step, current_price * 0.0160)
 
-    # 1. Снижаем ступеньку TP под прокол ТОЛЬКО если цена провалилась ПОД 15m EMA21 и откатила от пика >= 0.65*ATR
     pullback_from_peak = max_p - current_price
     e21_falling = len(e21_series) >= 4 and e21 < e21_series[-3] * 0.9995
 
@@ -307,7 +288,6 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
         if lowered_tp < old_tp * 0.9980:
             return _round_px(lowered_tp), True, "step_down_for_pierce"
 
-    # 2. Шаг ступеньки ВВЕРХ по волне
     ideal_pierce_tp = max(
         current_price + pierce_step,
         e21 + (1.50 * wave_mult) * a15
@@ -316,7 +296,6 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
     if old_tp <= current_price:
         return _round_px(ideal_pierce_tp), True, "step_up_pierce"
 
-    # Если цена подошла к текущему TP (< 0.35*ATR) над растущей EMA21 — шагаем ступенькой вверх!
     if (old_tp - current_price) <= 0.35 * a15 and r15 >= 55 and current_price >= e21:
         stepped_up = max(old_tp * 1.0045, current_price + pierce_step * 0.85)
         return _round_px(stepped_up), True, "step_up_wave"
@@ -325,12 +304,6 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
 
 
 def update_position_sl(pos: dict, max_p: float, last_price: float = None, candles_15m: list = None) -> tuple:
-    """
-    Частый Ступенчатый Стоп (Frequent Step-Wave SL):
-    - ДО TP1: НЕ душит сделку на 20-й минуте в зоне шума (-0.35% — фикс JUP, POL, ARX)!
-      Поджимает стоп только когда цена прошла >= 55% пути к TP1 (>= +0.68%) или при реальном сломе 15m EMA21 < EMA50 после 60 мин.
-    - ПОСЛЕ TP1: плотными ступеньками идёт под растущей волной и зажимает стоп прямо под шпильку при каждом пробое TP🏃🏻‍➡️.
-    """
     avg_p = pos.get("avg", 0.0)
     if avg_p <= 0:
         return False, pos.get("sl"), pos.get("sl_state", "SHIELD"), ""
@@ -421,8 +394,6 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
         else:
             new_state = "BREAKEVEN"
     else:
-        # ДО TP1: поджимаем стоп ТОЛЬКО когда цена уже прошла заметную часть пути к тейку (>= +0.68% или 55% пути к TP1),
-        # чтобы не выбивать сделки на 20-й минуте в -0.37%..-0.54% (фикс JUP, POL, ARX)!
         shield_step_trigger = max(0.68, tp_target_pct * 0.55)
         if curr_profit_pct >= shield_step_trigger and a15 > 0 and e50 > 0:
             step_shield = _round_px(min(avg_p * 0.9980, max(e50 - 0.45 * a15, prev_closed_low - 0.25 * a15)))
@@ -430,13 +401,11 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
                 new_sl = step_shield
                 new_state = "SHIELD"
 
-        # Перевод в БУ (🛡🔒) до TP1 при достижении >= 0.88% (или 70% пути к TP1)
-        be_trigger = max(0.88, tp_target_pct * 0.70)
+        be_trigger = max(0.85, tp_target_pct * 0.68)
         if curr_profit_pct >= be_trigger and breakeven > new_sl and last_p > breakeven * 1.0035:
             new_sl = breakeven
             new_state = "BREAKEVEN"
 
-        # Если сделка висит >= 60 минут и тренд на 15m реально сломался (EMA21 < EMA50 и закрытие под EMA50) — поджимаем под свечу
         if pos_age >= 3600 and e21 > 0 and e50 > 0 and e21 < e50 * 0.998 and last_p < e50 * 0.998 and closed_low > 0 and a15 > 0:
             tight_broken_sl = _round_px(closed_low - 0.25 * a15)
             if tight_broken_sl > new_sl * 1.002 and last_p > tight_broken_sl * 1.003:
