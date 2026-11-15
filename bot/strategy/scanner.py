@@ -1188,4 +1188,4 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
         c["is_new"] = c["symbol"] in new_set
         candidates.append(c)
 
-    return candidates[:limit] 
+    return candidates[:limit]
