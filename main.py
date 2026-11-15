@@ -49,14 +49,15 @@ async def health_handler(request):
 
 
 async def log_download_handler(request):
-    """Прямое скачивание файла лога через браузер."""
+    """Прямое скачивание файла лога через браузер (без ошибки charset в aiohttp)."""
     src = Path("logs/bot.log")
     if not src.exists():
         return web.Response(text="Файл лога пока пуст.", status=404)
     name = f"log_{datetime.now().strftime('%H%M%S')}.txt"
     return web.Response(
         body=src.read_bytes(),
-        content_type="text/plain; charset=utf-8",
+        content_type="text/plain",
+        charset="utf-8",
         headers={"Content-Disposition": f'attachment; filename="{name}"'}
     )
 
@@ -66,16 +67,37 @@ async def whitepaper_download_handler(request):
     text = generate_whitepaper()
     return web.Response(
         body=text.encode("utf-8"),
-        content_type="text/plain; charset=utf-8",
+        content_type="text/plain",
+        charset="utf-8",
         headers={"Content-Disposition": 'attachment; filename="CaptainRost_Whitepaper.txt"'}
     )
 
 
+async def _send_document_to_chat(chat_id, file_bytes: bytes, filename: str, caption: str = ""):
+    """Отправляет файл напрямую в Telegram чат."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if not (chat_id and token):
+        return
+    url = f"https://api.telegram.org/bot{token}/sendDocument"
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                files = {"document": (filename, file_bytes, "text/plain")}
+                data = {"chat_id": str(chat_id)}
+                if caption:
+                    data["caption"] = caption
+                    data["parse_mode"] = "HTML"
+                r = await client.post(url, data=data, files=files)
+                if r.status_code == 200:
+                    return
+        except Exception as e:
+            if attempt < 2:
+                await asyncio.sleep(2.0 * (attempt + 1))
+            else:
+                logger.debug(f"Не удалось отправить файл в Telegram: {e}")
+
+
 async def fix_telegram_handler(request):
-    """
-    Сервисная веб-страница: восстанавливает Telegram Webhook прямо из браузера пользователя
-    (в обход исходящего фаервола Render) и позволяет управлять ботом в 1 клик.
-    """
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com").rstrip("/")
     webhook_url = f"{public_url}{WEBHOOK_PATH}"
@@ -99,7 +121,7 @@ async def fix_telegram_handler(request):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Капитан Рост — Восстановление связи Telegram</title>
+<title>Капитан Рост — Управление и диагностика</title>
 <style>
   body {{ background:#0f1218; color:#e6edf3; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; padding:24px; max-width:720px; margin:0 auto; }}
   .card {{ background:#171c26; border:1px solid #262f40; border-radius:10px; padding:20px; margin-bottom:16px; }}
@@ -113,7 +135,7 @@ async def fix_telegram_handler(request):
 <body>
   <div class="card">
     <h2>🔧 Авто-восстановление Telegram Webhook</h2>
-    <p>Эта страница автоматически прописывает адрес вебхука <code>{webhook_url}</code> напрямую через твой браузер.</p>
+    <p>Привязка вебхука <code>{webhook_url}</code> напрямую через браузер.</p>
     <button class="btn btn-green" onclick="registerWebhook()">🔄 Привязать Webhook Telegram сейчас</button>
     <div id="wh-status" class="status-box">Проверка и привязка вебхука...</div>
   </div>
@@ -121,7 +143,7 @@ async def fix_telegram_handler(request):
   {"<div class='card' style='border-color:#00e676;'><b>✅ Выполнено:</b><br>" + action_result + "</div>" if action_result else ""}
 
   <div class="card">
-    <h2>🎛 Прямое управление ботом (работает всегда)</h2>
+    <h2>🎛 Прямое управление ботом</h2>
     <a class="btn btn-green" href="/fix-telegram?action=start">🚀 Запустить торговлю (/start)</a>
     <a class="btn btn-orange" href="/fix-telegram?action=resetstats">📊 Сбросить статистику ($1,000)</a>
     <a class="btn btn-orange" href="/fix-telegram?action=resetlearn">🧠♻️ Сбросить опыт ИИ</a>
@@ -147,14 +169,14 @@ async function registerWebhook() {{
     const info = await infoR.json();
     if (data.ok) {{
       box.style.borderColor = '#00e676';
-      box.innerHTML = '✅ ВЕБХУК УСПЕШНО УСТАНОВЛЕН! Теперь все команды в Telegram (/status, /resetstats, /chart и др.) работают мгновенно!\\n\\n' + JSON.stringify(info.result, null, 2);
+      box.innerHTML = '✅ ВЕБХУК УСПЕШНО УСТАНОВЛЕН!\\n\\n' + JSON.stringify(info.result, null, 2);
     }} else {{
       box.style.borderColor = '#ff5252';
       box.innerHTML = '⚠️ Ответ Telegram: ' + JSON.stringify(data, null, 2);
     }}
   }} catch (e) {{
     box.style.borderColor = '#ff5252';
-    box.innerHTML = '⚠️ Браузер не смог достучаться до api.telegram.org (включи VPN в браузере и нажми кнопку выше): ' + e;
+    box.innerHTML = '⚠️ Ошибка соединения с api.telegram.org: ' + e;
   }}
 }}
 
@@ -162,7 +184,7 @@ window.addEventListener('DOMContentLoaded', registerWebhook);
 </script>
 </body>
 </html>"""
-    return web.Response(text=html, content_type="text/html")
+    return web.Response(text=html, content_type="text/html", charset="utf-8")
 
 
 async def audit_handler(request):
@@ -732,8 +754,7 @@ async def _build_status_text() -> str:
     return "\n".join(msg)
 
 
-async def _dispatch_command(cmd: str, args: list):
-    """Выполняет команду и возвращает (text, reply_markup_dict) для мгновенного ответа в Webhook."""
+async def _dispatch_command(cmd: str, args: list, chat_id=None):
     public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
 
     if cmd == "start":
@@ -777,13 +798,20 @@ async def _dispatch_command(cmd: str, args: list):
         return shadow.stats_text() + "\n💡 переключение: /autotune on|off", None
 
     if cmd == "info":
+        wp_bytes = generate_whitepaper().encode("utf-8")
+        if chat_id:
+            asyncio.create_task(_send_document_to_chat(chat_id, wp_bytes, "CaptainRost_Whitepaper.txt", "📄 <b>Подробная документация (Whitepaper)</b>"))
         txt = info_full_text() + f"\n\n📥 <a href='{public_url}/whitepaper'><b>Скачать CaptainRost_Whitepaper.txt</b></a>"
         return txt, None
 
     if cmd == "log":
+        src = Path("logs/bot.log")
+        if src.exists() and chat_id:
+            name = f"log_{datetime.now().strftime('%H%M%S')}.txt"
+            asyncio.create_task(_send_document_to_chat(chat_id, src.read_bytes(), name, "📄 <b>Файл лога бота</b>"))
         return (
-            f"📄 <b>Лог работы бота</b>\n\n"
-            f"📥 <a href='{public_url}/download-log'><b>Скачать свежий файл лога (bot.log)</b></a>\n"
+            f"📄 <b>Лог работы бота</b> (файл также отправлен в чат)\n\n"
+            f"📥 <a href='{public_url}/download-log'><b>Скачать свежий файл лога в браузере</b></a>\n"
             f"📊 <a href='{public_url}/audit?hours=48'>Открыть веб-дашборд аудита (48ч)</a>"
         ), None
 
@@ -791,10 +819,6 @@ async def _dispatch_command(cmd: str, args: list):
 
 
 async def webhook_handler(request):
-    """
-    Обрабатывает входящие команды и кнопки от Telegram и возвращает ответ
-    ПРЯМО В ТЕЛЕ HTTP-ОТВЕТА ВЕБХУКА (мгновенно и без исходящих запросов к api.telegram.org!).
-    """
     try:
         data = await request.json()
     except Exception as e:
@@ -852,7 +876,7 @@ async def webhook_handler(request):
                 cmd = parts[0][1:].split("@")[0].lower()
                 args = parts[1:]
 
-                reply_text, markup_dict = await _dispatch_command(cmd, args)
+                reply_text, markup_dict = await _dispatch_command(cmd, args, chat_id=chat_id)
                 if reply_text:
                     payload = {
                         "method": "sendMessage",
@@ -872,7 +896,6 @@ async def webhook_handler(request):
 
 
 async def _init_telegram_forever(application):
-    """Фоновая синхронизация меню команд и вебхука (НЕ удаляет вебхук и не блокирует бота)."""
     public_url = os.getenv("RENDER_EXTERNAL_URL", "https://captain-rost-bot.onrender.com")
     webhook_url = f"{public_url}{WEBHOOK_PATH}"
     attempt = 0
@@ -981,7 +1004,6 @@ async def run_all(application):
     except asyncio.CancelledError:
         pass
     finally:
-        # Никогда не вызываем delete_webhook при остановке контейнера!
         try:
             if getattr(application, "_initialized", False):
                 await application.stop()
