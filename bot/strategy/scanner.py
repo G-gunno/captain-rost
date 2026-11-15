@@ -152,12 +152,11 @@ def is_post_pump_dump(candles_15m: list, candles_1h: list = None) -> tuple:
 def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int, a15: float, candles_15m: list = None, patterns: list = None) -> tuple:
     """
     Среднесрочный 48ч фильтр фазы волны (Wave Phase Gatekeeper):
-    1. ЗАХВАТ ПРОСАДКИ НА ДНЕ (Белые кружки на ETH, SUI, WLD, HYPE, INJ, ARX):
-       Берём монету ТОЛЬКО тогда, когда она на дне диапазона (pos_in_48h <= 0.30), ещё НЕ отскочила далеко от лоя (<= 2.5%),
-       и до падающей 1H EMA21 сверху есть большой запас хода (>= 1.6%)!
+    1. ЗАХВАТ ПРОСАДКИ НА ДНЕ И НА ВТОРОМ ДНЕ (Higher Low):
+       Берём монету в нижней части диапазона (pos_in_48h <= 0.38), когда она откатила от локального 6ч-пика
+       и до падающей 1H EMA21 сверху есть достаточный запас хода (>= 1.45%)!
     2. ЖЁСТКИЙ БАН ПОКУПОК ПОД ПАДАЮЩЕЙ 1H EMA21 / EMA50:
-       Когда отскок со дна уже произошёл и цена упёрлась снизу в падающую 1H EMA21 (как в 05:30-07:45 на ETH, SUI, WLD, HYPE, INJ, ARX) —
-       это потолок коррекции! Покупки там строго запрещены (1H_BAN).
+       Когда цена уже подлетела снизу к падающей 1H EMA21 (< 1.40% запаса) — покупки строго запрещены (1H_BAN).
     """
     if not candles_1h or len(candles_1h) < 50:
         return "1H_BAN", 0.0, 0.0, "недостаточно 1H истории (<48ч)", 0.0, 0.5
@@ -176,10 +175,10 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     low_48h = min(c["low"] for c in window_48h)
     pos_in_48h = ((last_1h - low_48h) / (high_48h - low_48h)) if high_48h > low_48h else 0.5
 
-    open_12h = candles_1h[-12]["open"] if len(candles_1h) >= 12 else open_48h
-    chg_12h = ((last_1h - open_12h) / open_12h * 100) if open_12h > 0 else 0.0
-    low_12h = min(c["low"] for c in candles_1h[-12:]) if len(candles_1h) >= 12 else low_48h
-    bounce_from_12h_low_pct = ((last_1h - low_12h) / low_12h * 100) if low_12h > 0 else 0.0
+    low_4h = min(c["low"] for c in candles_1h[-4:]) if len(candles_1h) >= 4 else low_48h
+    high_6h = max(c["high"] for c in candles_1h[-6:]) if len(candles_1h) >= 6 else high_48h
+    bounce_from_4h_low_pct = ((last_1h - low_4h) / low_4h * 100) if low_4h > 0 else 0.0
+    pullback_from_6h_high_pct = ((high_6h - last_1h) / high_6h * 100) if high_6h > 0 else 0.0
 
     e21_3h_ago = e21_series[-4] if len(e21_series) >= 4 else e21_series[0]
     e50_6h_ago = e50_series[-7] if len(e50_series) >= 7 else e50_series[0]
@@ -213,32 +212,25 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
 
     e21_rising_1h = e21_1h > e21_3h_ago * 1.0003
     e50_rising_1h = e50_1h >= e50_6h_ago * 0.9996
-    e21_falling_1h = e21_1h < e21_3h_ago * 0.9995
     e50_falling_48h = (e50_1h < e50_12h_ago * 0.995) and (e50_1h < e50_24h_ago * 0.990)
 
     # =========================================================================
-    # 1. ЖЁСТКИЙ БАН ПОКУПОК ПОД ПАДАЮЩЕЙ 1H EMA21 / EMA50 (ФИКС ETH, SUI, WLD, HYPE, INJ, ARX, STRK)
+    # 1. ЖЁСТКИЙ БАН ПОКУПОК ПОД ПАДАЮЩЕЙ 1H EMA21 / EMA50
     # =========================================================================
     if e21_1h < e50_1h:
         room_to_e21_pct = ((e21_1h - last_1h) / last_1h * 100.0) if last_1h > 0 else 0.0
         room_to_e50_pct = ((e50_1h - last_1h) / last_1h * 100.0) if last_1h > 0 else 0.0
-        total_drop_to_e21 = e21_1h - low_12h
-        rebound_progress = ((last_1h - low_12h) / total_drop_to_e21) if total_drop_to_e21 > 0 else 1.0
 
-        # Если цена в даунтренде уже отскочила со дна (прошла >= 45% пути к падающей 1H EMA21 или подошла к ней ближе 1.50%),
-        # КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕМ покупать в потолок падающей 1H EMA21!
-        if last_1h <= e21_1h * 1.005 and (room_to_e21_pct < 1.50 or rebound_progress >= 0.45 or bounce_from_12h_low_pct >= 2.6):
-            return "1H_BAN", e21_1h, e50_1h, f"1H потолок: упор снизу в падающую EMA21 (запас {room_to_e21_pct:+.1f}%, отскок +{bounce_from_12h_low_pct:.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
+        if last_1h <= e21_1h * 1.005 and (room_to_e21_pct < 1.40 or bounce_from_4h_low_pct >= 2.6):
+            return "1H_BAN", e21_1h, e50_1h, f"1H потолок: упор снизу в падающую EMA21 (запас {room_to_e21_pct:+.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-        # Если прокололи падающую 1H EMA21, но сверху нависает падающая 1H EMA50 (фикс STRK, OPG)
-        if last_1h > e21_1h and e50_falling_48h and (room_to_e50_pct < 1.40 or bounce_from_12h_low_pct >= 3.2):
-            return "1H_BAN", e21_1h, e50_1h, f"1H потолок: излёт отскока под падающей EMA50 (+{bounce_from_12h_low_pct:.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
+        if last_1h > e21_1h and e50_falling_48h and (room_to_e50_pct < 1.40 or bounce_from_4h_low_pct >= 3.0):
+            return "1H_BAN", e21_1h, e50_1h, f"1H потолок: излёт отскока под падающей EMA50 (+{bounce_from_4h_low_pct:.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    # Бан разворота с локального хая
     two_red_1h_from_top = (
         curr_1h_red and prev_1h_red and
         a_1h > 0 and (curr_1h_red_body + prev_1h_red_body) >= 0.48 * a_1h and
-        (bars_since_hi10 in (1, 2, 3) or pos_in_48h >= 0.45)
+        (bars_since_hi10 in (1, 2, 3) or pos_in_48h >= 0.48)
     )
     red_reversal_at_high = (
         pos_in_48h >= 0.48 and bars_since_hi10 <= 3 and a_1h > 0 and
@@ -250,13 +242,13 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
 
     big_1h_dump_candle = (
         (curr_1h_red_body > 0.58 * a_1h and curr_1h["close"] < e21_1h * 1.001) or
-        (prev_1h_red_body > 0.65 * a_1h and last_1h <= prev_1h["open"] * 0.996 and last_1h < e21_1h * 1.001 and pos_in_48h > 0.25)
+        (prev_1h_red_body > 0.65 * a_1h and last_1h <= prev_1h["open"] * 0.996 and last_1h < e21_1h * 1.001 and pos_in_48h > 0.28)
     )
     if big_1h_dump_candle and bars_since_hi24 >= 1:
         return "1H_BAN", e21_1h, e50_1h, f"1H активный слив под EMA21 (-{drop_from_hi24_pct:.1f}% от пика)", round(chg_48h, 1), round(pos_in_48h, 2)
 
     # =========================================================================
-    # 2. ТОЧНЫЙ ЗАХВАТ ПРОСАДКИ В «БЕЛЫХ КРУЖКАХ» НА ДНЕ (1H_DIP_BOUNCE / 1H_SUPPORT_ONLY)
+    # 2. ТОЧНЫЙ ЗАХВАТ ПРОСАДКИ НА ДНЕ И ВТОРОМ РЕТЕСТЕ (1H_DIP_BOUNCE)
     # =========================================================================
     healthy_15m_trend = True
     is_15m_bottom_turn = False
@@ -275,7 +267,7 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         low_prev_5 = min(c["low"] for c in candles_15m[-7:-2])
 
         has_breakout_pat = "breakout" in (patterns or [])
-        max_atr_dist = 2.00 if has_breakout_pat else 1.20
+        max_atr_dist = 2.00 if has_breakout_pat else 1.25
         max_rsi_15 = 72 if has_breakout_pat else 64
         if (
             e21_15 < e50_15 * 0.9985 or
@@ -288,14 +280,14 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
 
         closed_rng_15 = closed_15["high"] - closed_15["low"]
         closed_lwick_15 = min(closed_15["open"], closed_15["close"]) - closed_15["low"]
-        has_15m_pin = closed_rng_15 > 0 and (closed_lwick_15 / closed_rng_15) >= 0.38
+        has_15m_pin = closed_rng_15 > 0 and (closed_lwick_15 / closed_rng_15) >= 0.35
 
-        floor_held_15m = low_last_2 >= low_prev_5 * 0.9975
+        floor_held_15m = low_last_2 >= low_prev_5 * 0.9970
         green_turn_15m = (
             (closed_15["close"] > closed_15["open"] or has_15m_pin) and
-            curr_15["close"] >= curr_15["open"] * 0.9988 and
-            last_15 >= min(e9_15, closed_15["close"]) * 0.9985 and
-            18 <= r_15 <= 54
+            curr_15["close"] >= curr_15["open"] * 0.9985 and
+            last_15 >= min(e9_15, closed_15["close"]) * 0.9980 and
+            18 <= r_15 <= 56
         )
         if floor_held_15m and green_turn_15m:
             is_15m_bottom_turn = True
@@ -305,25 +297,26 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     for c1 in last_4_1h:
         rng1 = c1["high"] - c1["low"]
         lwick1 = min(c1["open"], c1["close"]) - c1["low"]
-        if rng1 > 0 and (lwick1 / rng1) >= 0.32 and last_1h >= c1["low"] * 1.003:
+        if rng1 > 0 and (lwick1 / rng1) >= 0.30 and last_1h >= c1["low"] * 1.002:
             has_1h_spring_wick = True
             break
 
-    h1_floor_held = min(curr_1h["low"], prev_1h["low"]) >= min(c["low"] for c in candles_1h[-6:-2]) * 0.9965
+    h1_floor_held = min(curr_1h["low"], prev_1h["low"]) >= min(c["low"] for c in candles_1h[-6:-2]) * 0.9960
     has_1h_floor_or_sup = (
         has_1h_spring_wick or
-        (h1_floor_held and (not curr_1h_red or prev_1h["close"] >= prev_1h["open"])) or
-        (nearest_sup and sup_touches >= 2 and 0 <= (last_1h - nearest_sup) <= 2.2 * a15)
+        h1_floor_held or
+        (nearest_sup and sup_touches >= 2 and 0 <= (last_1h - nearest_sup) <= 2.4 * a15)
     )
 
-    ample_room_to_e21 = (e21_1h > last_1h * 1.0155) or (e21_1h >= e50_1h and abs(last_1h - e21_1h) <= 1.0 * a_1h)
+    ample_room_to_e21 = (e21_1h > last_1h * 1.0140) or (e21_1h >= e50_1h and abs(last_1h - e21_1h) <= 1.2 * a_1h)
 
     if (
         is_15m_bottom_turn and
         has_1h_floor_or_sup and
         ample_room_to_e21 and
-        0.01 <= pos_in_48h <= 0.30 and
-        bounce_from_12h_low_pct <= 2.5 and
+        0.01 <= pos_in_48h <= 0.38 and
+        bounce_from_4h_low_pct <= 2.5 and
+        (pos_in_48h <= 0.25 or pullback_from_6h_high_pct >= 1.2) and
         not heavy_curr_1h_red
     ):
         room_pct = (e21_1h - last_1h) / last_1h * 100 if e21_1h > last_1h else 2.0
@@ -335,10 +328,10 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     has_breakout_pat = "breakout" in (patterns or [])
     if chg_48h >= 8.0 and wave_24_pct >= 5.0 and e21_rising_1h and e50_rising_1h and bars_since_hi24 <= 1 and not heavy_curr_1h_red:
         max_allowed_pos_48 = 0.78
-    elif chg_48h >= 4.0 and wave_24_pct >= 3.8 and e21_rising_1h and e50_rising_1h and not heavy_curr_1h_red:
-        max_allowed_pos_48 = 0.60
+    elif chg_48h >= 3.5 and wave_24_pct >= 3.5 and e21_rising_1h and e50_rising_1h and not heavy_curr_1h_red:
+        max_allowed_pos_48 = 0.65
     else:
-        max_allowed_pos_48 = 0.48
+        max_allowed_pos_48 = 0.55
 
     is_uptrend_1h = (
         last_1h >= e21_1h * 0.998 and
