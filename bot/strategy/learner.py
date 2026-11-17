@@ -12,15 +12,14 @@ REMOTE_PATH = "learner.json"
 
 KEYS = ["ema50", "ema21", "impulse", "rsi", "volume", "chg24h", "indep", "news_pos", "hype"]
 
-# Защита каркасных трендовых весов от деградации и перекоса в сторону indep
 WEIGHT_FLOORS = {
-    "ema50": 0.88,
-    "ema21": 0.85,
-    "impulse": 0.85,
-    "volume": 0.78,
-    "rsi": 0.75,
-    "chg24h": 0.75,
-    "indep": 0.70,
+    "ema50": 0.90,
+    "ema21": 0.88,
+    "impulse": 0.88,
+    "volume": 0.80,
+    "rsi": 0.78,
+    "chg24h": 0.78,
+    "indep": 0.75,
     "news_pos": 0.75,
     "hype": 0.75,
 }
@@ -63,7 +62,7 @@ def clamp_weight(key: str, val: float) -> float:
 
 
 class Learner:
-    """Самообучение: защищённый каркас весов тренда + персональный рейтинг доверия к монетам (Coin Trust)."""
+    """Самообучение: защищённый каркас весов тренда + умеренный рейтинг доверия к монетам без вечной блокировки."""
 
     def __init__(self):
         self.weights = {k: 1.0 for k in KEYS}
@@ -152,13 +151,13 @@ class Learner:
         if len(hist) >= 6:
             wr = sum(1 for p in hist if p > 0) / len(hist)
             if wr < 0.38:
-                return 0.80
+                return 0.85
             if wr < 0.48:
                 return 0.95
         if self.grade_a_streak <= -3:
-            return 0.75
+            return 0.80
         if self.grade_a_streak == -2:
-            return 0.85
+            return 0.90
         if self.grade_a_streak >= 3:
             return 1.15
         if self.grade_a_streak == 2:
@@ -253,7 +252,6 @@ class Learner:
         for k in KEYS:
             w_cur = self.weights.get(k, 1.0)
             if k in keys:
-                # Базовые индикаторы тренда штрафуются в 2 раза мягче при стопе, чтобы не ослеплять сканер
                 eff_delta = delta * 0.5 if (not real_win and k in ("ema50", "ema21", "impulse")) else delta
                 w_cur += eff_delta
             w_reverted = w_cur * 0.96 + 1.0 * 0.04
@@ -264,9 +262,8 @@ class Learner:
 
     def coin_bias(self, symbol: str) -> float:
         """
-        Персональный рейтинг доверия к монете (от -1.50 до +0.60 баллов к скору):
-        - 2 стопа подряд -> штраф -1.50 (защита от повторных сливов на ENA, TRUMP, PYTH).
-        - Стабильные профиты -> бонус до +0.60 (приоритет для AVAX, NXPC, BSB, ARX).
+        Умеренный рейтинг доверия к монете (от -0.55 до +0.60 баллов к скору):
+        Штраф ограничен -0.55 (вместо -1.50), чтобы не блокировать монету (PEPE, INJ, ICNT), когда она разворачивается со дна в настоящий аптренд!
         """
         raw_hist = self.coin_stats.get(symbol) or []
         decisive = [p for p in raw_hist if not is_neutral_be(p)]
@@ -274,27 +271,26 @@ class Learner:
             return 0.0
 
         if len(decisive) >= 2 and decisive[-1] < 0 and decisive[-2] < 0:
-            return -1.50
+            return -0.55
         if len(decisive) == 1:
-            return 0.20 if decisive[0] > 0.5 else (-0.45 if decisive[0] < -0.5 else 0.0)
+            return 0.20 if decisive[0] > 0.5 else (-0.25 if decisive[0] < -0.5 else 0.0)
 
         recent = decisive[-6:]
         wr = sum(1 for p in recent if p > 0) / len(recent)
         avg = sum(recent) / len(recent)
-        bias = (wr - 0.5) * 0.9 + max(-0.6, min(0.4, avg * 0.22))
+        bias = (wr - 0.5) * 0.8 + max(-0.4, min(0.4, avg * 0.20))
         if recent[-1] < 0:
-            bias -= 0.25
-        return round(max(-1.50, min(0.60, bias)), 2)
+            bias -= 0.15
+        return round(max(-0.55, min(0.60, bias)), 2)
 
     def coin_trust_mult(self, symbol: str) -> float:
-        """Множитель размера позиции по доверию к конкретной монете (0.65x .. 1.15x)."""
         if not symbol:
             return 1.0
         b = self.coin_bias(symbol)
-        if b <= -1.0:
-            return 0.65
-        if b < -0.3:
+        if b <= -0.50:
             return 0.80
+        if b < -0.20:
+            return 0.90
         if b >= 0.35:
             return 1.15
         if b >= 0.15:
@@ -316,8 +312,8 @@ class Learner:
             return 0.0
         wr = sum(1 for p in hist if p > 0) / len(hist)
         avg = sum(hist) / len(hist)
-        bias = (wr - 0.5) + max(-0.4, min(0.4, avg * 0.20))
-        return round(max(-0.65, min(0.65, bias)), 2)
+        bias = (wr - 0.5) + max(-0.35, min(0.35, avg * 0.18))
+        return round(max(-0.45, min(0.55, bias)), 2)
 
     def tier_bias(self, tier):
         hist = [p for p in (self.tier_stats.get(tier) or []) if not is_neutral_be(p)]
@@ -326,7 +322,7 @@ class Learner:
         wr = sum(1 for p in hist if p > 0) / len(hist)
         avg = sum(hist) / len(hist)
         bias = (wr - 0.5) + max(-0.25, min(0.25, avg * 0.25))
-        return round(max(-0.45, min(0.45, bias)), 2)
+        return round(max(-0.35, min(0.45, bias)), 2)
 
     def reset(self):
         self.weights = {k: 1.0 for k in KEYS}
@@ -409,7 +405,7 @@ class Learner:
             cur_idx = max(0, min(len(MODE_LADDER) - 1, cur_idx + step))
             cur_mode = MODE_LADDER[cur_idx]
 
-        adj_map = {"STRICT": 1.2, "CAUTIOUS": 0.5, "NORMAL": 0.0, "AGGRESSIVE": -0.4}
+        adj_map = {"STRICT": 0.8, "CAUTIOUS": 0.4, "NORMAL": 0.0, "AGGRESSIVE": -0.3}
         return cur_mode, adj_map.get(cur_mode, 0.0)
 
     def update_threshold(self, profit_factor, max_dd_pct, total_trades=0):
@@ -426,10 +422,10 @@ class Learner:
             if last:
                 wr = sum(last) / len(last)
                 if wr < 0.35:
-                    wr_adj = 0.20
+                    wr_adj = 0.15
 
         raw_adj = dyn_adj + wr_adj
-        target_thr_adj = max(-0.20, min(0.20, raw_adj * 0.15))
+        target_thr_adj = max(-0.15, min(0.15, raw_adj * 0.12))
         self.threshold_adj = round(0.6 * self.threshold_adj + 0.4 * target_thr_adj, 2)
         self.save()
         return self.threshold_adj
