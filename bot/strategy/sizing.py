@@ -56,25 +56,23 @@ def buy_size(equity, score, thr, liquidity=10_000_000, free_usdt=None, entry_mod
 
 def entry_offset(score, thr, regime="neutral", atr_pct=1.5, entry_mode="sniper", tier="SMALL", is_accumulation=False, symbol: str = None):
     """
-    Рассчитывает глубину лимитного ордера:
-    - rocket: в упор к стакану (-0.10% .. -0.18%)
-    - reversal / откуп дна в белых кружках: плотный вход (-0.18% .. -0.32%), чтобы гарантированно забирать разворот со дна!
-    - sniper по тренду: откат (-0.22% .. -0.55%)
+    Плотная постановка лимитки, чтобы не упускать пампы из-за недохода в 0.1% (фикс PENGU, INJ, GLMR):
+    - rocket: -0.08% .. -0.15%
+    - reversal / дно просадки: -0.15% .. -0.25%
+    - sniper по тренду / VCP: -0.15% .. -0.42%
     """
     if entry_mode == "rocket":
         if tier in ("TOP20", "MID"):
-            return -0.0010
-        return -0.0018
+            return -0.0008
+        return -0.0015
 
-    # На подтверждённом дне (reversal) не ставим лимитку на -0.8% в воздух (из-за чего INJ и OPG улетали без нас),
-    # а берём плотный ретест свечи разворота (-0.18% .. -0.32%)!
     if entry_mode == "reversal":
         if tier in ("TOP20", "MID"):
-            return -0.0018
-        return -0.0028
+            return -0.0015
+        return -0.0024
 
-    dna = shadow.get_coin_dna(symbol) if symbol else {"pullback_pct": 0.65}
-    dna_pull_frac = max(0.0020, min(0.0060, float(dna.get("pullback_pct", 0.65)) / 100.0 * 0.35))
+    dna = shadow.get_coin_dna(symbol) if symbol else {"pullback_pct": 0.60}
+    dna_pull_frac = max(0.0016, min(0.0045, float(dna.get("pullback_pct", 0.60)) / 100.0 * 0.30))
 
     hunt = shadow.hunt()
     near = shadow.near()
@@ -84,12 +82,12 @@ def entry_offset(score, thr, regime="neutral", atr_pct=1.5, entry_mode="sniper",
 
     if is_accumulation and entry_mode == "sniper":
         if tier in ("TOP20", "MID"):
-            return round(max(-0.0026, min(-0.0016, base_offset * 0.70)), 4)
-        return round(max(-0.0034, min(-0.0020, base_offset * 0.80)), 4)
+            return round(max(-0.0022, min(-0.0014, base_offset * 0.68)), 4)
+        return round(max(-0.0028, min(-0.0018, base_offset * 0.75)), 4)
 
-    vol_factor = min(1.25, max(0.75, atr_pct / 1.5))
+    vol_factor = min(1.20, max(0.75, atr_pct / 1.5))
     if tier in ("TOP20", "MID"):
         vol_factor *= 0.80
 
     final_offset = base_offset * vol_factor
-    return round(max(-0.0055, min(-0.0018, final_offset)), 4)
+    return round(max(-0.0042, min(-0.0015, final_offset)), 4)
