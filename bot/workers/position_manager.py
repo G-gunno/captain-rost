@@ -24,7 +24,7 @@ from bot.core.state import bot_state
 
 
 class PositionManagerWorker:
-    """Управление позициями: частые ступеньки SL/TP на прокол, анти-зомби фильтр и ведение ордеров."""
+    """Управление позициями: ступенчатый коридор SL/TP на прокол (без ранней срезки отскоков со дна и без занижения TP1)."""
 
     def __init__(self, bus: EventBus):
         self.bus = bus
@@ -93,7 +93,7 @@ class PositionManagerWorker:
         current_time = int(time.time())
 
         # =====================================================================
-        # 1. ПРОВЕРКА ОТКРЫТЫХ ПОЗИЦИЙ И ЧАСТЫЕ СТУПЕНЬКИ SL / TP «НА ПРОКОЛ»
+        # 1. ПРОВЕРКА ОТКРЫТЫХ ПОЗИЦИЙ (БЕЗ СРЕЗКИ 1H_DIP_BOUNCE И БЕЗ ЗАНИЖЕНИЯ TP1)
         # =====================================================================
         for sym in list(paper.positions.keys()):
             t = tickers.get(sym)
@@ -146,6 +146,12 @@ class PositionManagerWorker:
                     continue
 
             entry_mode = pos.get("entry_mode", "sniper")
+            pos_gate_1h = pos.get("gate_1h", "")
+            is_dip_or_reclaim_pos = (
+                entry_mode == "reversal" or
+                pos_gate_1h in ("1H_DIP_BOUNCE", "1H_EMA21_RECLAIM", "1H_SUPPORT_ONLY")
+            )
+
             e21_falling = len(e21_series) >= 4 and e21 < e21_series[-3] * 0.9995
             closed_2_below = (
                 len(candles) >= 3 and
@@ -159,7 +165,9 @@ class PositionManagerWorker:
             )
             pos_age = current_time - pos.get("entry_time", current_time)
 
-            if pos_age >= 2400 and not is_toxic and pnl_pct >= 0.45 and entry_mode != "reversal" and trend_broken and sym in paper.positions:
+            # На сделках со дна (1H_DIP_BOUNCE / 1H_EMA21_RECLAIM) НЕ сбрасываем позицию по «слому 15m EMA50»,
+            # так как на дне часовой просадки цена изначально стартует ниже 15m EMA50!
+            if pos_age >= 2700 and not is_toxic and not is_dip_or_reclaim_pos and pnl_pct >= 0.55 and trend_broken and sym in paper.positions:
                 reason = "🪫 Слом тренда"
                 ex = paper._sell(sym, last, reason, regime_now=regime)
                 paper.log_event(sym, "sell_profit", last, reason, tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
@@ -168,8 +176,13 @@ class PositionManagerWorker:
                 self._notify(f"💸 <b>Продажа</b> · {pair_html(sym, ex)}{grade_badge(ex)} · {reason}\n{pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])} · 💵 {usd(ex['pnl'])}")
                 continue
 
-            is_stagnant = (not pos.get("tp1_done")) and pos_age >= 7200 and (last < e50 * 0.999 and e21 < e50 * 0.999)
-            if is_stagnant and pnl_pct >= 0.25 and sym in paper.positions:
+            is_stagnant = (
+                (not pos.get("tp1_done")) and
+                not is_dip_or_reclaim_pos and
+                pos_age >= 9000 and
+                (last < e50 * 0.999 and e21 < e50 * 0.999)
+            )
+            if is_stagnant and pnl_pct >= 0.35 and sym in paper.positions:
                 reason = "⏱ Выход по времени (без импульса)"
                 ex = paper._sell(sym, last, reason, regime_now=regime)
                 paper.log_event(sym, "sell_profit", last, reason, tp=pos.get("tp"), sl=pos.get("sl"), sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
@@ -202,6 +215,7 @@ class PositionManagerWorker:
                     coin_compact = format_coin_compact(sym, pos)
                     self._notify(f"🛡 SL поднят по {coin_compact} до {new_sl_str} ({tag_emoji})")
 
+            # Раннее занижение TP1 полностью убрано — двигаем только TP🏃🏻‍➡️ после взятия TP1!
             if pos.get("tp1_done"):
                 candles_1h = await market_data.get_kline(sym, "60", 250)
                 pos = paper.positions.get(sym)
@@ -217,15 +231,6 @@ class PositionManagerWorker:
                     if abs(next_target - old_tp) / old_tp * 100 >= 0.85:
                         sl_tag = sl_emoji(pos.get("sl_state", "TRAILING_RUNNER"))
                         self._notify(f"TP🏃🏻‍➡️ <b>Ступень тейка ({step_dir})</b> · {pair_html(sym, pos)}\n🎯 {fmt_price(pos['tp'])} · {sl_tag} {fmt_price(pos['sl'])}")
-            else:
-                peak_pct = (max_p - pos["avg"]) / pos["avg"] * 100 if pos["avg"] > 0 else 0.0
-                pulled_back = (max_p - last) >= 0.25 * a
-                if pos_age >= 1800 and peak_pct >= 0.70 and pulled_back and last >= pos["avg"] * 0.998:
-                    step_down_tp1 = _round_px(max(pos["avg"] * 1.0075, last + 0.50 * a, e21 + 0.55 * a))
-                    if step_down_tp1 < pos["tp"] * 0.9980:
-                        pos["tp"] = step_down_tp1
-                        paper.save()
-                        paper.log_event(sym, "tp_runner_raised", pos["tp"], "🎯 TP1 снижен под прокол", mode="TP1", tp=pos["tp"], sl=pos["sl"], sup=pos.get("nearest_sup"), res=pos.get("nearest_res"))
 
         # =====================================================================
         # 2. ПРОВЕРКА ОЖИДАЮЩИХ ОРДЕРОВ
