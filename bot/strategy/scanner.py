@@ -222,7 +222,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     pats = patterns or []
     has_hard_rev_pat = any(p in pats for p in ("pinbar", "engulfing", "divergence"))
 
-    # ЗАЩИТА ОТ СЛЕПОГО ПРОБОЯ 48Ч-ДНА (< 6% диапазона без свечного паттерна разворота)
     if pos_in_48h < 0.06 and not has_hard_rev_pat:
         return "1H_BAN", e21_1h, e50_1h, f"1H пробой 48ч-дна без паттерна разворота (диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
@@ -337,25 +336,27 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
             has_1h_spring_wick = True
             break
 
+    # Удержание часового дна: текущая часовая свеча держит лой не ниже предыдущей свечи дна (prev_1h / prev2_1h)
+    # и нет серии из 3 полнотелых красных часовых свечей подряд!
     h1_base_held = (
-        min(curr_1h["low"], prev_1h["low"]) >= min(c["low"] for c in candles_1h[-6:-2]) * 0.9970 and
-        (prev_1h["close"] >= prev_1h["open"] or curr_1h["close"] > curr_1h["open"]) and
-        not (prev2_1h_red and prev3_1h["close"] < prev3_1h["open"] and prev_1h_red)
+        curr_1h["low"] >= min(prev_1h["low"], prev2_1h["low"]) * 0.9980 and
+        (prev_1h["close"] >= prev_1h["open"] or curr_1h["close"] > curr_1h["open"] or has_1h_spring_wick) and
+        not (prev2_1h_red and prev3_1h["close"] < prev3_1h["open"] and prev_1h_red and curr_1h_red)
     )
     has_confirmed_1h_bottom = (
         (has_1h_spring_wick and h1_base_held) or
-        (h1_base_held and nearest_sup and sup_touches >= 2 and 0 <= (last_1h - nearest_sup) <= 2.0 * a15)
+        (h1_base_held and nearest_sup and sup_touches >= 2 and 0 <= (last_1h - nearest_sup) <= 2.2 * a15)
     )
 
-    ample_room_to_e21 = (e21_1h > last_1h * 1.0145)
+    ample_room_to_e21 = (e21_1h > last_1h * 1.0140)
 
     if (
         is_15m_bottom_turn and
         has_confirmed_1h_bottom and
         ample_room_to_e21 and
-        0.06 <= pos_in_48h <= 0.34 and
+        0.06 <= pos_in_48h <= 0.36 and
         bounce_from_4h_low_pct <= 2.4 and
-        (pos_in_48h <= 0.22 or pullback_from_6h_high_pct >= 1.4) and
+        (pos_in_48h <= 0.24 or pullback_from_6h_high_pct >= 1.3) and
         not heavy_curr_1h_red
     ):
         room_pct = (e21_1h - last_1h) / last_1h * 100 if e21_1h > last_1h else 2.0
@@ -734,8 +735,6 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         r_1h = rsi(closes_1h)
 
         if gate_1h in ("1H_DIP_BOUNCE", "1H_EMA21_RECLAIM"):
-            # Убрана инфляция скора 10.0 на рядовых просадках: компенсируем 70% отставания 15m EMA + умеренный бонус (даёт честные 6.8–8.4 балла,
-            # а 9.0–10.0 получают только сетапы с реальным всплеском объёма и свечным паттерном!)
             missing_ema_comp = 0.0
             if last <= e50:
                 missing_ema_comp += learner.weight("ema50") * 0.70
@@ -1160,8 +1159,8 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 "nearest_sup": signal_values.get("nearest_sup"),
                 "sup_touches": signal_values.get("sup_touches", 0),
                 "recent_high": signal_values.get("recent_high"),
-                "recent_low_2h": signal_values.get("recent_low_2h"),
-                "recent_low_6": signal_values.get("recent_low_6"),
+                "recent_low_2h": recent_low_2h,
+                "recent_low_6": recent_low_6,
                 "e21": signal_values.get("e21"),
                 "e50": signal_values.get("e50"),
                 "e21_1h": signal_values.get("e21_1h"),
