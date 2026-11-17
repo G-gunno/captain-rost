@@ -90,11 +90,6 @@ def _count_spaced_touches(price_target: float, points: list, tol: float = 0.0055
 
 
 def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72):
-    """
-    Строит 48-часовую карту уровней Поддержки и Сопротивления (1H + 15m):
-    - Включает детектор многочасового дна (Bottom Base Cluster): когда 2+ соседние часовые свечи
-      держат один горизонт лоя с нижними хвостами (как в белых кружках на ETH, SUI, WLD, INJ, HYPE, ARX).
-    """
     if not candles_15m or len(candles_15m) < 15:
         return [], []
 
@@ -118,14 +113,13 @@ def get_all_sr_levels(candles_15m, candles_1h=None, window_15m=120, window_1h=72
 
             is_1h_high = (h >= recent_1h[i - 1]["high"] and h >= recent_1h[i - 2]["high"] and h >= recent_1h[i + 1]["high"])
             is_1h_low = (l <= recent_1h[i - 1]["low"] and l <= recent_1h[i - 2]["low"] and l <= recent_1h[i + 1]["low"])
-            in_bottom_quarter = ((l - low_48h) / span_48h) <= 0.25
+            in_bottom_third = ((l - low_48h) / span_48h) <= 0.32
 
             if is_1h_high:
                 high_points.append((h, "1h", i, 3, 2))
             if is_1h_low:
-                # В нижней четверти 48ч-диапазона разрешаем соседним часовым свечам (gap=1) формировать плиту дна!
-                low_points.append((l, "1h", i, 1 if in_bottom_quarter else 2, 2))
-            elif rng > 0 and (min(o, c) - l) / rng >= 0.35 and (in_bottom_quarter or l <= min(recent_1h[i - 1]["low"], recent_1h[i + 1]["low"]) * 1.003):
+                low_points.append((l, "1h", i, 1 if in_bottom_third else 2, 2))
+            elif rng > 0 and (min(o, c) - l) / rng >= 0.35 and (in_bottom_third or l <= min(recent_1h[i - 1]["low"], recent_1h[i + 1]["low"]) * 1.003):
                 low_points.append((l, "1h", i, 1, 2))
 
     recent_15m = candles_15m[-window_15m:] if len(candles_15m) >= window_15m else candles_15m
