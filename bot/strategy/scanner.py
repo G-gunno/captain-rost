@@ -99,10 +99,6 @@ def is_tradable(symbol):
 
 
 def is_post_pump_dump(candles_15m: list, candles_1h: list = None) -> tuple:
-    """
-    Отличает здоровый бычий флаг после пампа (ICNT, GLMR, DATA — РАЗРЕШАЕМ!)
-    от сдувшейся памп-раздачи под 1H EMA21 (CAP, BARD, ZRO в конце — БЛОКИРУЕМ!).
-    """
     if candles_1h and len(candles_1h) >= 24:
         closes_1h = [c["close"] for c in candles_1h]
         e21_1h_series = ema(closes_1h, 21)
@@ -118,7 +114,6 @@ def is_post_pump_dump(candles_15m: list, candles_1h: list = None) -> tuple:
             if lo_before > 0 and hi_val > lo_before:
                 pump_24 = (hi_val - lo_before) / lo_before * 100.0
                 retrace_24 = (hi_val - last_c) / (hi_val - lo_before)
-                # Блокируем только если монета слила >= 42% пампа И провалилась под 1H EMA21 (или 1H EMA21 уже падает)!
                 if pump_24 >= 7.0 and retrace_24 >= 0.42 and (last_c < e21_1h_now * 0.998 or e21_1h_falling):
                     return True, f"пост-памп раздача 24ч (+{pump_24:.1f}%, слито {retrace_24*100:.0f}% под 1H EMA21)"
 
@@ -159,12 +154,10 @@ def is_post_pump_dump(candles_15m: list, candles_1h: list = None) -> tuple:
 def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int, a15: float, candles_15m: list = None, patterns: list = None) -> tuple:
     """
     4-фазный среднесрочный радар волны (Wave Phase Gatekeeper):
-    1. БАН СТУПЕНЧАТОГО СЛИВА И ПОТОЛКА ПОД ПАДАЮЩЕЙ 1H EMA21 (Фикс PEPE, BARD, ZRO в конце, ETH/SUI/WLD на пике отскока).
-    2. 1H_DIP_BOUNCE (Разворот со дна / Белые кружки): только при подтверждённой часовой базе дна и запасе хода до 1H EMA21 >= 1.40%.
-    3. 1H_EMA21_RECLAIM (Трамплин над 1H EMA21 — Фикс GLMR, SKY, INJ, DATA, ICNT):
-       Перехват зарождения тренда, когда цена пробила и удерживает 1H EMA21 сверху ДО пересечения с 1H EMA50!
-    4. 1H_TREND_OK / 1H_SUPER_TREND (Каскадный аптренд — Фикс ZRO $1.38->$1.54, INJ $6.85->$7.75, DATA $0.086->$0.093):
-       Покупка откатов к растущей 1H EMA21 / 15m EMA21 вплоть до 88% высоты 48ч-диапазона!
+    - Защита от слепого пробоя 48ч-дна: если диап. < 6% без закрытого пин-бара/поглощения -> 1H_BAN!
+    - Защита от покупки под падающей 1H EMA21 (< 1.35% запаса хода) и от сползания (PEPE, BARD, ZRO в конце).
+    - Перехват старта новой волны над 1H EMA21 (1H_EMA21_RECLAIM — фикс GLMR, SKY, INJ, DATA, ICNT).
+    - Каскадные аптренды по растущей 1H EMA21 до 88% диапазона (фикс ZRO, INJ, DATA).
     """
     if not candles_1h or len(candles_1h) < 50:
         return "1H_BAN", 0.0, 0.0, "недостаточно 1H истории (<48ч)", 0.0, 0.5
@@ -226,10 +219,13 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     e50_rising_1h = e50_1h >= e50_6h_ago * 0.9995
     e50_falling_48h = (e50_1h < e50_12h_ago * 0.995) and (e50_1h < e50_24h_ago * 0.990)
 
-    # =========================================================================
-    # 1. ЖЁСТКИЙ БАН СЛИВОВ, ОБВАЛОВ С ВЕРШИНЫ И УПОРА СНИЗУ В ПАДАЮЩУЮ 1H EMA21
-    # =========================================================================
-    # Защита от покупки обвала после тренда (фикс ZRO 20:00 Nov 17, DATA 21:00 Nov 17, BARD):
+    pats = patterns or []
+    has_hard_rev_pat = any(p in pats for p in ("pinbar", "engulfing", "divergence"))
+
+    # ЗАЩИТА ОТ СЛЕПОГО ПРОБОЯ 48Ч-ДНА (< 6% диапазона без свечного паттерна разворота)
+    if pos_in_48h < 0.06 and not has_hard_rev_pat:
+        return "1H_BAN", e21_1h, e50_1h, f"1H пробой 48ч-дна без паттерна разворота (диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
+
     three_red_waterfall = (
         prev_1h_red and prev2_1h_red and (curr_1h_red or last_1h < prev_1h["open"] * 0.998) and
         (prev_1h["open"] - prev_1h["close"] + prev2_1h["open"] - prev2_1h["close"]) >= 0.90 * a_1h
@@ -237,7 +233,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     if three_red_waterfall and last_1h < e21_1h:
         return "1H_BAN", e21_1h, e50_1h, f"1H каскадный слив (серия красных 1H свечей -{drop_from_hi24_pct:.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    # Если цена находится НИЖЕ 1H EMA21 в даунтренде (e21_1h < e50_1h), проверяем запас хода до потолка 1H EMA21:
     if e21_1h < e50_1h and last_1h < e21_1h * 0.999:
         room_to_e21_pct = ((e21_1h - last_1h) / last_1h * 100.0) if last_1h > 0 else 0.0
         if room_to_e21_pct < 1.35 or bounce_from_4h_low_pct >= 2.5:
@@ -263,9 +258,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     if big_1h_dump_candle and bars_since_hi24 >= 1:
         return "1H_BAN", e21_1h, e50_1h, f"1H активный слив под EMA21 (-{drop_from_hi24_pct:.1f}% от пика)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    # =========================================================================
-    # АНАЛИЗ 15M СТРУКТУРЫ
-    # =========================================================================
     healthy_15m_trend = True
     is_15m_bottom_turn = False
     reclaimed_15m_ema21 = False
@@ -284,7 +276,7 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         low_last_2 = min(curr_15["low"], closed_15["low"])
         low_prev_5 = min(c["low"] for c in candles_15m[-7:-2])
 
-        has_breakout_pat = "breakout" in (patterns or [])
+        has_breakout_pat = "breakout" in pats
         max_atr_dist = 2.10 if has_breakout_pat else 1.25
         max_rsi_15 = 72 if has_breakout_pat else 65
         if (
@@ -319,11 +311,7 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         if floor_held_15m and green_turn_15m:
             is_15m_bottom_turn = True
 
-    # =========================================================================
-    # 2. 1H_EMA21_RECLAIM — ПЕРЕХВАТ СТАРТА ТРЕНДА НАД 1H EMA21 (ФИКС GLMR, SKY, INJ, DATA, ICNT, PEPE)
-    # =========================================================================
-    # Когда монета после просадки пробила 1H EMA21 снизу вверх, удерживает её (closed_1h >= e21_1h или 2 часа над ней),
-    # сама 1H EMA21 выровнялась/растёт, а на 15m цена над 15m EMA21 — ЭТО ТРАМПЛИН ВОЛНЫ!
+    # 2. 1H_EMA21_RECLAIM — ПЕРЕХВАТ СТАРТА ТРЕНДА НАД 1H EMA21 (GLMR, SKY, INJ, DATA, ICNT)
     room_to_e50_1h_pct = ((e50_1h - last_1h) / last_1h * 100.0) if (e50_1h > last_1h and last_1h > 0) else 2.5
     is_1h_ema21_reclaim = (
         e21_1h <= e50_1h * 1.001 and
@@ -339,11 +327,7 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     if is_1h_ema21_reclaim:
         return "1H_EMA21_RECLAIM", e21_1h, e50_1h, f"1H трамплин над EMA21 ({chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    # =========================================================================
-    # 3. 1H_DIP_BOUNCE — ЗАХВАТ ПОДТВЕРЖДЁННОГО ДНА ПОД 1H EMA21 (БЕЗ ЛОВЛИ СПОЛЗАНИЯ PEPE/BARD!)
-    # =========================================================================
-    # Чтобы не ловить сползание PEPE и BARD на каждой мелкой свечке, требуем подтверждённую ЧАСОВУЮ БАЗУ ДНА:
-    # минимум 2 последние часовые свечи держат лой не ниже предыдущих 4 часов + есть часовой пин-бар или зелёная 1H свеча!
+    # 3. 1H_DIP_BOUNCE — ЗАХВАТ ПОДТВЕРЖДЁННОГО ДНА ПОД 1H EMA21
     last_3_1h = candles_1h[-3:]
     has_1h_spring_wick = False
     for c1 in last_3_1h:
@@ -369,7 +353,7 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         is_15m_bottom_turn and
         has_confirmed_1h_bottom and
         ample_room_to_e21 and
-        0.01 <= pos_in_48h <= 0.34 and
+        0.06 <= pos_in_48h <= 0.34 and
         bounce_from_4h_low_pct <= 2.4 and
         (pos_in_48h <= 0.22 or pullback_from_6h_high_pct >= 1.4) and
         not heavy_curr_1h_red
@@ -377,13 +361,10 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         room_pct = (e21_1h - last_1h) / last_1h * 100 if e21_1h > last_1h else 2.0
         return "1H_DIP_BOUNCE", e21_1h, e50_1h, f"1H дно просадки (диап. {pos_in_48h*100:.0f}%, запас до EMA21 +{room_pct:.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    # =========================================================================
-    # 4. 1H_TREND_OK / 1H_SUPER_TREND — КАСКАДНЫЕ ВОЛНЫ АПТРЕНДА (ФИКС ZRO, INJ, DATA, GLMR)
-    # =========================================================================
-    has_breakout_pat = "breakout" in (patterns or [])
-    has_vcp_or_pin = any(p in (patterns or []) for p in ("vcp", "pinbar", "engulfing", "breakout"))
+    # 4. 1H_TREND_OK / 1H_SUPER_TREND — КАСКАДНЫЕ ВОЛНЫ АПТРЕНДА (ZRO, INJ, DATA, GLMR)
+    has_breakout_pat = "breakout" in pats
+    has_vcp_or_pin = any(p in pats for p in ("vcp", "pinbar", "engulfing", "breakout"))
 
-    # Если 1H EMA21 > EMA50, обе уверенно растут, и цена откатила к 15m EMA21 / 1H EMA21 — разрешаем до 88% диапазона!
     if e21_1h > e50_1h * 1.001 and e21_rising_1h and e50_rising_1h and bars_since_hi24 <= 4 and not heavy_curr_1h_red:
         max_allowed_pos_48 = 0.88 if (reclaimed_15m_ema21 or has_vcp_or_pin) else 0.72
     elif chg_48h >= 3.0 and e21_rising_1h and e50_rising_1h and not heavy_curr_1h_red:
@@ -737,7 +718,7 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
                 last_candle["close"] >= last_candle["open"] * 0.9988
             )
             if not is_open_pos and closed_candle_holds_sup:
-                sup_bonus = 2.2 if sup_touches >= 3 else 1.6
+                sup_bonus = 2.0 if sup_touches >= 3 else 1.4
                 score += sup_bonus
                 reasons.append(f"опора на поддержку ${fmt_price(nearest_sup)} ({sup_touches}x, +{sup_bonus:.1f})")
                 keys.append("support_bounce")
@@ -753,14 +734,16 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
         r_1h = rsi(closes_1h)
 
         if gate_1h in ("1H_DIP_BOUNCE", "1H_EMA21_RECLAIM"):
+            # Убрана инфляция скора 10.0 на рядовых просадках: компенсируем 70% отставания 15m EMA + умеренный бонус (даёт честные 6.8–8.4 балла,
+            # а 9.0–10.0 получают только сетапы с реальным всплеском объёма и свечным паттерном!)
             missing_ema_comp = 0.0
             if last <= e50:
-                missing_ema_comp += learner.weight("ema50")
+                missing_ema_comp += learner.weight("ema50") * 0.70
             if e21 <= e50:
-                missing_ema_comp += learner.weight("ema21")
+                missing_ema_comp += learner.weight("ema21") * 0.70
             if e12 <= e26:
-                missing_ema_comp += learner.weight("impulse")
-            base_mtf_bonus = 2.4 if gate_1h == "1H_EMA21_RECLAIM" else 2.5
+                missing_ema_comp += learner.weight("impulse") * 0.65
+            base_mtf_bonus = 2.0 if gate_1h == "1H_EMA21_RECLAIM" else 1.9
             dip_bonus = round(missing_ema_comp + base_mtf_bonus, 2)
             score += dip_bonus
             unbanned_raw = score
@@ -768,15 +751,15 @@ def score_symbol(candles_15m, candles_1h, t, regime, is_open_pos=False, saved_pa
             reasons.append(f"MTF: {tag_lbl} (+{dip_bonus:.1f})")
             keys.append("mtf_dip")
             if "support_bounce" not in keys:
-                score += 1.5
+                score += 1.0
                 unbanned_raw = score
-                reasons.append("опора на часовую базу (+1.5)")
+                reasons.append("опора на часовую базу (+1.0)")
                 keys.append("support_bounce")
             for k_comp in ("ema50", "ema21", "impulse"):
                 if k_comp not in keys:
                     keys.append(k_comp)
         elif gate_1h in ("1H_TREND_OK", "1H_SUPER_TREND") and (r_1h < 68 or abs(last - e21) <= 1.15 * a15) and e12 >= e26 * 0.9985:
-            t_bonus = 2.2 if (abs(last - e21) <= 0.85 * a15 and "support_bounce" not in keys) else 1.6
+            t_bonus = 2.0 if (abs(last - e21) <= 0.85 * a15 and "support_bounce" not in keys) else 1.6
             score += t_bonus
             unbanned_raw = score
             reasons.append(f"MTF: откат к EMA21 в 1H аптренде (+{t_bonus:.1f})")
@@ -868,12 +851,12 @@ async def live_score(sym, t, regime, btc_ret, news_items=None, deriv_t=None, is_
     elif abs(corr) < 0.25 and gate_1h_live in ("1H_TREND_OK", "1H_SUPER_TREND", "1H_DIP_BOUNCE", "1H_EMA21_RECLAIM"):
         raw += learner.weight("indep") * 1.15
     elif corr < 0.45 or is_sync_bottom:
-        raw += learner.weight("indep") * 0.8
+        raw += learner.weight("indep") * 0.7
 
     if fng >= 80:
         raw -= 0.5
     elif fng <= 25 and (entry_mode_live == "reversal" or gate_1h_live in ("1H_DIP_BOUNCE", "1H_EMA21_RECLAIM")):
-        raw += 0.4
+        raw += 0.3
 
     if is_sector_hot(sector):
         raw += 0.4
@@ -1091,7 +1074,7 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 reasons.append(f"иммунитет от BTC (corr {corr:.2f})")
                 keys.append("indep")
             elif corr < 0.45 or is_sync_bottom:
-                score += learner.weight("indep") * 0.8
+                score += learner.weight("indep") * 0.7
                 reasons.append(f"синхронный разворот волны (corr {corr:.2f})")
                 keys.append("indep")
 
@@ -1099,8 +1082,8 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 score -= 0.5
                 reasons.append(f"F&G перегрев ({fng}): -0.5")
             elif fng <= 25 and (entry_mode == "reversal" or gate_1h in ("1H_DIP_BOUNCE", "1H_EMA21_RECLAIM")):
-                score += 0.4
-                reasons.append(f"F&G экстремальный страх ({fng}): +0.4")
+                score += 0.3
+                reasons.append(f"F&G экстремальный страх ({fng}): +0.3")
 
             sb = learner.sector_bias(sector)
             if sb:
@@ -1208,7 +1191,6 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
     thrs = get_thresholds(regime)
 
     try:
-        # Передаём ВСЕ проанализированные монеты (включая 1H_BAN) в теневой журнал для учёта упущенных 4ч-пампов!
         shadow.observe(all_analyzed, regime, thrs)
         shadow.tick(tickers)
         shadow.autotune()
