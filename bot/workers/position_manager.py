@@ -297,10 +297,8 @@ class PositionManagerWorker:
             sup_broken = bool(ord_sup and closed_c["close"] < ord_sup * 0.992 and t["last"] < ord_sup * 0.992)
 
             near_sl_danger = bool(ord_sl > 0 and t["last"] <= (ord_sl + 0.30 * a))
-            is_dip_order = (ord_gate_1h == "1H_DIP_BOUNCE")
+            is_dip_order = ord_gate_1h in ("1H_DIP_BOUNCE", "1H_EMA21_RECLAIM")
 
-            # Для 1H_DIP_BOUNCE (вход на дне часовой просадки, где цена заведомо под 15m EMA50)
-            # НЕ отменяем ордер из-за last < e50, отменяем только при пробое опоры или угрозе стопа!
             sniper_broken = (
                 entry_mode != "reversal" and
                 not is_dip_order and
