@@ -49,7 +49,6 @@ async def health_handler(request):
 
 
 async def log_download_handler(request):
-    """Прямое скачивание файла лога через браузер (без ошибки charset в aiohttp)."""
     src = Path("logs/bot.log")
     if not src.exists():
         return web.Response(text="Файл лога пока пуст.", status=404)
@@ -63,7 +62,6 @@ async def log_download_handler(request):
 
 
 async def whitepaper_download_handler(request):
-    """Прямое скачивание документации Whitepaper."""
     text = generate_whitepaper()
     return web.Response(
         body=text.encode("utf-8"),
@@ -74,7 +72,6 @@ async def whitepaper_download_handler(request):
 
 
 async def _send_document_to_chat(chat_id, file_bytes: bytes, filename: str, caption: str = ""):
-    """Отправляет файл напрямую в Telegram чат."""
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not (chat_id and token):
         return
@@ -232,25 +229,47 @@ async def chart_handler(request):
             if fig is None:
                 return None
 
-            raw_html = fig.to_html(include_plotlyjs="cdn", full_html=True)
+            raw_html = fig.to_html(
+                include_plotlyjs="cdn",
+                full_html=True,
+                config={
+                    "editable": True,
+                    "edits": {"shapePosition": True, "annotationPosition": True, "titleText": False, "axisTitleText": False},
+                    "displayModeBar": False,
+                }
+            )
 
             buttons_html = (
-                '<div style="position: absolute; top: 15px; left: 50%; transform: translateX(-50%); z-index: 1000; '
-                'background: rgba(30, 30, 30, 0.85); padding: 8px 15px; border-radius: 8px; '
-                'border: 1px solid #444; font-family: Arial, sans-serif; '
-                'box-shadow: 0 4px 6px rgba(0,0,0,0.3); display: flex; align-items: center; flex-wrap: wrap; gap: 4px;">'
+                '<div style="position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1000; '
+                'background: rgba(22, 27, 34, 0.94); padding: 7px 12px; border-radius: 8px; '
+                'border: 1px solid #30363d; font-family: Arial, sans-serif; '
+                'box-shadow: 0 4px 10px rgba(0,0,0,0.45); display: flex; align-items: center; flex-wrap: wrap; gap: 4px; max-width: 98vw;">'
                 '<a href="/audit?hours=48" style="text-decoration: none; color: #00e5ff; background: rgba(0, 229, 255, 0.14); '
-                'border: 1px solid rgba(0, 229, 255, 0.4); padding: 5px 10px; margin-right: 6px; border-radius: 4px; '
-                'font-size: 13px; font-weight: bold;">📊 Аудит 48ч</a>'
+                'border: 1px solid rgba(0, 229, 255, 0.4); padding: 5px 9px; border-radius: 5px; '
+                'font-size: 12.5px; font-weight: bold;">📊 Аудит 48ч</a>'
                 '<button id="chart-shot-btn" onclick="takeChartScreenshot()" '
                 'style="cursor: pointer; color: #00e676; background: rgba(0, 230, 118, 0.16); '
-                'border: 1px solid rgba(0, 230, 118, 0.45); padding: 5px 10px; margin-right: 10px; border-radius: 4px; '
-                'font-size: 13px; font-weight: bold;">📸 Скриншот</button>'
-                '<span style="color: #ccc; margin-right: 6px; font-size: 14px;">ТФ:</span>'
+                'border: 1px solid rgba(0, 230, 118, 0.45); padding: 5px 9px; border-radius: 5px; '
+                'font-size: 12.5px; font-weight: bold;">📸 Скриншот</button>'
+                '<span style="color:#444; margin:0 3px;">|</span>'
+                '<button id="draw-buy-btn" onclick="setDrawTool(\'buy\')" title="Выделить зону выкупа / просадки" '
+                'style="cursor:pointer; color:#e6edf3; background:#21262d; border:1px solid #444; padding:4px 8px; border-radius:5px; font-size:12px; font-weight:bold;">⬜ Выкуп</button>'
+                '<button id="draw-sell-btn" onclick="setDrawTool(\'sell\')" title="Отметить точку продажи / тейка" '
+                'style="cursor:pointer; color:#58a6ff; background:#21262d; border:1px solid #444; padding:4px 8px; border-radius:5px; font-size:12px; font-weight:bold;">🔵 Продажа</button>'
+                '<button id="draw-err-btn" onclick="setDrawTool(\'error\')" title="Отметить ошибочный вход / проблему" '
+                'style="cursor:pointer; color:#d2a8ff; background:#21262d; border:1px solid #444; padding:4px 8px; border-radius:5px; font-size:12px; font-weight:bold;">🟣 Ошибка</button>'
+                '<button id="draw-pan-btn" onclick="setDrawTool(\'pan\')" title="Двигать график / рамки" '
+                'style="cursor:pointer; color:#ffd740; background:#2962ff; border:1px solid #58a6ff; padding:4px 8px; border-radius:5px; font-size:12px; font-weight:bold;">✋ Двигать</button>'
+                '<button onclick="undoLastShape()" title="Отменить последнюю фигуру" '
+                'style="cursor:pointer; color:#ccc; background:#21262d; border:1px solid #444; padding:4px 7px; border-radius:5px; font-size:12px;">↩️</button>'
+                '<button onclick="clearAllShapes()" title="Очистить все пометки" '
+                'style="cursor:pointer; color:#ff7b72; background:#21262d; border:1px solid #444; padding:4px 7px; border-radius:5px; font-size:12px;">🗑</button>'
+                '<span style="color:#444; margin:0 3px;">|</span>'
+                '<span style="color: #ccc; margin-right: 3px; font-size: 13px;">ТФ:</span>'
             )
 
             for tf in valid_intervals:
-                bg_color = "#2962ff" if tf == interval_str else "#444"
+                bg_color = "#2962ff" if tf == interval_str else "#333"
                 text_color = "#fff" if tf == interval_str else "#ccc"
                 hover_style = "this.style.background='#555'" if tf != interval_str else ""
                 out_style = f"this.style.background='{bg_color}'"
@@ -258,7 +277,7 @@ async def chart_handler(request):
                 buttons_html += (
                     f'<a href="?symbol={symbol}&interval={tf}" '
                     f'style="text-decoration: none; color: {text_color}; background: {bg_color}; '
-                    f'padding: 5px 10px; margin: 0 2px; border-radius: 4px; font-size: 13px; font-weight: bold; transition: 0.2s;" '
+                    f'padding: 4px 8px; margin: 0 1px; border-radius: 4px; font-size: 12.5px; font-weight: bold; transition: 0.2s;" '
                     f'onmouseover="{hover_style}" onmouseout="{out_style}">{tf}</a>'
                 )
 
@@ -266,6 +285,46 @@ async def chart_handler(request):
 
             shot_script = f"""
             <script>
+              const TOOL_STYLES = {{
+                buy:   {{ dragmode: 'drawcircle', color: '#ffffff', fill: 'rgba(255, 255, 255, 0.08)', btnId: 'draw-buy-btn' }},
+                sell:  {{ dragmode: 'drawcircle', color: '#00e5ff', fill: 'rgba(0, 229, 255, 0.14)', btnId: 'draw-sell-btn' }},
+                error: {{ dragmode: 'drawrect',   color: '#d500f9', fill: 'rgba(213, 0, 249, 0.14)', btnId: 'draw-err-btn' }},
+                pan:   {{ dragmode: 'pan',        color: '#ffffff', fill: 'rgba(0,0,0,0)',           btnId: 'draw-pan-btn' }}
+              }};
+
+              function setDrawTool(mode) {{
+                const gd = document.querySelector('.js-plotly-plot');
+                if (!gd) return;
+                const cfg = TOOL_STYLES[mode] || TOOL_STYLES.pan;
+                ['draw-buy-btn', 'draw-sell-btn', 'draw-err-btn', 'draw-pan-btn'].forEach(id => {{
+                  const el = document.getElementById(id);
+                  if (el) {{
+                    el.style.background = (id === cfg.btnId) ? '#2962ff' : '#21262d';
+                    el.style.borderColor = (id === cfg.btnId) ? '#58a6ff' : '#444';
+                  }}
+                }});
+                Plotly.relayout(gd, {{
+                  dragmode: cfg.dragmode,
+                  newshape: {{
+                    line: {{ color: cfg.color, width: 2.5 }},
+                    fillcolor: cfg.fill
+                  }}
+                }});
+              }}
+
+              function undoLastShape() {{
+                const gd = document.querySelector('.js-plotly-plot');
+                if (!gd || !gd.layout || !gd.layout.shapes || !gd.layout.shapes.length) return;
+                const nextShapes = gd.layout.shapes.slice(0, -1);
+                Plotly.relayout(gd, {{ shapes: nextShapes }});
+              }}
+
+              function clearAllShapes() {{
+                const gd = document.querySelector('.js-plotly-plot');
+                if (!gd) return;
+                Plotly.relayout(gd, {{ shapes: [] }});
+              }}
+
               async function takeChartScreenshot() {{
                 const btn = document.getElementById('chart-shot-btn');
                 const orig = btn.innerHTML;
