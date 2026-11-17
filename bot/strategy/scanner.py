@@ -152,13 +152,6 @@ def is_post_pump_dump(candles_15m: list, candles_1h: list = None) -> tuple:
 
 
 def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int, a15: float, candles_15m: list = None, patterns: list = None) -> tuple:
-    """
-    4-фазный среднесрочный радар волны (Wave Phase Gatekeeper):
-    - Защита от слепого пробоя 48ч-дна: если диап. < 6% без закрытого пин-бара/поглощения -> 1H_BAN!
-    - Защита от покупки под падающей 1H EMA21 (< 1.35% запаса хода) и от сползания (PEPE, BARD, ZRO в конце).
-    - Перехват старта новой волны над 1H EMA21 (1H_EMA21_RECLAIM — фикс GLMR, SKY, INJ, DATA, ICNT).
-    - Каскадные аптренды по растущей 1H EMA21 до 88% диапазона (фикс ZRO, INJ, DATA).
-    """
     if not candles_1h or len(candles_1h) < 50:
         return "1H_BAN", 0.0, 0.0, "недостаточно 1H истории (<48ч)", 0.0, 0.5
 
@@ -310,7 +303,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         if floor_held_15m and green_turn_15m:
             is_15m_bottom_turn = True
 
-    # 2. 1H_EMA21_RECLAIM — ПЕРЕХВАТ СТАРТА ТРЕНДА НАД 1H EMA21 (GLMR, SKY, INJ, DATA, ICNT)
     room_to_e50_1h_pct = ((e50_1h - last_1h) / last_1h * 100.0) if (e50_1h > last_1h and last_1h > 0) else 2.5
     is_1h_ema21_reclaim = (
         e21_1h <= e50_1h * 1.001 and
@@ -326,7 +318,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
     if is_1h_ema21_reclaim:
         return "1H_EMA21_RECLAIM", e21_1h, e50_1h, f"1H трамплин над EMA21 ({chg_48h:+.1f}%, диап. {pos_in_48h*100:.0f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    # 3. 1H_DIP_BOUNCE — ЗАХВАТ ПОДТВЕРЖДЁННОГО ДНА ПОД 1H EMA21
     last_3_1h = candles_1h[-3:]
     has_1h_spring_wick = False
     for c1 in last_3_1h:
@@ -336,8 +327,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
             has_1h_spring_wick = True
             break
 
-    # Удержание часового дна: текущая часовая свеча держит лой не ниже предыдущей свечи дна (prev_1h / prev2_1h)
-    # и нет серии из 3 полнотелых красных часовых свечей подряд!
     h1_base_held = (
         curr_1h["low"] >= min(prev_1h["low"], prev2_1h["low"]) * 0.9980 and
         (prev_1h["close"] >= prev_1h["open"] or curr_1h["close"] > curr_1h["open"] or has_1h_spring_wick) and
@@ -362,7 +351,6 @@ def validate_1h_structure(candles_1h: list, nearest_sup: float, sup_touches: int
         room_pct = (e21_1h - last_1h) / last_1h * 100 if e21_1h > last_1h else 2.0
         return "1H_DIP_BOUNCE", e21_1h, e50_1h, f"1H дно просадки (диап. {pos_in_48h*100:.0f}%, запас до EMA21 +{room_pct:.1f}%)", round(chg_48h, 1), round(pos_in_48h, 2)
 
-    # 4. 1H_TREND_OK / 1H_SUPER_TREND — КАСКАДНЫЕ ВОЛНЫ АПТРЕНДА (ZRO, INJ, DATA, GLMR)
     has_breakout_pat = "breakout" in pats
     has_vcp_or_pin = any(p in pats for p in ("vcp", "pinbar", "engulfing", "breakout"))
 
@@ -1159,8 +1147,8 @@ async def scan(regime, tickers, deriv_tickers, limit=20):
                 "nearest_sup": signal_values.get("nearest_sup"),
                 "sup_touches": signal_values.get("sup_touches", 0),
                 "recent_high": signal_values.get("recent_high"),
-                "recent_low_2h": recent_low_2h,
-                "recent_low_6": recent_low_6,
+                "recent_low_2h": signal_values.get("recent_low_2h"),
+                "recent_low_6": signal_values.get("recent_low_6"),
                 "e21": signal_values.get("e21"),
                 "e50": signal_values.get("e50"),
                 "e21_1h": signal_values.get("e21_1h"),
