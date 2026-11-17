@@ -234,6 +234,7 @@ async def chart_handler(request):
                 full_html=True,
                 config={
                     "editable": True,
+                    "scrollZoom": True,
                     "edits": {"shapePosition": True, "annotationPosition": True, "titleText": False, "axisTitleText": False},
                     "displayModeBar": False,
                 }
@@ -252,17 +253,15 @@ async def chart_handler(request):
                 'border: 1px solid rgba(0, 230, 118, 0.45); padding: 5px 9px; border-radius: 5px; '
                 'font-size: 12.5px; font-weight: bold;">📸 Скриншот</button>'
                 '<span style="color:#444; margin:0 3px;">|</span>'
-                '<button id="draw-buy-btn" onclick="setDrawTool(\'buy\')" title="Выделить зону выкупа / просадки" '
+                '<button id="draw-buy-btn" onclick="setDrawTool(\'buy\')" title="Прямоугольник: выделить зону выкупа (повторный клик — отмена)" '
                 'style="cursor:pointer; color:#e6edf3; background:#21262d; border:1px solid #444; padding:4px 8px; border-radius:5px; font-size:12px; font-weight:bold;">⬜ Выкуп</button>'
-                '<button id="draw-sell-btn" onclick="setDrawTool(\'sell\')" title="Отметить точку продажи / тейка" '
+                '<button id="draw-sell-btn" onclick="setDrawTool(\'sell\')" title="Круг: отметить продажу / тейк (повторный клик — отмена)" '
                 'style="cursor:pointer; color:#58a6ff; background:#21262d; border:1px solid #444; padding:4px 8px; border-radius:5px; font-size:12px; font-weight:bold;">🔵 Продажа</button>'
-                '<button id="draw-err-btn" onclick="setDrawTool(\'error\')" title="Отметить ошибочный вход / проблему" '
+                '<button id="draw-err-btn" onclick="setDrawTool(\'error\')" title="Ромб: отметить ошибку (повторный клик — отмена)" '
                 'style="cursor:pointer; color:#d2a8ff; background:#21262d; border:1px solid #444; padding:4px 8px; border-radius:5px; font-size:12px; font-weight:bold;">🟣 Ошибка</button>'
-                '<button id="draw-pan-btn" onclick="setDrawTool(\'pan\')" title="Двигать график / рамки" '
-                'style="cursor:pointer; color:#ffd740; background:#2962ff; border:1px solid #58a6ff; padding:4px 8px; border-radius:5px; font-size:12px; font-weight:bold;">✋ Двигать</button>'
-                '<button onclick="undoLastShape()" title="Отменить последнюю фигуру" '
+                '<button onclick="undoLastShape()" title="Удалить последнюю фигуру" '
                 'style="cursor:pointer; color:#ccc; background:#21262d; border:1px solid #444; padding:4px 7px; border-radius:5px; font-size:12px;">↩️</button>'
-                '<button onclick="clearAllShapes()" title="Очистить все пометки" '
+                '<button onclick="clearAllShapes()" title="Очистить все фигуры" '
                 'style="cursor:pointer; color:#ff7b72; background:#21262d; border:1px solid #444; padding:4px 7px; border-radius:5px; font-size:12px;">🗑</button>'
                 '<span style="color:#444; margin:0 3px;">|</span>'
                 '<span style="color: #ccc; margin-right: 3px; font-size: 13px;">ТФ:</span>'
@@ -285,24 +284,40 @@ async def chart_handler(request):
 
             shot_script = f"""
             <script>
+              let activeDrawTool = null;
+              let isConvertingRhombus = false;
+
               const TOOL_STYLES = {{
-                buy:   {{ dragmode: 'drawcircle', color: '#ffffff', fill: 'rgba(255, 255, 255, 0.08)', btnId: 'draw-buy-btn' }},
+                buy:   {{ dragmode: 'drawrect',   color: '#ffffff', fill: 'rgba(255, 255, 255, 0.08)', btnId: 'draw-buy-btn' }},
                 sell:  {{ dragmode: 'drawcircle', color: '#00e5ff', fill: 'rgba(0, 229, 255, 0.14)', btnId: 'draw-sell-btn' }},
-                error: {{ dragmode: 'drawrect',   color: '#d500f9', fill: 'rgba(213, 0, 249, 0.14)', btnId: 'draw-err-btn' }},
-                pan:   {{ dragmode: 'pan',        color: '#ffffff', fill: 'rgba(0,0,0,0)',           btnId: 'draw-pan-btn' }}
+                error: {{ dragmode: 'drawrect',   color: '#d500f9', fill: 'rgba(213, 0, 249, 0.14)', btnId: 'draw-err-btn' }}
               }};
+
+              function updateToolButtons() {{
+                ['draw-buy-btn', 'draw-sell-btn', 'draw-err-btn'].forEach(id => {{
+                  const el = document.getElementById(id);
+                  if (!el) return;
+                  const isActive = activeDrawTool && TOOL_STYLES[activeDrawTool] && TOOL_STYLES[activeDrawTool].btnId === id;
+                  el.style.background = isActive ? '#2962ff' : '#21262d';
+                  el.style.borderColor = isActive ? '#58a6ff' : '#444';
+                }});
+              }}
 
               function setDrawTool(mode) {{
                 const gd = document.querySelector('.js-plotly-plot');
                 if (!gd) return;
-                const cfg = TOOL_STYLES[mode] || TOOL_STYLES.pan;
-                ['draw-buy-btn', 'draw-sell-btn', 'draw-err-btn', 'draw-pan-btn'].forEach(id => {{
-                  const el = document.getElementById(id);
-                  if (el) {{
-                    el.style.background = (id === cfg.btnId) ? '#2962ff' : '#21262d';
-                    el.style.borderColor = (id === cfg.btnId) ? '#58a6ff' : '#444';
-                  }}
-                }});
+
+                // Повторный клик по активной кнопке снимает выбор фигуры и возвращает увеличение графика (zoom)
+                if (activeDrawTool === mode || !TOOL_STYLES[mode]) {{
+                  activeDrawTool = null;
+                  updateToolButtons();
+                  Plotly.relayout(gd, {{ dragmode: 'zoom' }});
+                  return;
+                }}
+
+                activeDrawTool = mode;
+                const cfg = TOOL_STYLES[mode];
+                updateToolButtons();
                 Plotly.relayout(gd, {{
                   dragmode: cfg.dragmode,
                   newshape: {{
@@ -311,6 +326,72 @@ async def chart_handler(request):
                   }}
                 }});
               }}
+
+              document.addEventListener('keydown', function(e) {{
+                if (e.key === 'Escape' && activeDrawTool !== null) {{
+                  setDrawTool(activeDrawTool);
+                }}
+              }});
+
+              function toNaiveMs(val) {{
+                if (typeof val === 'number') return val;
+                const s = String(val).trim().replace(' ', 'T');
+                return Date.parse(s.endsWith('Z') ? s : s + 'Z');
+              }}
+
+              function toNaiveIso(ms) {{
+                return new Date(ms).toISOString().slice(0, 23);
+              }}
+
+              window.addEventListener('load', function() {{
+                const gd = document.querySelector('.js-plotly-plot');
+                if (!gd || typeof gd.on !== 'function') return;
+
+                gd.on('plotly_relayout', function(ev) {{
+                  if (isConvertingRhombus || activeDrawTool !== 'error') return;
+                  if (!gd.layout || !gd.layout.shapes || !gd.layout.shapes.length) return;
+
+                  const hasShapeAdded = Object.keys(ev || {{}}).some(k => k === 'shapes' || (k.startsWith('shapes[') && !k.includes('.')));
+                  if (!hasShapeAdded) return;
+
+                  const idx = gd.layout.shapes.length - 1;
+                  const s = gd.layout.shapes[idx];
+                  if (!s || s.type !== 'rect') return;
+
+                  const x0ms = toNaiveMs(s.x0);
+                  const x1ms = toNaiveMs(s.x1);
+                  if (isNaN(x0ms) || isNaN(x1ms)) return;
+
+                  const xMidMs = (x0ms + x1ms) / 2;
+                  const x0Str = toNaiveIso(x0ms);
+                  const x1Str = toNaiveIso(x1ms);
+                  const xMidStr = toNaiveIso(xMidMs);
+
+                  const y0 = Number(s.y0);
+                  const y1 = Number(s.y1);
+                  const yMid = (y0 + y1) / 2;
+
+                  const diamondPath = `M ${{xMidStr}},${{y1}} L ${{x1Str}},${{yMid}} L ${{xMidStr}},${{y0}} L ${{x0Str}},${{yMid}} Z`;
+
+                  isConvertingRhombus = true;
+                  const nextShapes = gd.layout.shapes.slice();
+                  nextShapes[idx] = {{
+                    type: 'path',
+                    xref: s.xref || 'x',
+                    yref: s.yref || 'y',
+                    path: diamondPath,
+                    line: s.line || {{ color: '#d500f9', width: 2.5 }},
+                    fillcolor: s.fillcolor || 'rgba(213, 0, 249, 0.14)',
+                    editable: true
+                  }};
+
+                  Plotly.relayout(gd, {{ shapes: nextShapes }}).then(() => {{
+                    isConvertingRhombus = false;
+                  }}).catch(() => {{
+                    isConvertingRhombus = false;
+                  }});
+                }});
+              }});
 
               function undoLastShape() {{
                 const gd = document.querySelector('.js-plotly-plot');
