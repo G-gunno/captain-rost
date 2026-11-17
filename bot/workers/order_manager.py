@@ -65,7 +65,7 @@ class OrderManagerWorker:
     def _try_evict_sleeping_position(self, cand: dict, tier: str, tickers: dict, regime: str) -> bool:
         """
         Вызывается ТОЛЬКО тогда, когда новая ракета (score >= 9.2) УЖЕ прошла все проверки стен и RR!
-        Не трогает свежие донные позиции (reversal / 1H_DIP_BOUNCE), чтобы не выбрасывать сделки на дне (фикс INJUSDT).
+        Не трогает свежие донные и трамплинные позиции (reversal / 1H_DIP_BOUNCE / 1H_EMA21_RECLAIM).
         """
         if cand.get("score", 0.0) < 9.2 or cand.get("entry_mode") not in ("sniper", "rocket"):
             return False
@@ -79,7 +79,11 @@ class OrderManagerWorker:
             if pos.get("tp1_done"):
                 continue
             pos_age = now_ts - int(pos.get("entry_time", now_ts))
-            min_sleep_age = 9000 if (pos.get("entry_mode") == "reversal" or pos.get("gate_1h") == "1H_DIP_BOUNCE") else 6300
+            is_bottom_pos = (
+                pos.get("entry_mode") == "reversal" or
+                pos.get("gate_1h") in ("1H_DIP_BOUNCE", "1H_EMA21_RECLAIM")
+            )
+            min_sleep_age = 9000 if is_bottom_pos else 6300
             if pos_age < min_sleep_age:
                 continue
             last_p = tickers.get(sym, {}).get("last", 0.0)
@@ -98,7 +102,7 @@ class OrderManagerWorker:
         reason = f"🔄 Ротация слота под ракету {cand['symbol'][:-4]} ({cand['score']:.1f})"
         ex = paper._sell(v_sym, v_last, "🛡🔒 БУ", regime_now=regime)
         paper.log_event(v_sym, "sell_profit", v_last, reason, tp=v_pos.get("tp"), sl=v_pos.get("sl"), sup=v_pos.get("nearest_sup"), res=v_pos.get("nearest_res"))
-        bot_state.set_cooldown(v_sym, 600, structural_reset=False, reason="slot_evict")
+        bot_state.set_cooldown(v_sym, 600, structural_reset=True, reason="slot_evict")
         logger.info(f"OrderManager: 🔄 Освобождён спящий слот {v_sym} ({ex['pnl_pct']:+.2f}%) ради валидной ракеты {cand['symbol']} ({cand['score']:.1f})")
         self._notify(
             f"🔄 <b>Освобождён спящий слот</b> · продан {pair_html(v_sym, ex)}{grade_badge(ex)} ({pnl_emoji(ex['pnl_pct'])} {fmt_pct(ex['pnl_pct'])})\n"
@@ -122,7 +126,6 @@ class OrderManagerWorker:
             o_grade = o.get("grade", "B")
             o_score = o.get("score", 0.0)
 
-            # Запрещаем дёргать ордера младше 15 минут (900 сек) — убираем пустую суету без сделок (фикс TAUSDT, ARXUSDT)!
             if o_age < 900:
                 continue
 
@@ -222,8 +225,11 @@ class OrderManagerWorker:
             if a <= 0:
                 continue
 
-            if learner.coin_bias(sym) > -1.0:
-                bot_state.check_structural_reset(sym, cand["last"], e21_15m, e50_15m)
+            # Проверяем досрочный сброс карантина при развороте над 15m EMA21 или выходе в 1H_EMA21_RECLAIM / 1H_TREND_OK
+            bot_state.check_structural_reset(
+                sym, cand["last"], e21_15m, e50_15m,
+                gate_1h=cand.get("gate_1h", ""), patterns=patterns
+            )
             if bot_state.is_on_cooldown(sym):
                 continue
 
@@ -270,24 +276,22 @@ class OrderManagerWorker:
             t_data = tickers.get(sym, {})
             bid1 = t_data.get("bid1", cand["last"])
             ideal_entry = cand["last"] * (1 + off)
-            entry = min(ideal_entry, bid1 * 0.9990)
+            entry = min(ideal_entry, bid1 * 0.9992)
 
-            # ЗАЩИТА ОТ ВХОДА НА МИНУТНЫХ ШПИЛЬКАХ (фикс TAUSDT):
-            # Для любого sniper (кроме старта со дна 1H_DIP_BOUNCE) лимитка ставится не выше 15m EMA21 + 0.30*ATR!
-            if entry_mode == "sniper" and cand.get("gate_1h") != "1H_DIP_BOUNCE" and e21_15m > 0:
-                ema_pullback_cap = e21_15m + 0.30 * a
-                if ema_pullback_cap < entry and ema_pullback_cap >= cand["last"] * 0.986:
+            if entry_mode == "sniper" and cand.get("gate_1h") not in ("1H_DIP_BOUNCE", "1H_EMA21_RECLAIM") and e21_15m > 0:
+                ema_pullback_cap = e21_15m + 0.38 * a
+                if ema_pullback_cap < entry and ema_pullback_cap >= cand["last"] * 0.988:
                     entry = ema_pullback_cap
 
             wick_entry = cand.get("wick_entry_price")
             if entry_mode == "reversal" and wick_entry and 0 < wick_entry < entry:
-                entry = max(wick_entry, cand["last"] * 0.990)
+                entry = max(wick_entry, cand["last"] * 0.992)
 
             sup = cand.get("nearest_sup")
             sup_touches = cand.get("sup_touches", 0)
             if sup and sup_touches >= 2 and not is_mom:
                 retest_floor = sup * 1.0012
-                if entry < sup and retest_floor <= cand["last"] * 0.9980:
+                if entry < sup and retest_floor <= cand["last"] * 0.9985:
                     entry = retest_floor
 
             off = (entry - cand["last"]) / cand["last"] if cand["last"] > 0 else off
@@ -328,7 +332,6 @@ class OrderManagerWorker:
             if sl_dist_pct <= 0:
                 continue
 
-            # Только ТЕПЕРЬ, когда кандидат 100% валиден и прошёл проверку стен и RR, освобождаем под него спящий слот!
             if needs_eviction:
                 if self._try_evict_sleeping_position(cand, tier, tickers, regime):
                     tier_pos_count = paper.count_tier_positions(tier)
