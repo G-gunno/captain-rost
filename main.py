@@ -257,7 +257,7 @@ async def chart_handler(request):
                 'style="cursor:pointer; color:#e6edf3; background:#21262d; border:1px solid #444; padding:4px 8px; border-radius:5px; font-size:12px; font-weight:bold;">⬜ Выкуп</button>'
                 '<button id="draw-sell-btn" onclick="setDrawTool(\'sell\')" title="Круг: отметить продажу / тейк (повторный клик — отмена)" '
                 'style="cursor:pointer; color:#58a6ff; background:#21262d; border:1px solid #444; padding:4px 8px; border-radius:5px; font-size:12px; font-weight:bold;">🔵 Продажа</button>'
-                '<button id="draw-err-btn" onclick="setDrawTool(\'error\')" title="Ромб: отметить ошибку (повторный клик — отмена)" '
+                '<button id="draw-err-btn" onclick="setDrawTool(\'error\')" title="Фиолетовая рамка: отметить ошибку (повторный клик — отмена)" '
                 'style="cursor:pointer; color:#d2a8ff; background:#21262d; border:1px solid #444; padding:4px 8px; border-radius:5px; font-size:12px; font-weight:bold;">🟣 Ошибка</button>'
                 '<button onclick="undoLastShape()" title="Удалить последнюю фигуру" '
                 'style="cursor:pointer; color:#ccc; background:#21262d; border:1px solid #444; padding:4px 7px; border-radius:5px; font-size:12px;">↩️</button>'
@@ -285,7 +285,6 @@ async def chart_handler(request):
             shot_script = f"""
             <script>
               let activeDrawTool = null;
-              let isConvertingRhombus = false;
 
               const TOOL_STYLES = {{
                 buy:   {{ dragmode: 'drawrect',   color: '#ffffff', fill: 'rgba(255, 255, 255, 0.08)', btnId: 'draw-buy-btn' }},
@@ -307,7 +306,6 @@ async def chart_handler(request):
                 const gd = document.querySelector('.js-plotly-plot');
                 if (!gd) return;
 
-                // Повторный клик по активной кнопке снимает выбор фигуры и возвращает увеличение графика (zoom)
                 if (activeDrawTool === mode || !TOOL_STYLES[mode]) {{
                   activeDrawTool = null;
                   updateToolButtons();
@@ -331,66 +329,6 @@ async def chart_handler(request):
                 if (e.key === 'Escape' && activeDrawTool !== null) {{
                   setDrawTool(activeDrawTool);
                 }}
-              }});
-
-              function toNaiveMs(val) {{
-                if (typeof val === 'number') return val;
-                const s = String(val).trim().replace(' ', 'T');
-                return Date.parse(s.endsWith('Z') ? s : s + 'Z');
-              }}
-
-              function toNaiveIso(ms) {{
-                return new Date(ms).toISOString().slice(0, 23);
-              }}
-
-              window.addEventListener('load', function() {{
-                const gd = document.querySelector('.js-plotly-plot');
-                if (!gd || typeof gd.on !== 'function') return;
-
-                gd.on('plotly_relayout', function(ev) {{
-                  if (isConvertingRhombus || activeDrawTool !== 'error') return;
-                  if (!gd.layout || !gd.layout.shapes || !gd.layout.shapes.length) return;
-
-                  const hasShapeAdded = Object.keys(ev || {{}}).some(k => k === 'shapes' || (k.startsWith('shapes[') && !k.includes('.')));
-                  if (!hasShapeAdded) return;
-
-                  const idx = gd.layout.shapes.length - 1;
-                  const s = gd.layout.shapes[idx];
-                  if (!s || s.type !== 'rect') return;
-
-                  const x0ms = toNaiveMs(s.x0);
-                  const x1ms = toNaiveMs(s.x1);
-                  if (isNaN(x0ms) || isNaN(x1ms)) return;
-
-                  const xMidMs = (x0ms + x1ms) / 2;
-                  const x0Str = toNaiveIso(x0ms);
-                  const x1Str = toNaiveIso(x1ms);
-                  const xMidStr = toNaiveIso(xMidMs);
-
-                  const y0 = Number(s.y0);
-                  const y1 = Number(s.y1);
-                  const yMid = (y0 + y1) / 2;
-
-                  const diamondPath = `M ${{xMidStr}},${{y1}} L ${{x1Str}},${{yMid}} L ${{xMidStr}},${{y0}} L ${{x0Str}},${{yMid}} Z`;
-
-                  isConvertingRhombus = true;
-                  const nextShapes = gd.layout.shapes.slice();
-                  nextShapes[idx] = {{
-                    type: 'path',
-                    xref: s.xref || 'x',
-                    yref: s.yref || 'y',
-                    path: diamondPath,
-                    line: s.line || {{ color: '#d500f9', width: 2.5 }},
-                    fillcolor: s.fillcolor || 'rgba(213, 0, 249, 0.14)',
-                    editable: true
-                  }};
-
-                  Plotly.relayout(gd, {{ shapes: nextShapes }}).then(() => {{
-                    isConvertingRhombus = false;
-                  }}).catch(() => {{
-                    isConvertingRhombus = false;
-                  }});
-                }});
               }});
 
               function undoLastShape() {{
