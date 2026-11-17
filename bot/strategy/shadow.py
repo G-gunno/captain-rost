@@ -10,13 +10,12 @@ from bot.strategy.learner import learner, clamp_weight
 STATE_FILE = Path(os.getenv("STORAGE_DIR", "storage")) / "shadow.json"
 REMOTE_PATH = "shadow.json"
 
-OBS_GAP = 2.0
-H1 = 3600
+OBS_GAP = 2.5
+H1 = 1800
 H4 = 4 * 3600
-H24 = 24 * 3600
-PUMP_PCT = 3.0
-MAX_EPISODES = 300
-COOLDOWN = 24 * 3600
+PUMP_PCT = 3.2
+MAX_EPISODES = 350
+COOLDOWN = 3 * 3600
 
 
 def _band(score):
@@ -32,17 +31,23 @@ def _band(score):
 
 
 class Shadow:
-    """Теневой журнал + Память ДНК Монет (Coin DNA): калибрует пороги, глубину отката и цели под рынок."""
+    """
+    Теневой журнал 4ч-волн + Детектор Упущенных Пампов (Missed Pump Tracker):
+    - Отслеживает ВСЕ монеты пула (включая отсеянные через 1H_BAN и tactical_hold) на 4-часовом горизонте волны.
+    - Если монета с хорошим потенциалом была пропущена и дала памп >= +3.2% за 4 часа — снижает порог входа (nudge),
+      а не задирает его на падающем рынке.
+    """
 
     def __init__(self):
         self.episodes = {}
         self.agg = {}
+        self.missed_bans = {}
         self.cooldown = {}
         self.coin_dna = {}
         self.tuning = {
             "auto": True,
             "nudge_rocket": 0.0, "nudge_sniper": 0.0, "nudge_reversal": 0.0,
-            "hunt": -0.0035, "near": -0.0020, "capture": +0.002,
+            "hunt": -0.0030, "near": -0.0018, "capture": +0.002,
             "sl_mult": 1.0, "tp_mult": 1.0,
             "signal_windows": {"rsi_hi": 90, "chg_hi": 30, "vol_lo": 1.3},
         }
@@ -62,12 +67,16 @@ class Shadow:
         if data:
             self.episodes = data.get("episodes", {})
             self.agg = data.get("agg", {})
+            self.missed_bans = data.get("missed_bans", {})
             self.cooldown = data.get("cooldown", {})
             self.coin_dna = data.get("coin_dna", {})
             self.tuning.update(data.get("tuning", {}))
-            h_val = float(self.tuning.get("hunt", -0.0035))
-            if h_val < -0.0055 or h_val > -0.0028:
-                self.tuning["hunt"] = -0.0035
+            # Сбрасываем старую завышенную накрутку порогов (> +0.20)
+            for k_nudge in ("nudge_rocket", "nudge_sniper", "nudge_reversal"):
+                self.tuning[k_nudge] = max(-0.25, min(0.20, float(self.tuning.get(k_nudge, 0.0))))
+            h_val = float(self.tuning.get("hunt", -0.0030))
+            if h_val < -0.0045 or h_val > -0.0020:
+                self.tuning["hunt"] = -0.0030
             logger.info(
                 f"shadow: загружен ({len(self.episodes)} эпиз., ДНК {len(self.coin_dna)} монет, hunt={self.tuning['hunt']})"
             )
@@ -80,6 +89,7 @@ class Shadow:
         payload = {
             "episodes": self.episodes,
             "agg": self.agg,
+            "missed_bans": self.missed_bans,
             "cooldown": self.cooldown,
             "coin_dna": self.coin_dna,
             "tuning": self.tuning,
@@ -94,7 +104,6 @@ class Shadow:
             upload_state(REMOTE_PATH, payload)
 
     def update_coin_dna(self, symbol: str, candles_15m: list, candles_1h: list, atr_pct: float, chg_48h: float, pos_in_48h: float):
-        """Обновляет профиль волатильности, средней длины волны и глубины откатов монеты."""
         if not candles_1h or len(candles_1h) < 24:
             return
 
@@ -150,18 +159,18 @@ class Shadow:
         med_trend = dna.get("med_trend", "range")
         atr_pct = float(dna.get("atr_pct", 0.8))
 
-        if wave_amp >= 4.0 or (wave_amp >= 3.3 and med_trend == "bull"):
+        if wave_amp >= 4.0 or (wave_amp >= 3.2 and med_trend == "bull"):
             wave_class = "long_wave"
-            tp1_ratio = 0.32
-            wave_mult = 1.20
-        elif wave_amp < 2.50 and med_trend != "bull":
+            tp1_ratio = 0.30
+            wave_mult = 1.25
+        elif wave_amp < 2.40 and med_trend != "bull":
             wave_class = "short_wave"
-            tp1_ratio = 0.55
-            wave_mult = 0.80
+            tp1_ratio = 0.50
+            wave_mult = 0.85
         else:
             wave_class = "mid_wave"
-            tp1_ratio = 0.40
-            wave_mult = 1.0
+            tp1_ratio = 0.38
+            wave_mult = 1.05
 
         return {
             "wave_amp_pct": wave_amp,
@@ -173,37 +182,43 @@ class Shadow:
             "wave_mult": wave_mult,
         }
 
-    def observe(self, scored, regime, thrs):
+    def observe(self, all_analyzed, regime, thrs):
+        """Записывает как рабочие сигналы, так и отсеянные (1H_BAN / tactical_hold) для контроля упущенных пампов."""
         from bot.exchange.paper_exchange import paper
         now = time.time()
 
-        for c in scored:
+        for c in all_analyzed:
+            if not c:
+                continue
             sym = c["symbol"]
             mode = c.get("entry_mode", "sniper")
             thr = thrs.get(mode, 6.0)
             obs_thr = thr - OBS_GAP
+            eff_score = float(c.get("unbanned_score", c.get("score", 0.0)))
 
             if sym in self.episodes:
                 ep = self.episodes[sym]
-                if c["score"] > ep["max_score"]:
-                    ep["max_score"] = c["score"]
-                if sym in paper.positions:
+                if eff_score > ep["max_score"]:
+                    ep["max_score"] = eff_score
+                if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
                     ep["traded"] = True
                 continue
 
-            if c["score"] < obs_thr:
+            if eff_score < obs_thr:
                 continue
             if now < self.cooldown.get(sym, 0):
                 continue
             if len(self.episodes) >= MAX_EPISODES:
                 continue
 
-            traded = (sym in paper.positions)
+            traded = (sym in paper.positions) or any(o["symbol"] == sym for o in paper.orders)
 
             self.episodes[sym] = {
                 "ts": now, "price": c["last"], "last": c["last"],
-                "max_score": c["score"],
+                "max_score": eff_score,
                 "regime": regime, "entry_mode": mode,
+                "gate_1h": c.get("gate_1h", "1H_TREND_OK"),
+                "reason_1h": c.get("reason_1h", ""),
                 "sector": c.get("sector"), "tier": c.get("tier"),
                 "keys": c.get("reason_keys", []), "traded": bool(traded),
                 "success": False,
@@ -229,7 +244,7 @@ class Shadow:
             ep["last"] = last
             ep["hi"] = max(ep["hi"], last)
             ep["lo"] = min(ep["lo"], last)
-            if sym in paper.positions:
+            if sym in paper.positions or any(o["symbol"] == sym for o in paper.orders):
                 ep["traded"] = True
 
             if not ep.get("pumped"):
@@ -238,9 +253,9 @@ class Shadow:
                     ep["pumped"] = True
 
             age = now - ep["ts"]
-            if ep["p4"] is None and age >= H4:
+            # Закрываем эпизод через 4 часа (реальный цикл внутридневной волны), чтобы видеть все 4 пампа GLMR/SKY/DATA!
+            if age >= H4:
                 ep["p4"] = last
-            if age >= H24:
                 self._close(sym, ep, last)
         self.save()
 
@@ -303,8 +318,7 @@ class Shadow:
         if dec <= 0:
             return
 
-        move24 = (last - dec) / dec * 100
-        move4 = ((ep["p4"] or last) - dec) / dec * 100
+        move4 = (last - dec) / dec * 100
         mae = (ep["lo"] - dec) / dec * 100
         mfe = (ep["hi"] - dec) / dec * 100
         pullback = (ep.get("lo_before_pump", ep["lo"]) - dec) / dec * 100
@@ -313,18 +327,25 @@ class Shadow:
             old_mfe = self.coin_dna[sym].get("hist_mfe", mfe)
             self.coin_dna[sym]["hist_mfe"] = round(0.7 * old_mfe + 0.3 * mfe, 2)
 
+        did_pump = bool(ep.get("pumped") or mfe >= PUMP_PCT or move4 >= PUMP_PCT)
+        if did_pump and not ep.get("traded") and ep.get("gate_1h") == "1H_BAN":
+            r_tag = (ep.get("reason_1h") or "1H_BAN").split("(")[0].strip()
+            mb = self.missed_bans.setdefault(r_tag, {"count": 0, "avg_mfe": 0.0})
+            mb["avg_mfe"] = round((mb["avg_mfe"] * mb["count"] + mfe) / (mb["count"] + 1), 2)
+            mb["count"] += 1
+
         mode = ep.get("entry_mode", "sniper")
         key = f"{ep['regime']}|{mode}|{_band(ep['max_score'])}"
 
         a = self.agg.setdefault(key, {
             "n": 0, "sum4": 0.0, "sum24": 0.0, "pumps4": 0, "pumps24": 0,
-            "traded": 0, "sum_mae": 0.0, "sum_mfe": 0.0, "sum_pull": 0.0,
+            "traded": 0, "sum_mae": v_mae if (v_mae := 0.0) else 0.0, "sum_mfe": 0.0, "sum_pull": 0.0,
             "sum_pull_pump": 0.0, "sum_mae_pump": 0.0,
             "keys_pump": {}, "keys_all": {},
         })
         a["n"] += 1
         a["sum4"] += move4
-        a["sum24"] += move24
+        a["sum24"] += move4
         a["sum_mae"] += mae
         a["sum_mfe"] += mfe
         a["sum_pull"] += mae
@@ -332,7 +353,6 @@ class Shadow:
         if move4 >= PUMP_PCT:
             a["pumps4"] += 1
 
-        did_pump = bool(ep.get("pumped") or mfe >= PUMP_PCT or move24 >= PUMP_PCT)
         if did_pump:
             a["pumps24"] += 1
             a["sum_pull_pump"] = a.get("sum_pull_pump", 0.0) + pullback
@@ -360,8 +380,7 @@ class Shadow:
         self._last_tune = now
 
         active_agg = self._combined_agg()
-        actionable_bands = {"6-7", "7-8", "8+"}
-        is_fade_market = False
+        actionable_bands = {"5-6", "6-7", "7-8", "8+"}
 
         for mode in ["rocket", "sniper", "reversal"]:
             band_stats = {}
@@ -373,53 +392,35 @@ class Shadow:
                 if m_name != mode or b_name not in actionable_bands:
                     continue
                 bs = band_stats.setdefault(b_name, {
-                    "n": 0, "sum24": 0.0, "sum_mfe": 0.0, "sum_mae": 0.0, "pumps": 0, "traded": 0
+                    "n": 0, "sum4": 0.0, "sum_mfe": 0.0, "sum_mae": 0.0, "pumps": 0, "traded": 0
                 })
                 bs["n"] += a["n"]
-                bs["sum24"] += a.get("sum24", 0.0)
+                bs["sum4"] += a.get("sum4", 0.0)
                 bs["sum_mfe"] += a.get("sum_mfe", 0.0)
                 bs["sum_mae"] += a.get("sum_mae", 0.0)
                 bs["pumps"] += a.get("pumps24", 0)
                 bs["traded"] += a.get("traded", 0)
 
-            mid_n = band_stats.get("6-7", {}).get("n", 0) + band_stats.get("7-8", {}).get("n", 0)
-            high_n = band_stats.get("8+", {}).get("n", 0)
-            total_act_n = mid_n + high_n
+            tot_n = sum(v["n"] for v in band_stats.values())
+            tot_pumps = sum(v["pumps"] for v in band_stats.values())
+            tot_traded = sum(v["traded"] for v in band_stats.values())
+            missed_pumps = max(0, tot_pumps - tot_traded)
 
             nudge = 0.0
-            if total_act_n >= 5:
-                mid_sum24 = band_stats.get("6-7", {}).get("sum24", 0.0) + band_stats.get("7-8", {}).get("sum24", 0.0)
-                mid_mfe = band_stats.get("6-7", {}).get("sum_mfe", 0.0) + band_stats.get("7-8", {}).get("sum_mfe", 0.0)
-                mid_mae = band_stats.get("6-7", {}).get("sum_mae", 0.0) + band_stats.get("7-8", {}).get("sum_mae", 0.0)
-                mid_pumps = band_stats.get("6-7", {}).get("pumps", 0) + band_stats.get("7-8", {}).get("pumps", 0)
-                mid_traded = band_stats.get("6-7", {}).get("traded", 0) + band_stats.get("7-8", {}).get("traded", 0)
+            if tot_n >= 4:
+                avg_mfe = sum(v["sum_mfe"] for v in band_stats.values()) / tot_n
+                avg_mae = abs(sum(v["sum_mae"] for v in band_stats.values()) / tot_n)
 
-                mid_avg24 = (mid_sum24 / mid_n) if mid_n > 0 else 0.0
-                mid_avg_mfe = (mid_mfe / mid_n) if mid_n > 0 else 0.0
-                mid_avg_mae = abs(mid_mae / mid_n) if mid_n > 0 else 0.0
-                mid_edge = 0.6 * mid_avg24 + 0.4 * (mid_avg_mfe - mid_avg_mae)
-
-                high_avg24 = (band_stats["8+"]["sum24"] / high_n) if high_n > 0 else 0.0
-                high_avg_mfe = (band_stats["8+"]["sum_mfe"] / high_n) if high_n > 0 else 0.0
-                high_pumps = band_stats.get("8+", {}).get("pumps", 0)
-                high_traded = band_stats.get("8+", {}).get("traded", 0)
-
-                if mode == "sniper" and high_n >= 6 and high_avg24 < -0.5 and high_avg_mfe >= 2.8:
-                    is_fade_market = True
-
-                if mid_n >= 4 and (mid_avg24 < -0.35 or mid_edge < -0.25):
-                    severity = min(0.75, max(0.25, abs(mid_avg24) * 0.25))
-                    nudge = round(severity, 2)
-                elif high_n >= 6 and high_avg24 < -1.0 and mid_n < 4:
-                    nudge = 0.35
-                elif mid_n >= 4 and mid_avg24 >= 0.45 and mid_avg_mfe >= 3.0 and (mid_pumps - mid_traded) >= 2:
+                # Если рынок даёт пампы (MFE >= 2.5%), но мы их пропускаем (missed_pumps >= 2) — СНИЖАЕМ порог!
+                if missed_pumps >= 2 and avg_mfe >= 2.4:
                     nudge = -0.20
-                elif high_n >= 5 and high_avg24 >= 1.0 and high_avg_mfe >= 3.5 and (high_pumps - high_traded) >= 2 and mid_avg24 >= -0.2:
-                    nudge = -0.15
+                elif avg_mfe < 1.3 and avg_mae > 2.2:
+                    nudge = 0.15
 
             prev_nudge = float(self.tuning.get(f"nudge_{mode}", 0.0))
             smoothed_nudge = round(0.5 * prev_nudge + 0.5 * nudge, 2)
-            self.tuning[f"nudge_{mode}"] = max(-0.30, min(0.75, smoothed_nudge))
+            # Никогда не задираем порог выше +0.20, чтобы не ослеплять сканер на дне!
+            self.tuning[f"nudge_{mode}"] = max(-0.25, min(0.20, smoothed_nudge))
 
         total_pumps = 0
         sum_pull_pump = 0.0
@@ -433,20 +434,13 @@ class Shadow:
                 sum_pull_pump += a.get("sum_pull_pump", 0.0)
                 sum_mae_pump += a.get("sum_mae_pump", 0.0)
 
-        if total_pumps >= 5:
+        if total_pumps >= 4:
             avg_pull = sum_pull_pump / total_pumps
             avg_mae = sum_mae_pump / total_pumps
-
-            # Запрещаем hunt сжиматься до -0.18% (чтобы не покупать верхушки свечей!)
-            # На рынке сдувающихся пампов (is_fade_market) ждём более глубокий откат (-0.38%..-0.50%) и берём TP1 чуть ближе
-            if is_fade_market:
-                self.tuning["hunt"] = round(max(-0.0050, min(-0.0036, avg_pull / 100 * 0.42)), 4)
-                self.tuning["tp_mult"] = 0.92
-            else:
-                self.tuning["hunt"] = round(max(-0.0045, min(-0.0030, avg_pull / 100 * 0.35)), 4)
-                self.tuning["tp_mult"] = 1.0
-
-            self.tuning["sl_mult"] = round(max(0.95, min(1.15, 1.0 + abs(avg_mae) / 100 * 0.15)), 2)
+            # Плотное взятие отката (-0.22% .. -0.36%), чтобы ордера (как на PENGU и INJ) не оставались неисполненными!
+            self.tuning["hunt"] = round(max(-0.0036, min(-0.0022, avg_pull / 100 * 0.32)), 4)
+            self.tuning["tp_mult"] = 1.0
+            self.tuning["sl_mult"] = round(max(0.95, min(1.12, 1.0 + abs(avg_mae) / 100 * 0.12)), 2)
 
         self._apply_weight_lift()
         self._calibrate_signal_windows()
@@ -517,10 +511,10 @@ class Shadow:
         self.save()
 
     def learn_lines(self):
-        out = ["👁 <b>Теневой журнал и ДНК монет</b> · (4ч/24ч)"]
+        out = ["👁 <b>Теневой журнал волн (4ч) и ДНК монет</b>"]
         out.append(
             f"   автотюн: {'🟢 вкл' if self.tuning['auto'] else '🔴 выкл'} · "
-            f"эпизодов: {len(self.episodes)} · ДНК профилей: <b>{len(self.coin_dna)}</b>"
+            f"в наблюдении: {len(self.episodes)} · ДНК профилей: <b>{len(self.coin_dna)}</b>"
         )
         shown = False
         reg_emoji = {"bull": "🟢", "neutral": "🟡", "bear": "🔴"}
@@ -528,7 +522,7 @@ class Shadow:
         active_agg = self._combined_agg()
         for key in sorted(active_agg):
             a = active_agg[key]
-            if a["n"] < 3:
+            if a["n"] < 2:
                 continue
 
             parts = key.split("|")
@@ -537,7 +531,7 @@ class Shadow:
             else:
                 continue
 
-            avg = a["sum24"] / a["n"]
+            avg = a["sum4"] / a["n"]
             avg_mfe = a.get("sum_mfe", 0.0) / a["n"]
             em = reg_emoji.get(reg, "⚪")
             mode_icon = "🚀" if mode == "rocket" else "🧲" if mode == "reversal" else "🏹"
@@ -550,9 +544,14 @@ class Shadow:
             shown = True
 
         if not shown:
-            out.append("   (накапливается)")
+            out.append("   (накапливается статистика 4ч-волн)")
 
-        # Выводим персональный рейтинг доверия к монетам (Coin Trust)
+        if self.missed_bans:
+            top_missed = sorted(self.missed_bans.items(), key=lambda kv: kv[1].get("count", 0), reverse=True)[:3]
+            m_str = ", ".join(f"{k}: {v['count']}x (пик +{v['avg_mfe']:.1f}%)" for k, v in top_missed if v.get("count", 0) > 0)
+            if m_str:
+                out.append(f"   🔭 Упущенные под 1H-баном: {m_str}")
+
         if getattr(learner, "coin_stats", None):
             trusted, penalized = [], []
             for sym, _ in learner.coin_stats.items():
@@ -560,7 +559,7 @@ class Shadow:
                 base_s = sym[:-4] if sym.endswith("USDT") else sym
                 if b >= 0.20:
                     trusted.append((b, f"{base_s} ({b:+.2f})"))
-                elif b <= -0.45:
+                elif b <= -0.25:
                     penalized.append((b, f"{base_s} ({b:+.2f})"))
             trusted.sort(reverse=True)
             penalized.sort()
@@ -582,11 +581,12 @@ class Shadow:
     def reset(self):
         self.episodes = {}
         self.agg = {}
+        self.missed_bans = {}
         self.cooldown = {}
         self.tuning = {
             "auto": True,
             "nudge_rocket": 0.0, "nudge_sniper": 0.0, "nudge_reversal": 0.0,
-            "hunt": -0.0035, "near": -0.0020, "capture": +0.002,
+            "hunt": -0.0030, "near": -0.0018, "capture": +0.002,
             "sl_mult": 1.0, "tp_mult": 1.0,
             "signal_windows": {"rsi_hi": 90, "chg_hi": 30, "vol_lo": 1.3},
         }
