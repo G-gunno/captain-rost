@@ -14,22 +14,22 @@ TIER_SL_FLOOR = {
 TIER_TP_FLOOR = {
     "TOP20": 0.011,
     "MID":   0.013,
-    "SMALL": 0.014,
-    "MICRO": 0.016,
+    "SMALL": 0.015,
+    "MICRO": 0.017,
 }
 
 TIER_MAX_SL = {
     "TOP20": 2.0,
     "MID":   2.2,
-    "SMALL": 2.3,
+    "SMALL": 2.4,
     "MICRO": 2.5,
 }
 
 TIER_TRAIL_CONFIG = {
-    "TOP20": {"runner_dist": 0.011, "lock_trigger_pct": 1.65, "lock_dist": 0.005},
-    "MID":   {"runner_dist": 0.013, "lock_trigger_pct": 1.85, "lock_dist": 0.006},
-    "SMALL": {"runner_dist": 0.015, "lock_trigger_pct": 2.05, "lock_dist": 0.007},
-    "MICRO": {"runner_dist": 0.018, "lock_trigger_pct": 2.25, "lock_dist": 0.008},
+    "TOP20": {"runner_dist": 0.013, "lock_trigger_pct": 1.85, "lock_dist": 0.005},
+    "MID":   {"runner_dist": 0.015, "lock_trigger_pct": 2.10, "lock_dist": 0.006},
+    "SMALL": {"runner_dist": 0.018, "lock_trigger_pct": 2.35, "lock_dist": 0.007},
+    "MICRO": {"runner_dist": 0.020, "lock_trigger_pct": 2.60, "lock_dist": 0.008},
 }
 
 TRADE_POLICIES = {
@@ -37,32 +37,32 @@ TRADE_POLICIES = {
         "max_portfolio_risk_pct": 8.0,
         "risk_per_trade_core": 1.25,
         "risk_per_trade_alt": 1.00,
-        "min_rr_sniper": 0.90,
-        "min_rr_alt": 0.82,
+        "min_rr_sniper": 0.88,
+        "min_rr_alt": 0.80,
         "require_grade_a_for_alt": False,
     },
     "CAUTIOUS": {
         "max_portfolio_risk_pct": 10.0,
         "risk_per_trade_core": 1.50,
         "risk_per_trade_alt": 1.20,
-        "min_rr_sniper": 0.90,
-        "min_rr_alt": 0.82,
+        "min_rr_sniper": 0.88,
+        "min_rr_alt": 0.80,
         "require_grade_a_for_alt": False,
     },
     "NORMAL": {
         "max_portfolio_risk_pct": 12.0,
         "risk_per_trade_core": 1.75,
         "risk_per_trade_alt": 1.45,
-        "min_rr_sniper": 0.88,
-        "min_rr_alt": 0.80,
+        "min_rr_sniper": 0.86,
+        "min_rr_alt": 0.78,
         "require_grade_a_for_alt": False,
     },
     "AGGRESSIVE": {
         "max_portfolio_risk_pct": 16.0,
         "risk_per_trade_core": 2.10,
         "risk_per_trade_alt": 1.75,
-        "min_rr_sniper": 0.86,
-        "min_rr_alt": 0.80,
+        "min_rr_sniper": 0.85,
+        "min_rr_alt": 0.78,
         "require_grade_a_for_alt": False,
     },
 }
@@ -98,13 +98,11 @@ def evaluate_setup_grade(cand: dict) -> str:
     gate_1h = cand.get("gate_1h", "")
     sym = cand.get("symbol", "")
 
-    if entry_mode == "reversal" and pos_in_48h > 0.32:
-        return "B"
-    if entry_mode == "sniper" and pos_in_48h > 0.55 and "breakout" not in cand.get("patterns", []):
+    if entry_mode == "reversal" and pos_in_48h > 0.35:
         return "B"
     if sector == "Other" and tier == "MICRO":
         return "B"
-    if sym and learner.coin_bias(sym) < -0.30:
+    if sym and learner.coin_bias(sym) < -0.35:
         return "B"
 
     patterns = cand.get("patterns", [])
@@ -114,18 +112,18 @@ def evaluate_setup_grade(cand: dict) -> str:
     r_val = sv.get("rsi", 50.0)
     sup_touches = cand.get("sup_touches", 0)
 
-    is_dip_turn = (gate_1h == "1H_DIP_BOUNCE" and pos_in_48h <= 0.30)
-    has_strong_slab_setup = (sup_touches >= 3 and pos_in_48h <= 0.35 and (vol_ratio >= 1.25 or r_val <= 42.0))
+    is_prime_1h = gate_1h in ("1H_DIP_BOUNCE", "1H_EMA21_RECLAIM", "1H_SUPER_TREND")
+    has_strong_slab_setup = (sup_touches >= 2 and pos_in_48h <= 0.40 and (vol_ratio >= 1.20 or r_val <= 45.0))
 
-    if not strong_pats and not is_dip_turn and not has_strong_slab_setup:
+    if not strong_pats and not is_prime_1h and not has_strong_slab_setup:
         return "B"
 
-    confluence = 2 if (strong_pats or is_dip_turn) else 1
+    confluence = 2 if (strong_pats or is_prime_1h) else 1
     if strong_pats and sup_touches >= 2:
         confluence += 1
-    if gate_1h == "1H_DIP_BOUNCE" or (gate_1h in ("1H_TREND_OK", "1H_SUPER_TREND") and pos_in_48h <= 0.50):
+    if is_prime_1h or (gate_1h == "1H_TREND_OK" and pos_in_48h <= 0.65):
         confluence += 1
-    if vol_ratio >= 1.25 or r_val <= 38:
+    if vol_ratio >= 1.25 or r_val <= 40:
         confluence += 1
     if tier in ("TOP20", "MID") or corr < 0.45:
         confluence += 1
@@ -165,29 +163,28 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     wave_mult = dna.get("wave_mult", 1.0)
 
     sl_floor_pct = TIER_SL_FLOOR.get(tier, 0.015)
-    tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.014)
-    base_max_sl = TIER_MAX_SL.get(tier, 2.3)
+    tp_floor_pct = TIER_TP_FLOOR.get(tier, 0.015)
+    base_max_sl = TIER_MAX_SL.get(tier, 2.4)
     max_sl_allowed = round(base_max_sl * (1.12 if wave_mult > 1.1 else 1.0), 2)
 
     sl_tuning = shadow.sl_mult()
     tp_tuning = shadow.tp_mult()
 
-    base_mult = 0.85 if is_mom else (1.20 if entry_mode == "reversal" else 1.15)
+    base_mult = 0.90 if is_mom else (1.25 if entry_mode == "reversal" else 1.18)
     raw_atr_sl_pct = (base_mult * a * sl_tuning / entry) * 100.0 if entry > 0 else 0.0
 
-    if raw_atr_sl_pct > max_sl_allowed * 1.30:
+    if raw_atr_sl_pct > max_sl_allowed * 1.35:
         return None, None, False, f"Аномальная волатильность ATR (SL {raw_atr_sl_pct:.2f}% > {max_sl_allowed}%)"
 
-    # ЗАЩИТА ОТ ПОКУПКИ В ПОТОЛОК ПАДАЮЩЕЙ 1H EMA21 (ФИКС ETH, SUI, WLD, HYPE, INJ, ARX):
-    # В 1H даунтренде (e21_1h < e50_1h) падающая 1H EMA21 — это жёсткое сопротивление сверху!
-    if e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry:
+    # Если цена находится ПОД падающей 1H EMA21 в даунтренде (e21_1h < e50_1h), не покупаем в упор к ней (< 1.25%)
+    if e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry * 1.001:
         dist_to_e21_1h_pct = (e21_1h - entry) / entry * 100.0
-        if dist_to_e21_1h_pct < 1.25:
-            return None, None, False, f"В упор к падающей 1H EMA21 ({dist_to_e21_1h_pct:.2f}% < 1.25%)"
+        if dist_to_e21_1h_pct < 1.20:
+            return None, None, False, f"В упор снизу к 1H EMA21 ({dist_to_e21_1h_pct:.2f}% < 1.20%)"
 
     sl_dist = 0.0
     if sup and sup_touches >= 2 and sup < entry and (entry - sup) <= 1.8 * a:
-        struct_sl = _round_px(sup * 0.9965)
+        struct_sl = _round_px(sup * 0.9960)
         candidate_dist = max(entry - struct_sl, entry * sl_floor_pct)
         if (candidate_dist / entry) * 100 <= max_sl_allowed:
             sl_dist = candidate_dist
@@ -199,7 +196,7 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
         sl = _round_px(entry - sl_dist)
 
     if recent_low_6 and recent_low_6 > 0 and recent_low_6 < entry:
-        wick_safe_sl = _round_px(recent_low_6 * 0.9965)
+        wick_safe_sl = _round_px(recent_low_6 * 0.9960)
         if wick_safe_sl < sl:
             wick_dist_pct = (entry - wick_safe_sl) / entry * 100
             if wick_dist_pct <= max_sl_allowed:
@@ -210,25 +207,24 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
         return None, None, False, "Недопустимая дистанция SL"
 
     if min_rr is None:
-        min_rr = 0.88 if entry_mode == "sniper" else 0.80
+        min_rr = 0.86 if entry_mode == "sniper" else 0.78
 
-    tp_atr_mult = 1.22 if entry_mode == "reversal" else (1.45 if is_mom else 1.28)
-    rr_target = 1.00 if entry_mode == "reversal" else max(1.02, min_rr + 0.04)
+    tp_atr_mult = 1.30 if entry_mode == "reversal" else (1.55 if is_mom else 1.35)
+    rr_target = 1.00 if entry_mode == "reversal" else max(1.04, min_rr + 0.05)
     tp_dist_raw = max(tp_atr_mult * a * tp_tuning, sl_dist * rr_target, entry * tp_floor_pct)
 
     if not is_mom:
-        max_tp1_cap = max(entry * (0.021 * wave_mult), sl_dist * max(1.00, min_rr + 0.02))
+        max_tp1_cap = max(entry * (0.024 * wave_mult), sl_dist * max(1.05, min_rr + 0.05))
         tp_dist_raw = min(tp_dist_raw, max_tp1_cap)
 
     tp = _round_px(entry + tp_dist_raw)
 
-    # При откупе со дна в 1H даунтренде (e21_1h < e50_1h) ставим TP1 ПЕРЕД падающей 1H EMA21,
-    # чтобы фиксировать профит на касании 1H EMA21 (как на зелёных свечах 05:00 по ETH, SUI, WLD, HYPE)!
-    if e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry * 1.0125:
-        cap_e21 = _round_px(e21_1h * 0.9965)
+    # Если покупаем со дна ПОД 1H EMA21, ставим TP1 перед 1H EMA21, чтобы гарантированно забрать отскок к средней!
+    if e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry * 1.0120:
+        cap_e21 = _round_px(e21_1h * 0.9970)
         if cap_e21 < tp:
             tp = cap_e21
-            min_rr = min(min_rr, max(0.72, (tp - entry) / sl_dist))
+            min_rr = min(min_rr, max(0.70, (tp - entry) / sl_dist))
 
     if res and res > entry and res_touches >= 6:
         res_dist_pct = (res - entry) / entry * 100
@@ -255,7 +251,7 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
 
 def calc_runner_target(symbol: str, current_price: float, candles_15m: list, candles_1h: list = None, pos: dict = None) -> tuple:
     if not candles_15m or len(candles_15m) < 25:
-        return _round_px(current_price * 1.010), True, "step_init"
+        return _round_px(current_price * 1.012), True, "step_init"
 
     dna = shadow.get_coin_dna(symbol)
     wave_mult = dna.get("wave_mult", 1.0)
@@ -272,38 +268,44 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
     tp1_ref = float(pos.get("tp1_price") or pos.get("initial_tp") or current_price)
     max_p = max(float(pos.get("max_price", current_price)), current_price)
 
-    pierce_atr_mult = 1.20 if wave_class == "long_wave" else (0.78 if wave_class == "short_wave" else 0.95)
-    pierce_step = max(a15 * pierce_atr_mult * wave_mult, current_price * 0.0075)
-    pierce_step = min(pierce_step, current_price * 0.0160)
+    pierce_atr_mult = 1.35 if wave_class == "long_wave" else (0.85 if wave_class == "short_wave" else 1.10)
+    pierce_step = max(a15 * pierce_atr_mult * wave_mult, current_price * 0.0085)
+    pierce_step = min(pierce_step, current_price * 0.0180)
 
     pullback_from_peak = max_p - current_price
     e21_falling = len(e21_series) >= 4 and e21 < e21_series[-3] * 0.9995
 
-    if old_tp > current_price and current_price < e21 * 0.999 and pullback_from_peak >= 0.65 * a15 and e21_falling:
+    if old_tp > current_price and current_price < e21 * 0.9985 and pullback_from_peak >= 0.80 * a15 and e21_falling:
         lowered_tp = max(
-            tp1_ref * 1.0045,
-            current_price + max(0.75 * a15, current_price * 0.0065),
-            e21 + 0.85 * a15
+            tp1_ref * 1.0055,
+            current_price + max(0.85 * a15, current_price * 0.0075),
+            e21 + 0.95 * a15
         )
         if lowered_tp < old_tp * 0.9980:
             return _round_px(lowered_tp), True, "step_down_for_pierce"
 
     ideal_pierce_tp = max(
         current_price + pierce_step,
-        e21 + (1.50 * wave_mult) * a15
+        e21 + (1.60 * wave_mult) * a15
     )
 
     if old_tp <= current_price:
         return _round_px(ideal_pierce_tp), True, "step_up_pierce"
 
     if (old_tp - current_price) <= 0.35 * a15 and r15 >= 55 and current_price >= e21:
-        stepped_up = max(old_tp * 1.0045, current_price + pierce_step * 0.85)
+        stepped_up = max(old_tp * 1.0055, current_price + pierce_step * 0.90)
         return _round_px(stepped_up), True, "step_up_wave"
 
     return _round_px(old_tp), False, "step_hold"
 
 
 def update_position_sl(pos: dict, max_p: float, last_price: float = None, candles_15m: list = None) -> tuple:
+    """
+    Ступенчатый трейлинг с защитой от раннего удушения раннера (фикс GLMR, DATA, INJ):
+    - После взятия TP1 стоп остатка позиции ставится в безубыток (breakeven) или под 15m EMA50,
+      позволяя монете спокойно протестировать 15m EMA21 сверху и пойти во 2-ю и 3-ю волну пампа!
+    - Плотный поджим под 15m EMA21 включается только тогда, когда раннер уже ушёл на +1.2% выше TP1 или в зоне кульминации RSI >= 77.
+    """
     avg_p = pos.get("avg", 0.0)
     if avg_p <= 0:
         return False, pos.get("sl"), pos.get("sl_state", "SHIELD"), ""
@@ -351,40 +353,39 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
     if pos.get("tp1_done"):
         tp1_ref = float(pos.get("tp1_price") or pos.get("initial_tp") or 0.0)
         tp1_pct = ((tp1_ref - avg_p) / avg_p * 100.0) if tp1_ref > avg_p else tp_target_pct
-        tp1_age = now_ts - int(pos.get("tp1_time", now_ts))
 
-        runner_floor = _round_px(max(breakeven, avg_p * 1.0035))
+        # Базовый пол после TP1 — чистый безубыток, чтобы ретест 15m EMA21 не выбивал раннер (фикс GLMR 08:05 и DATA 18:00)!
+        runner_floor = _round_px(max(breakeven, avg_p * 1.0025))
 
-        if peak_profit_pct >= tp1_pct + 0.35:
-            mid_lock = _round_px(avg_p + (tp1_ref - avg_p) * 0.62) if tp1_ref > avg_p else _round_px(avg_p * 1.0075)
+        if peak_profit_pct >= tp1_pct + 0.85:
+            mid_lock = _round_px(avg_p + (tp1_ref - avg_p) * 0.55) if tp1_ref > avg_p else _round_px(avg_p * 1.0080)
             runner_floor = max(runner_floor, mid_lock)
 
-        if tp1_ref > 0 and ((a15 > 0 and max_p >= tp1_ref + 0.65 * a15) or peak_profit_pct >= tp1_pct + 0.65):
+        if tp1_ref > 0 and peak_profit_pct >= tp1_pct + 1.35:
             runner_floor = max(runner_floor, _round_px(tp1_ref * 1.0010))
 
         wave_step_sl = 0.0
         if a15 > 0 and e21 > 0 and e50 > 0:
             if is_climax:
-                candle_anchor = (closed_low - 0.12 * a15) if closed_low > 0 else (last_p - 0.50 * a15)
-                wave_step_sl = max(e21, candle_anchor, last_p * 0.992)
-            elif tp1_age < 900 and wave_class == "long_wave" and peak_profit_pct < tp1_pct + 0.9:
-                wave_step_sl = min(e50 - 0.35 * a15, last_p - 0.85 * a15)
+                candle_anchor = (closed_low - 0.15 * a15) if closed_low > 0 else (last_p - 0.55 * a15)
+                wave_step_sl = max(e21, candle_anchor, last_p * 0.991)
+            elif peak_profit_pct < tp1_pct + 1.20:
+                # Пока раннер не ушёл на +1.2% выше TP1 — держим стоп под 15m EMA50 (даём волне дышать!)
+                wave_step_sl = min(e50 - 0.40 * a15, last_p - 1.15 * a15)
             else:
-                anchor = (0.35 * e50 + 0.65 * e21) if wave_class == "long_wave" else e21
-                wave_step_sl = anchor - 0.32 * a15
-                if prev_closed_low > wave_step_sl and last_p > prev_closed_low * 1.003:
-                    wave_step_sl = prev_closed_low - 0.15 * a15
+                anchor = (0.45 * e50 + 0.55 * e21) if wave_class == "long_wave" else e21
+                wave_step_sl = anchor - 0.45 * a15
 
-        dist_mult = 1.00 if wave_class == "long_wave" else (0.72 if wave_class == "short_wave" else 0.85)
-        if peak_profit_pct >= tp1_pct + 1.0:
-            dist_mult *= 0.78
+        dist_mult = 1.15 if wave_class == "long_wave" else (0.80 if wave_class == "short_wave" else 0.95)
+        if peak_profit_pct >= tp1_pct + 1.5:
+            dist_mult *= 0.80
         runner_trail = _round_px(max_p * (1.0 - cfg["runner_dist"] * dist_mult))
 
         raw_candidate = _round_px(max(breakeven, runner_floor, runner_trail, wave_step_sl))
-        if raw_candidate >= last_p * 0.9945:
-            raw_candidate = _round_px(last_p * 0.9935)
+        if raw_candidate >= last_p * 0.9930:
+            raw_candidate = _round_px(last_p * 0.9920)
 
-        if raw_candidate > new_sl * 1.0008 and last_p > raw_candidate * 1.0020:
+        if raw_candidate > new_sl * 1.0008 and last_p > raw_candidate * 1.0025:
             new_sl = raw_candidate
 
         if tp1_ref > 0 and new_sl >= tp1_ref * 0.9995:
@@ -394,14 +395,14 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
         else:
             new_state = "BREAKEVEN"
     else:
-        shield_step_trigger = max(0.68, tp_target_pct * 0.55)
+        shield_step_trigger = max(0.75, tp_target_pct * 0.60)
         if curr_profit_pct >= shield_step_trigger and a15 > 0 and e50 > 0:
-            step_shield = _round_px(min(avg_p * 0.9980, max(e50 - 0.45 * a15, prev_closed_low - 0.25 * a15)))
+            step_shield = _round_px(min(avg_p * 0.9975, max(e50 - 0.50 * a15, prev_closed_low - 0.30 * a15)))
             if step_shield > new_sl * 1.0015 and last_p > step_shield * 1.004:
                 new_sl = step_shield
                 new_state = "SHIELD"
 
-        be_trigger = max(0.85, tp_target_pct * 0.68)
+        be_trigger = max(0.95, tp_target_pct * 0.72)
         if curr_profit_pct >= be_trigger and breakeven > new_sl and last_p > breakeven * 1.0035:
             new_sl = breakeven
             new_state = "BREAKEVEN"
