@@ -176,11 +176,12 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
     if raw_atr_sl_pct > max_sl_allowed * 1.35:
         return None, None, False, f"Аномальная волатильность ATR (SL {raw_atr_sl_pct:.2f}% > {max_sl_allowed}%)"
 
-    # Если цена находится ПОД падающей 1H EMA21 в даунтренде (e21_1h < e50_1h), не покупаем в упор к ней (< 1.25%)
-    if e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry * 1.001:
+    # Если цена находится ПОД 1H EMA21 в даунтренде (но НЕ на ретесте сверху 1H_EMA21_RECLAIM, где dist <= 0.45%),
+    # блокируем покупку в потолок (зазор 0.45% .. 1.15%)
+    if e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry * 1.0045:
         dist_to_e21_1h_pct = (e21_1h - entry) / entry * 100.0
-        if dist_to_e21_1h_pct < 1.20:
-            return None, None, False, f"В упор снизу к 1H EMA21 ({dist_to_e21_1h_pct:.2f}% < 1.20%)"
+        if dist_to_e21_1h_pct < 1.15:
+            return None, None, False, f"В упор снизу к 1H EMA21 ({dist_to_e21_1h_pct:.2f}% < 1.15%)"
 
     sl_dist = 0.0
     if sup and sup_touches >= 2 and sup < entry and (entry - sup) <= 1.8 * a:
@@ -219,12 +220,14 @@ def calc_initial_sl_tp(symbol: str, entry: float, tier: str, a: float,
 
     tp = _round_px(entry + tp_dist_raw)
 
-    # Если покупаем со дна ПОД 1H EMA21, ставим TP1 перед 1H EMA21, чтобы гарантированно забрать отскок к средней!
-    if e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry * 1.0120:
-        cap_e21 = _round_px(e21_1h * 0.9970)
+    # При откупе со дна под 1H EMA21 ставим TP1 перед 1H EMA21, но не ниже допустимого RR (0.76), чтобы не отклонять валидные сделки!
+    if e21_1h and e50_1h and e21_1h < e50_1h and e21_1h > entry * 1.0125:
+        cap_e21 = _round_px(e21_1h * 0.9975)
         if cap_e21 < tp:
-            tp = cap_e21
-            min_rr = min(min_rr, max(0.70, (tp - entry) / sl_dist))
+            wall_rr_e21 = (cap_e21 - entry) / sl_dist if sl_dist > 0 else 0.0
+            if wall_rr_e21 >= 0.68:
+                tp = cap_e21
+                min_rr = min(min_rr, wall_rr_e21)
 
     if res and res > entry and res_touches >= 6:
         res_dist_pct = (res - entry) / entry * 100
@@ -300,12 +303,6 @@ def calc_runner_target(symbol: str, current_price: float, candles_15m: list, can
 
 
 def update_position_sl(pos: dict, max_p: float, last_price: float = None, candles_15m: list = None) -> tuple:
-    """
-    Ступенчатый трейлинг с защитой от раннего удушения раннера (фикс GLMR, DATA, INJ):
-    - После взятия TP1 стоп остатка позиции ставится в безубыток (breakeven) или под 15m EMA50,
-      позволяя монете спокойно протестировать 15m EMA21 сверху и пойти во 2-ю и 3-ю волну пампа!
-    - Плотный поджим под 15m EMA21 включается только тогда, когда раннер уже ушёл на +1.2% выше TP1 или в зоне кульминации RSI >= 77.
-    """
     avg_p = pos.get("avg", 0.0)
     if avg_p <= 0:
         return False, pos.get("sl"), pos.get("sl_state", "SHIELD"), ""
@@ -354,7 +351,6 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
         tp1_ref = float(pos.get("tp1_price") or pos.get("initial_tp") or 0.0)
         tp1_pct = ((tp1_ref - avg_p) / avg_p * 100.0) if tp1_ref > avg_p else tp_target_pct
 
-        # Базовый пол после TP1 — чистый безубыток, чтобы ретест 15m EMA21 не выбивал раннер (фикс GLMR 08:05 и DATA 18:00)!
         runner_floor = _round_px(max(breakeven, avg_p * 1.0025))
 
         if peak_profit_pct >= tp1_pct + 0.85:
@@ -370,7 +366,6 @@ def update_position_sl(pos: dict, max_p: float, last_price: float = None, candle
                 candle_anchor = (closed_low - 0.15 * a15) if closed_low > 0 else (last_p - 0.55 * a15)
                 wave_step_sl = max(e21, candle_anchor, last_p * 0.991)
             elif peak_profit_pct < tp1_pct + 1.20:
-                # Пока раннер не ушёл на +1.2% выше TP1 — держим стоп под 15m EMA50 (даём волне дышать!)
                 wave_step_sl = min(e50 - 0.40 * a15, last_p - 1.15 * a15)
             else:
                 anchor = (0.45 * e50 + 0.55 * e21) if wave_class == "long_wave" else e21
